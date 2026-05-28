@@ -9,6 +9,7 @@
 // interface; logic codes against the interface without touching the DOM.
 // ────────────────────────────────────────────────────────────────────────────
 
+import type { CaptionPosition } from "./advanced";
 import type { HistoryTurn, TranslationTier } from "./types";
 
 /** Drives the `data-state` attribute on `.ec-root` (legacy values). */
@@ -49,8 +50,13 @@ export interface OverlayCallbacks {
  * NO Shadow DOM; toast built via DOM APIs, never innerHTML).
  */
 export interface OverlayView {
-  /** Build + mount the overlay DOM and bind its controls to `callbacks`. */
-  buildOverlay(callbacks: OverlayCallbacks): void;
+  /** Build + mount the overlay DOM and bind its controls to `callbacks`.
+   *  Optional `captionPosition` seeds the layout from the Advanced preset when
+   *  nothing is persisted in localStorage[LAYOUT_KEY] (the user's drag wins). */
+  buildOverlay(
+    callbacks: OverlayCallbacks,
+    captionPosition?: CaptionPosition | null,
+  ): void;
   /** Remove the overlay DOM (nulls internal root — ordering is load-bearing). */
   removeOverlay(): void;
   setOverlayState(state: OverlayState): void;
@@ -74,6 +80,11 @@ export interface OverlayView {
   /** Sync the target-language `<select>` value to `lang` (legacy
    *  applySettingsLive / post-handover langSelect.value sync). */
   setLanguageSelection(lang: string): void;
+  /** Apply a caption-position preset live (Advanced setting hot-swap). Updates
+   *  the in-memory Layout.left/top to the preset's percentage targets, snaps via
+   *  clampLayout + applyLayout. Does NOT write LAYOUT_KEY — the user's
+   *  subsequent drag still persists and wins on the next session. */
+  setCaptionPosition(pos: CaptionPosition): void;
   /** Is the overlay currently mounted? (legacy `root != null`). */
   isMounted(): boolean;
 }

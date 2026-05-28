@@ -13,6 +13,12 @@ import { StandardChunkedPipeline } from "@/content/pipelines/standard-chunked";
 import type { OverlayView } from "@/shared/ports";
 import type { StartSettings } from "@/shared/types";
 import { DEFAULT_SETTINGS } from "@/shared/types";
+import {
+  DEFAULT_ADVANCED,
+  LATENCY_CHUNK_MS,
+  STYLE_PROMPTS,
+  type AdvancedSettings,
+} from "@/shared/advanced";
 
 function noopOverlay(): OverlayView {
   return {
@@ -23,6 +29,7 @@ function noopOverlay(): OverlayView {
     setTargetText: vi.fn(),
     setSourceText: vi.fn(),
     setLanguageSelection: vi.fn(),
+    setCaptionPosition: vi.fn(),
     applySourceVisibility: vi.fn(),
     pushHistoryTurn: vi.fn(),
     pushHistoryMarker: vi.fn(),
@@ -32,11 +39,33 @@ function noopOverlay(): OverlayView {
   };
 }
 
-/** A minimal AudioContext stub for the chunk's decode + scheduling path. */
-function fakeAudioCtx(): AudioContext {
+/** Build a fake decoded AudioBuffer with the given per-sample value (constant
+ *  Float32 across the buffer). Used to inject silence vs speech-level RMS. */
+function fakeDecodedBuffer(
+  numSamples: number,
+  value: number,
+  sampleRate = 16000,
+): AudioBuffer {
+  const data = new Float32Array(numSamples);
+  data.fill(value);
+  return {
+    sampleRate,
+    numberOfChannels: 1,
+    length: numSamples,
+    duration: numSamples / sampleRate,
+    getChannelData: (_ch: number): Float32Array => data,
+  } as unknown as AudioBuffer;
+}
+
+/** A minimal AudioContext stub for the chunk's decode + scheduling path.
+ *  decodeAudioData returns a non-silent buffer by default so the noise gate
+ *  (when enabled) passes through. */
+function fakeAudioCtx(
+  decoded: AudioBuffer = fakeDecodedBuffer(16000, 0.5),
+): AudioContext {
   return {
     currentTime: 0,
-    decodeAudioData: vi.fn(async () => ({ duration: 1.0 }) as AudioBuffer),
+    decodeAudioData: vi.fn(async () => decoded),
     createBufferSource: vi.fn(() => ({
       buffer: null,
       connect: vi.fn(),
@@ -45,7 +74,10 @@ function fakeAudioCtx(): AudioContext {
   } as unknown as AudioContext;
 }
 
-function makeSession(sm: SessionManager): StandardSession {
+function makeSession(
+  sm: SessionManager,
+  audioCtx: AudioContext = fakeAudioCtx(),
+): StandardSession {
   const s: StandardSession = {
     token: sm.nextToken(),
     type: "standard",
@@ -53,7 +85,7 @@ function makeSession(sm: SessionManager): StandardSession {
     dc: null,
     stream: null,
     remoteAudio: null,
-    audioCtx: fakeAudioCtx(),
+    audioCtx,
     outputGain: { } as GainNode,
     kymaSessionId: null,
     kymaKey: "test-bearer",
@@ -95,8 +127,15 @@ function buildApp(sm: SessionManager): {
   return { app, pipeline };
 }
 
-function settings(): StartSettings {
-  return { ...DEFAULT_SETTINGS, apiBase: "https://api.test/v1" } as StartSettings;
+function settings(
+  advanced?: Partial<AdvancedSettings>,
+): StartSettings {
+  const adv: AdvancedSettings = { ...DEFAULT_ADVANCED, ...(advanced ?? {}) };
+  return {
+    ...DEFAULT_SETTINGS,
+    apiBase: "https://api.test/v1",
+    advanced: adv,
+  } as StartSettings;
 }
 
 describe("processStandardChunk — guard after every await + happy path", () => {
@@ -214,5 +253,191 @@ describe("processStandardChunk — guard after every await + happy path", () => 
 
     await pipeline.processStandardChunk(s, fakeBlob());
     expect(app.pushHistoryTurn).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Advanced settings — style prefix, latency window, noise gate ───────────
+
+describe("Advanced — translationStyle prepends the prompt prefix", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string) => {
+        const url = String(_url);
+        if (url.endsWith("/audio/understand")) {
+          return new Response(JSON.stringify({ answer: "xin chào" }), {
+            status: 200,
+          });
+        }
+        return new Response(new ArrayBuffer(16), { status: 200 });
+      }),
+    );
+  });
+
+  async function captureUnderstandQuestion(
+    style: "literal" | "natural" | "casual",
+  ): Promise<string> {
+    const sm = new SessionManager();
+    sm.apiBase = "https://api.test/v1";
+    sm.settings = settings({ translationStyle: style, noiseGate: false });
+    const s = makeSession(sm);
+    const { pipeline } = buildApp(sm);
+    await pipeline.processStandardChunk(s, fakeBlob());
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const call = fetchMock.mock.calls.find((c) =>
+      String(c[0]).endsWith("/audio/understand"),
+    );
+    expect(call).toBeDefined();
+    const init = call![1] as RequestInit;
+    const fd = init.body as FormData;
+    return String(fd.get("question") ?? "");
+  }
+
+  it("'literal' style prefixes the literal STYLE_PROMPT", async () => {
+    const q = await captureUnderstandQuestion("literal");
+    expect(q.startsWith(STYLE_PROMPTS.literal)).toBe(true);
+  });
+
+  it("'natural' style prefixes the natural STYLE_PROMPT", async () => {
+    const q = await captureUnderstandQuestion("natural");
+    expect(q.startsWith(STYLE_PROMPTS.natural)).toBe(true);
+  });
+
+  it("'casual' style prefixes the casual STYLE_PROMPT", async () => {
+    const q = await captureUnderstandQuestion("casual");
+    expect(q.startsWith(STYLE_PROMPTS.casual)).toBe(true);
+  });
+});
+
+describe("Advanced — latencyPreset drives the duration_sec form field", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string) => {
+        const url = String(_url);
+        if (url.endsWith("/audio/understand")) {
+          return new Response(JSON.stringify({ answer: "xin chào" }), {
+            status: 200,
+          });
+        }
+        return new Response(new ArrayBuffer(16), { status: 200 });
+      }),
+    );
+  });
+
+  async function captureDurationSec(
+    preset: "snappy" | "smooth",
+  ): Promise<number> {
+    const sm = new SessionManager();
+    sm.apiBase = "https://api.test/v1";
+    sm.settings = settings({ latencyPreset: preset, noiseGate: false });
+    const s = makeSession(sm);
+    const { pipeline } = buildApp(sm);
+    await pipeline.processStandardChunk(s, fakeBlob());
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const call = fetchMock.mock.calls.find((c) =>
+      String(c[0]).endsWith("/audio/understand"),
+    );
+    expect(call).toBeDefined();
+    const init = call![1] as RequestInit;
+    const fd = init.body as FormData;
+    return Number(fd.get("duration_sec"));
+  }
+
+  it("'snappy' → 3 seconds (LATENCY_CHUNK_MS.snappy / 1000)", async () => {
+    expect(await captureDurationSec("snappy")).toBe(
+      LATENCY_CHUNK_MS.snappy / 1000,
+    );
+  });
+
+  it("'smooth' → 5 seconds (LATENCY_CHUNK_MS.smooth / 1000)", async () => {
+    expect(await captureDurationSec("smooth")).toBe(
+      LATENCY_CHUNK_MS.smooth / 1000,
+    );
+  });
+});
+
+describe("Advanced — RMS noise gate drops near-silent chunks", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string) => {
+        const url = String(_url);
+        if (url.endsWith("/audio/understand")) {
+          return new Response(JSON.stringify({ answer: "xin chào" }), {
+            status: 200,
+          });
+        }
+        return new Response(new ArrayBuffer(16), { status: 200 });
+      }),
+    );
+  });
+
+  it("noiseGate=true + silent decoded buffer → SHORT-CIRCUIT (no fetch)", async () => {
+    const sm = new SessionManager();
+    sm.apiBase = "https://api.test/v1";
+    sm.settings = settings({ noiseGate: true });
+    // Inject digital silence — RMS = -Infinity, well below NOISE_GATE_DBFS.
+    const silentCtx = fakeAudioCtx(fakeDecodedBuffer(16000, 0));
+    const s = makeSession(sm, silentCtx);
+    const { app, pipeline } = buildApp(sm);
+
+    await pipeline.processStandardChunk(s, fakeBlob());
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const understandCalled = fetchMock.mock.calls.some((c) =>
+      String(c[0]).endsWith("/audio/understand"),
+    );
+    expect(understandCalled).toBe(false);
+    expect(app.pushHistoryTurn).not.toHaveBeenCalled();
+  });
+
+  it("noiseGate=true + speech-level decoded buffer → fetch fires", async () => {
+    const sm = new SessionManager();
+    sm.apiBase = "https://api.test/v1";
+    sm.settings = settings({ noiseGate: true });
+    // 0.5 amplitude constant ≈ -6 dBFS RMS — well above the -45 floor.
+    const loudCtx = fakeAudioCtx(fakeDecodedBuffer(16000, 0.5));
+    const s = makeSession(sm, loudCtx);
+    const { pipeline } = buildApp(sm);
+
+    await pipeline.processStandardChunk(s, fakeBlob());
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const understandCalled = fetchMock.mock.calls.some((c) =>
+      String(c[0]).endsWith("/audio/understand"),
+    );
+    expect(understandCalled).toBe(true);
+  });
+
+  it("noiseGate=false + silent decoded buffer → fetch still fires (gate bypassed)", async () => {
+    const sm = new SessionManager();
+    sm.apiBase = "https://api.test/v1";
+    sm.settings = settings({ noiseGate: false });
+    const silentCtx = fakeAudioCtx(fakeDecodedBuffer(16000, 0));
+    const s = makeSession(sm, silentCtx);
+    const { pipeline } = buildApp(sm);
+
+    await pipeline.processStandardChunk(s, fakeBlob());
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const understandCalled = fetchMock.mock.calls.some((c) =>
+      String(c[0]).endsWith("/audio/understand"),
+    );
+    expect(understandCalled).toBe(true);
+  });
+
+  it("sub-200B blob is skipped regardless of noiseGate (recorder sanity floor)", async () => {
+    const sm = new SessionManager();
+    sm.apiBase = "https://api.test/v1";
+    sm.settings = settings({ noiseGate: false });
+    const s = makeSession(sm);
+    const { pipeline } = buildApp(sm);
+    await pipeline.processStandardChunk(s, fakeBlob(150));
+    expect(
+      (fetch as unknown as ReturnType<typeof vi.fn>),
+    ).not.toHaveBeenCalled();
   });
 });

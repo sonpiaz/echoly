@@ -20,13 +20,31 @@ export const ECHOLY_VERSION = "0.6.3";
 export const CONTENT_GLOBAL_KEY = "__echolyContentVersion";
 
 // ───── API bases (legacy/content.js, legacy/background.js) ─────
+// Echoly origins are BUILD-TIME configurable so a local dev build points at
+// localhost without editing source. Set WXT_ECHOLY_API_ORIGIN +
+// WXT_ECHOLY_WEB_ORIGIN in extension/.env to override (see .env.example).
+// Defaults = prod URLs so a `wxt zip` for the store ships with the right
+// values. Kyma + OpenAI URLs are not overridable (they ARE the provider URLs).
 export const KYMA_BASE = "https://api.kymaapi.com/v1";
 export const KYMA_DIRECT_BASE = "https://api.kymaapi.com/v1";
-export const ECHOLY_PROXY_BASE = "https://api.echolyhq.com/v1/proxy";
 export const OPENAI_CALLS_URL =
   "https://api.openai.com/v1/realtime/translations/calls";
-export const ECHOLY_API_ORIGIN = "https://api.echolyhq.com";
-export const ECHOLY_WEB_ORIGIN = "https://echolyhq.com";
+
+// Dot notation (NOT bracket) so Vite does the static-replace at build time.
+// Falls back to prod URLs when the env var is undefined (store-ready by default).
+export const ECHOLY_API_ORIGIN =
+  import.meta.env.WXT_ECHOLY_API_ORIGIN ?? "https://api.echolyhq.com";
+export const ECHOLY_WEB_ORIGIN =
+  import.meta.env.WXT_ECHOLY_WEB_ORIGIN ?? "https://echolyhq.com";
+
+// Echoly server unified API base. Used when apiMode === "proxy" (signed-in)
+// for /v1/rtc/translate, /v1/translate/chunk, /v1/chat. The legacy /v1/proxy
+// path remains on the SERVER as a compat shim for 0.6.x extension versions; the
+// rebuilt extension targets /v1 directly. (Plan §2, Wave 3.)
+export const ECHOLY_PROXY_BASE = `${ECHOLY_API_ORIGIN}/v1`;
+
+/** Public guest-mode policy endpoint (no auth, admin-editable on the server). */
+export const ECHOLY_GUEST_CONFIG_URL = `${ECHOLY_API_ORIGIN}/v1/config/guest`;
 export const EC_SESSION_COOKIE = "ec_session";
 
 // ───── Session / timing tunables (legacy/content.js) ─────

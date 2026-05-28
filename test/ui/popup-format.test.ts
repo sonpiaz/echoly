@@ -5,12 +5,50 @@ import {
   allowRealtime,
   capsForTier,
   fillPercent,
+  fmtElapsed,
   fmtMin,
   keyBadge,
   meterLevel,
   nextResetLabel,
+  shade,
   tierBadge,
 } from "@/lib/popup-format";
+
+describe("shade", () => {
+  it("darkens with a negative percent", () => {
+    // -18 % of 255 ≈ 45.9 → channel subtracts ~46 then int-truncates.
+    expect(shade("#7B5BFF", -18)).toBe("rgb(77, 45, 209)");
+    expect(shade("#FF6FB1", -18)).toBe("rgb(209, 65, 131)");
+  });
+  it("clamps to [0, 255]", () => {
+    expect(shade("#000000", -50)).toBe("rgb(0, 0, 0)");
+    expect(shade("#FFFFFF", 50)).toBe("rgb(255, 255, 255)");
+  });
+  it("tolerates inputs without the '#'", () => {
+    expect(shade("8B5BFF", 0)).toBe("rgb(139, 91, 255)");
+  });
+});
+
+describe("fmtElapsed", () => {
+  it("formats minutes and seconds with zero-padding", () => {
+    expect(fmtElapsed(0)).toBe("00:00");
+    expect(fmtElapsed(9)).toBe("00:09");
+    expect(fmtElapsed(60)).toBe("01:00");
+    expect(fmtElapsed(3599)).toBe("59:59");
+  });
+  it("switches to h:mm:ss past one hour", () => {
+    expect(fmtElapsed(3600)).toBe("1:00:00");
+    expect(fmtElapsed(3661)).toBe("1:01:01");
+    expect(fmtElapsed(36000)).toBe("10:00:00");
+  });
+  it("collapses negative / NaN inputs to 00:00", () => {
+    expect(fmtElapsed(-5)).toBe("00:00");
+    expect(fmtElapsed(NaN)).toBe("00:00");
+  });
+  it("floors fractional seconds", () => {
+    expect(fmtElapsed(9.9)).toBe("00:09");
+  });
+});
 
 describe("fmtMin", () => {
   it("rounds and groups with en-US locale", () => {

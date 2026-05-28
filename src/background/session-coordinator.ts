@@ -16,9 +16,17 @@ import { CONTENT_SCRIPT_PATH, CONTENT_CSS_PATH } from "@/shared/constants";
 import { relayToContent } from "@/shared/protocol";
 import type { Ack, StateResult } from "@/shared/protocol";
 import type { Settings, StartSettings } from "@/shared/types";
+import {
+  effectiveAdvanced,
+  normalizeDomain,
+  sanitizePatch,
+  type AdvancedPatch,
+} from "@/shared/advanced";
 import { resolveApiMode } from "@/lib/api-mode";
 import type { Store } from "./store";
 import type { EcholyAuth } from "./auth";
+import type { SettingsClient } from "./settings-client";
+import { SettingsHttpError } from "./settings-client";
 
 function isYouTubeUrl(url: string | undefined): url is string {
   return typeof url === "string" && /^https?:\/\/[^/]*youtube\.com\//.test(url);
@@ -33,7 +41,64 @@ export class SessionCoordinator {
   constructor(
     private readonly store: Store,
     private readonly auth: EcholyAuth,
+    private readonly settingsClient?: SettingsClient,
   ) {}
+
+  /** Extract a normalized hostname from a tab URL. Returns null on chrome://,
+   *  malformed URLs, or hosts that don't pass normalizeDomain. */
+  private domainFromTab(tab: chrome.tabs.Tab): string | null {
+    if (!tab.url) return null;
+    try {
+      return normalizeDomain(new URL(tab.url).hostname);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Apply a server bundle (success) OR mark dirty (failure) after a PUT/DELETE.
+   *  Centralized so every advanced mutator shares the same fault-tolerance
+   *  policy. Always re-persists local state. */
+  private async syncOrDirty(
+    op: () => Promise<{
+      settings: import("@/shared/advanced").AdvancedSettings;
+      siteOverrides: import("@/shared/advanced").SiteOverrideMap;
+      version: number;
+    }>,
+  ): Promise<void> {
+    try {
+      const bundle = await op();
+      this.store.applyServerBundle(bundle);
+    } catch (err) {
+      // 409 conflict: server returns the CURRENT bundle in the error body —
+      // adopt it (the user's local edit is dropped in favour of the server's
+      // authoritative state). Other errors set the dirty flag for retry.
+      if (err instanceof SettingsHttpError && err.status === 409) {
+        const body = err.body as
+          | {
+              settings?: import("@/shared/advanced").AdvancedSettings;
+              siteOverrides?: import("@/shared/advanced").SiteOverrideMap;
+              version?: number;
+            }
+          | null;
+        if (
+          body?.settings &&
+          typeof body.version === "number" &&
+          body.siteOverrides
+        ) {
+          this.store.applyServerBundle({
+            settings: body.settings,
+            siteOverrides: body.siteOverrides,
+            version: body.version,
+          });
+        } else {
+          this.store.setAdvancedDirty(true);
+        }
+      } else {
+        this.store.setAdvancedDirty(true);
+      }
+    }
+    await this.store.persistAdvanced();
+  }
 
   /** Resolve the active+currentWindow tab and assert it's a YouTube page
    *  (legacy activeYouTubeTab 218-223). Throws on no tab / non-YT. */
@@ -101,6 +166,11 @@ export class SessionCoordinator {
       return { ok: false, error: errMessage(err) };
     }
     this.store.setTabId(tab.id ?? null);
+    // Resolve and stash the active domain so per-site overrides apply on this
+    // session and downstream code (auto-start matcher, popup site-default UI)
+    // sees the authoritative host. Falls back to null on chrome:// / parse fail.
+    const domain = this.domainFromTab(tab);
+    this.store.setCurrentDomain(domain);
     this.store.setConnecting(true);
     this.store.setError("");
     this.store.setStatus("Connecting");
@@ -110,10 +180,20 @@ export class SessionCoordinator {
       const tabId = tab.id;
       if (tabId == null) throw new Error("No active tab to relay to.");
       await this.ensureContentScript(tabId);
+      // Compute the effective Advanced settings for this domain (global merged
+      // with the per-site override, if any). Mutate the snapshot's `advanced`
+      // so content sees the resolved values directly — no override re-merge
+      // logic needs to live in content.
+      const snapshot = this.store.snapshot();
+      snapshot.advanced = effectiveAdvanced(
+        snapshot.advanced,
+        snapshot.siteOverrides,
+        snapshot.currentDomain,
+      );
       // Full snapshot + apiBase + kymaKey overridden with the resolved bearer.
       // content stays mode-agnostic — same fetch shape, different URL + bearer.
       const startSettings: StartSettings = {
-        ...this.store.snapshot(),
+        ...snapshot,
         apiBase: mode.apiBase,
         kymaKey: mode.apiKey,
       };
@@ -127,6 +207,7 @@ export class SessionCoordinator {
       }
       this.store.setConnecting(false);
       this.store.setRunning(true);
+      this.store.setSessionStartedAt(Date.now());
       this.store.setStatus("Translating");
       this.store.broadcast();
       return { ok: true, state: this.store.snapshot() };
@@ -148,6 +229,8 @@ export class SessionCoordinator {
     this.store.setRunning(false);
     this.store.setConnecting(false);
     this.store.setPaused(false);
+    this.store.setSessionStartedAt(null);
+    this.store.setCurrentDomain(null);
     this.store.setStatus("Stopped");
     this.store.broadcast();
     if (tabId != null) {
@@ -231,5 +314,122 @@ export class SessionCoordinator {
       }
     }
     return { ok: true };
+  }
+
+  // ── Advanced settings (server-authoritative, per-user) ─────────────────────
+  // Each mutator follows the same pattern:
+  //   1. apply the change locally (in-memory + persist to chrome.storage),
+  //   2. broadcast so the popup sees the optimistic update,
+  //   3. attempt the server PUT/DELETE; on success adopt the server bundle,
+  //      on failure (network/5xx) set the dirty flag for retry.
+  // The local edit is never lost — even offline the popup looks responsive.
+
+  /** Merge an AdvancedPatch into global state. Server-PUTs the patch under
+   *  optimistic concurrency. */
+  async updateAdvancedSettings(patch: AdvancedPatch): Promise<StateResult> {
+    const safe = sanitizePatch(patch);
+    this.store.mergeAdvanced(safe);
+    await this.store.persistAdvanced();
+    this.store.broadcast();
+    if (this.settingsClient) {
+      const version = this.store.state.advancedVersion;
+      await this.syncOrDirty(() =>
+        this.settingsClient!.putGlobal(safe, version),
+      );
+      this.store.broadcast();
+    } else {
+      this.store.setAdvancedDirty(true);
+      await this.store.persistAdvanced();
+    }
+    return { ok: true, state: this.store.snapshot() };
+  }
+
+  /** Update a per-site override. Server-PUTs to /me/settings/sites/:domain. */
+  async updateSiteOverride(
+    domain: string,
+    patch: AdvancedPatch,
+  ): Promise<StateResult> {
+    const norm = normalizeDomain(domain);
+    if (!norm) return { ok: false, error: "Invalid domain." };
+    const safe = sanitizePatch(patch);
+    this.store.setSiteOverride(norm, safe);
+    await this.store.persistAdvanced();
+    this.store.broadcast();
+    if (this.settingsClient) {
+      const version = this.store.state.advancedVersion;
+      await this.syncOrDirty(() =>
+        this.settingsClient!.putSiteOverride(norm, safe, version),
+      );
+      this.store.broadcast();
+    } else {
+      this.store.setAdvancedDirty(true);
+      await this.store.persistAdvanced();
+    }
+    return { ok: true, state: this.store.snapshot() };
+  }
+
+  /** Remove a per-site override entirely (the domain reverts to global). */
+  async removeSiteOverride(domain: string): Promise<StateResult> {
+    const norm = normalizeDomain(domain);
+    if (!norm) return { ok: false, error: "Invalid domain." };
+    this.store.removeSiteOverride(norm);
+    await this.store.persistAdvanced();
+    this.store.broadcast();
+    if (this.settingsClient) {
+      await this.syncOrDirty(() =>
+        this.settingsClient!.removeSiteOverride(norm),
+      );
+      this.store.broadcast();
+    } else {
+      this.store.setAdvancedDirty(true);
+      await this.store.persistAdvanced();
+    }
+    return { ok: true, state: this.store.snapshot() };
+  }
+
+  /** "Save as default for this site" — snapshot the FULL current Advanced
+   *  values into siteOverrides[domain]. The override is a partial in shape,
+   *  but stores every field so the site is fully pinned to the current setup
+   *  (not just the most-recent diff). */
+  async saveSiteDefault(domain: string): Promise<StateResult> {
+    const norm = normalizeDomain(domain);
+    if (!norm) return { ok: false, error: "Invalid domain." };
+    const fullSnapshot: AdvancedPatch = { ...this.store.state.advanced };
+    this.store.setSiteOverride(norm, fullSnapshot);
+    await this.store.persistAdvanced();
+    this.store.broadcast();
+    if (this.settingsClient) {
+      const version = this.store.state.advancedVersion;
+      await this.syncOrDirty(() =>
+        this.settingsClient!.putSiteOverride(norm, fullSnapshot, version),
+      );
+      this.store.broadcast();
+    } else {
+      this.store.setAdvancedDirty(true);
+      await this.store.persistAdvanced();
+    }
+    return { ok: true, state: this.store.snapshot() };
+  }
+
+  /** Force a GET /me/settings and replace local state with the server's bundle.
+   *  Idempotent — useful when the popup re-opens and wants to be sure it has
+   *  the freshest values (e.g. after the user edited from another device). */
+  async refreshSettings(): Promise<StateResult> {
+    if (!this.settingsClient) {
+      return { ok: true, state: this.store.snapshot() };
+    }
+    try {
+      const bundle = await this.settingsClient.fetchBundle();
+      if (bundle) {
+        this.store.applyServerBundle(bundle);
+        await this.store.persistAdvanced();
+      }
+    } catch (err) {
+      // Network/5xx: keep current state; surface error message on state.
+      const msg = errMessage(err);
+      this.store.setError(msg);
+    }
+    this.store.broadcast();
+    return { ok: true, state: this.store.snapshot() };
   }
 }

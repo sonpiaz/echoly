@@ -6,129 +6,448 @@
 <title>Echoly</title>
 <link rel="stylesheet" href="./style.css" />
 </head>
-<body data-state="idle">
+<body data-state="idle" data-account="welcome">
 
-<main class="shell">
+<!-- Glass gradient bed + noise — direct body children so they stay below the
+     shell stacking layer. -->
+<div class="bg" aria-hidden="true"></div>
+<div class="noise" aria-hidden="true"></div>
+
+<!-- ===== WELCOME SCREEN (first ever open — body[data-account="welcome"]) ===== -->
+<main class="shell shell--welcome welcome-only">
+  <header class="welcome-topline">
+    <div class="brand brand--compact">
+      <img class="mark" src="icons/icon-48.png" width="26" height="26" alt="" />
+      <h1>echoly</h1>
+    </div>
+    <span class="version">v0.6.3</span>
+  </header>
+
+  <div class="welcome-hero">
+    <div class="welcome-hero-icon" aria-hidden="true">
+      <img src="icons/icon-128.png" width="36" height="36" alt="" />
+    </div>
+    <h2 class="welcome-title">Real-time voice<br>translation for any video</h2>
+    <p class="welcome-tag">Clone the speaker's voice into your language while they keep talking. &lt;1s latency.</p>
+  </div>
+
+  <div class="welcome-cta">
+    <button class="action" id="welcomeSigninBtn" data-ec-signin>
+      Sign in
+      <svg class="ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 2.5h6.5V9M11.5 2.5L5.5 8.5M5.5 4.5H2.5v7h7v-3"/>
+      </svg>
+    </button>
+    <p class="signin-hint">
+      <svg class="ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+        <circle cx="7" cy="7" r="5.5"/>
+        <path d="M1.5 7h11M7 1.5c2 1.6 2 9.4 0 11M7 1.5c-2 1.6-2 9.4 0 11"/>
+      </svg>
+      <span>Opens <b>echoly.app</b> in your browser</span>
+    </p>
+  </div>
+
+  <div class="welcome-trust">
+    <span class="trust-icon" aria-hidden="true">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round">
+        <path d="M7 1L2 2.7v4.3c0 3 1.9 5.4 5 6 3.1-.6 5-3 5-6V2.7L7 1z"/>
+      </svg>
+    </span>
+    <div>
+      Audio is processed only while you're translating.<br>
+      <span class="trust-muted">No recordings stored. <a href="https://echolyhq.com/privacy" target="_blank">Privacy</a> · <a href="https://echolyhq.com/terms" target="_blank">Terms</a></span>
+    </div>
+  </div>
+</main>
+
+<!-- ===== MAIN POPUP (locked OR signed-in — body[data-account="locked"|"in"]) ===== -->
+<main class="shell shell--main main-only">
 
   <header class="topline">
     <div class="brand">
-      <span class="mark aurora-mark" aria-hidden="true">
-        <span style="color:#fff;font-weight:700;font-size:14px;line-height:1">e</span>
-      </span>
-      <div>
+      <img class="mark" src="icons/icon-48.png" width="30" height="30" alt="" />
+      <div class="brand-text">
         <h1>echoly</h1>
+        <span class="brand-sub">Live translation</span>
       </div>
     </div>
-    <span id="tier-badge" class="tier-badge" data-tier="free">Free</span>
+    <div class="header-actions">
+      <!-- Locked state: "Sign in →" pill on the right -->
+      <button type="button" class="signin-pill locked-only" id="lockedSigninBtn" data-ec-signin>
+        Sign in
+        <svg class="ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+          <circle cx="7" cy="7" r="5.5"/>
+          <path d="M1.5 7h11M7 1.5c2 1.6 2 9.4 0 11M7 1.5c-2 1.6-2 9.4 0 11"/>
+        </svg>
+      </button>
+
+      <!-- Signed-in: PlanBadge + Avatar -->
+      <span id="plan-badge" class="plan-badge signedin-only" data-plan="free">
+        <svg class="plan-badge-spark" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M6 1L7 5L11 6L7 7L6 11L5 7L1 6L5 5L6 1Z" fill="currentColor"/>
+        </svg>
+        <span class="plan-badge-text" id="plan-badge-text">FREE</span>
+      </span>
+      <button type="button" id="account-trigger" class="account-avatar signedin-only" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu" aria-label="Account">
+        <span id="account-avatar-initial">D</span>
+      </button>
+    </div>
   </header>
 
-  <!-- Account card — sign-in CTA / signed-in identity + usage meter / BYOK badge.
-       popup.js flips data-state based on auth + Kyma key. -->
-  <section id="account-band" class="account-band" data-state="loading">
-    <!-- Signed-out state -->
-    <div class="account-out">
-      <span class="account-msg">Sign in to use a subscription, or paste a Kyma key for BYOK.</span>
-      <a href="https://echolyhq.com/signin" target="_blank" class="account-link">Sign in →</a>
+  <!-- ===== Locked state CTA card ===== -->
+  <section class="locked-cta locked-only">
+    <div class="locked-cta-head">
+      <div class="locked-cta-icon" aria-hidden="true">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
+          <path d="M7 1L2 2.7v4.3c0 3 1.9 5.4 5 6 3.1-.6 5-3 5-6V2.7L7 1z"/>
+        </svg>
+      </div>
+      <div class="locked-cta-text">
+        <div class="locked-cta-title">Sign in to start translating</div>
+        <div class="locked-cta-sub">Echoly needs an account to stream your translation tokens. Your settings below are saved locally.</div>
+      </div>
     </div>
+    <button class="action" id="lockedCtaSigninBtn" data-ec-signin>
+      Sign in
+      <svg class="ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 2.5h6.5V9M11.5 2.5L5.5 8.5M5.5 4.5H2.5v7h7v-3"/>
+      </svg>
+    </button>
+    <p class="signin-hint">
+      <svg class="ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+        <circle cx="7" cy="7" r="5.5"/>
+        <path d="M1.5 7h11M7 1.5c2 1.6 2 9.4 0 11M7 1.5c-2 1.6-2 9.4 0 11"/>
+      </svg>
+      <span>Opens <b>echoly.app</b> in your browser</span>
+    </p>
+  </section>
 
-    <!-- Signed-in state -->
-    <div class="account-in">
-      <div class="account-id-row">
-        <div class="account-id">
-          <span class="account-email" id="acct-email"></span>
-          <span class="account-tier" id="acct-tier"></span>
+  <!-- Your settings · locked label (locked state only) -->
+  <div class="your-settings-head locked-only">
+    <span>Your settings</span>
+    <span class="your-settings-locked">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+        <path d="M7 1L2 2.7v4.3c0 3 1.9 5.4 5 6 3.1-.6 5-3 5-6V2.7L7 1z"/>
+      </svg>
+      locked
+    </span>
+  </div>
+
+  <!-- Settings group — interactive when signed-in, dimmed/locked when not -->
+  <div class="settings-group">
+
+    <!-- Session card -->
+    <section class="session-card idle-only">
+      <!-- Translating row -->
+      <div class="session-row session-row--trans">
+        <span class="label">Translating</span>
+        <div class="trans-grid">
+          <div class="lang-side">
+            <span class="flag-chip flag-chip--auto" id="src-flag">??</span>
+            <span class="lang-name" id="src-name">Auto-detect</span>
+            <span class="lang-auto-badge">auto</span>
+          </div>
+          <div class="trans-divider"></div>
+          <svg class="swap-ico" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M2 4h6L6.5 2.5M10 8H4l1.5 1.5" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="trans-divider"></div>
+          <div class="lang-side lang-side--right" id="lang-trigger">
+            <span class="lang-name" id="tgt-name">Vietnamese</span>
+            <span class="flag-chip flag-chip--tgt" id="tgt-flag">VI</span>
+            <svg class="lang-chev" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <select id="lang" class="dropdown-mirror-select" aria-label="Target language"></select>
+          </div>
         </div>
-        <button type="button" id="signOutBtn" class="account-link-btn">Sign out</button>
       </div>
-      <!-- Usage meter — std + optional realtime. Hidden until populated. -->
-      <div class="usage-block" id="usage-std" hidden>
-        <div class="usage-row">
-          <span class="usage-label" id="usage-std-label">Standard</span>
-          <span class="usage-numbers"><span id="usage-std-used">0</span><span class="muted"> / <span id="usage-std-cap">0</span> min</span></span>
+      <div class="divider"></div>
+
+      <!-- Tier row -->
+      <div class="session-row session-row--select" data-row="tier" id="tier-trigger">
+        <div class="row-text">
+          <span class="label">Tier</span>
+          <div class="row-value">
+            <span class="row-icon row-icon--tier" aria-hidden="true">
+              <svg viewBox="0 0 12 12"><path d="M6.5 1L3 7h2.5L5 11l3.5-6H6L6.5 1z" fill="currentColor"/></svg>
+            </span>
+            <span class="row-primary" id="tier-primary">Realtime</span>
+            <span class="row-secondary" id="tier-secondary">· &lt;1s · clones speaker</span>
+          </div>
         </div>
-        <div class="usage-track"><div class="usage-fill" id="usage-std-fill" style="width:0%"></div></div>
+        <svg class="row-chev" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <select id="tier" class="dropdown-mirror-select" aria-label="Tier">
+          <option value="realtime">Realtime · clones speaker · &lt;1s</option>
+          <option value="standard">Standard · ~5s lag · cheaper</option>
+        </select>
       </div>
-      <div class="usage-block" id="usage-rt" hidden>
-        <div class="usage-row">
-          <span class="usage-label">Realtime</span>
-          <span class="usage-numbers"><span id="usage-rt-used">0</span><span class="muted"> / <span id="usage-rt-cap">0</span> min</span></span>
+      <div class="divider"></div>
+
+      <!-- Voice row -->
+      <div class="session-row session-row--select" data-row="voice" id="voice-trigger">
+        <div class="row-text">
+          <span class="label">Voice</span>
+          <div class="row-value">
+            <span class="voice-avatar" id="voice-avatar" aria-hidden="true">M</span>
+            <span class="row-primary" id="voice-primary">Marin</span>
+            <span class="row-secondary" id="voice-secondary">· warm female · US</span>
+          </div>
         </div>
-        <div class="usage-track"><div class="usage-fill" id="usage-rt-fill" style="width:0%"></div></div>
+        <svg class="row-chev" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <select id="voice" class="dropdown-mirror-select" aria-label="Voice"></select>
       </div>
-      <div class="usage-hint" id="usage-hint" hidden></div>
-    </div>
+    </section>
 
-    <!-- BYOK state — Kyma key set, no subscription needed -->
-    <div class="account-byok">
-      <span class="account-msg"><strong>BYOK active</strong> · unlimited at wholesale</span>
-      <a href="https://echolyhq.com/signin" target="_blank" class="account-link">Switch to subscription</a>
-    </div>
-  </section>
-
-  <section class="row">
-    <label for="tier">Tier</label>
-    <select id="tier">
-      <option value="realtime">Realtime · clones speaker · &lt;1s</option>
-      <option value="standard">Standard · ~5s lag · cheaper</option>
-    </select>
-  </section>
-
-  <section class="row">
-    <label for="voice">Voice</label>
-    <select id="voice"></select>
-  </section>
-
-  <section class="row">
-    <label for="lang">Language</label>
-    <select id="lang"></select>
-  </section>
-
-  <section class="secret">
-    <div class="row">
-      <label for="kymaKey">Kyma key <span class="badge" style="font-weight:500;color:var(--label-tertiary);background:transparent;padding:0">— optional, BYOK</span></label>
-      <span id="keyBadge" class="badge">missing</span>
-    </div>
-    <input id="kymaKey" type="password" placeholder="ky-... (leave empty to use subscription)" autocomplete="off" spellcheck="false" />
-  </section>
-
-  <button class="action" id="toggle">Start</button>
-
-  <section class="mix">
-    <div class="mix-row">
-      <label for="originalVolume">Original</label>
-      <input id="originalVolume" type="range" min="0" max="100" value="18" />
-      <output id="originalOut">18</output>
-    </div>
-    <div class="mix-row">
-      <label for="voiceVolume">Voice</label>
-      <input id="voiceVolume" type="range" min="0" max="100" value="100" />
-      <output id="voiceOut">100</output>
-    </div>
-  </section>
-
-  <label class="toggle-row">
-    <span>Show source captions</span>
-    <input id="showSource" type="checkbox" />
-  </label>
-
-  <details class="advanced">
-    <summary>Advanced</summary>
-    <div class="advanced-body">
-      <div>
-        <strong>Plans</strong>: Free 30 min/month, Pro $9/mo (600 min), Max $24.90/mo (3,000 + 120 min realtime). Annual saves Pro 18% / Max 33%. Or paste a Kyma key above for unlimited at wholesale cost.
+    <!-- ===== LIVE compact summary ===== -->
+    <section class="live-summary live-only">
+      <span class="flag-chip flag-chip--src" id="live-src-flag">??</span>
+      <svg class="swap-ico" viewBox="0 0 12 12" aria-hidden="true">
+        <path d="M2 4h6L6.5 2.5M10 8H4l1.5 1.5" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="flag-chip flag-chip--tgt" id="live-target-flag">VI</span>
+      <div class="live-summary-divider"></div>
+      <span class="voice-avatar" id="live-voice-avatar">M</span>
+      <span class="voice-name" id="live-voice-name">Marin</span>
+      <span class="waveform" aria-hidden="true">
+        <i></i><i></i><i></i><i></i><i></i><i></i>
+      </span>
+    </section>
+    <div class="live-note live-only">Captions are showing on the video →</div>
+    <section class="live-stats live-only">
+      <div class="stat-card">
+        <div class="stat-value" id="elapsed">00:00</div>
+        <div class="stat-label">elapsed</div>
       </div>
-      <div>
-        <a href="https://echolyhq.com/#pricing" target="_blank">Subscribe</a> ·
-        <a href="https://echolyhq.com/account" target="_blank">Account</a> ·
-        <a href="https://kymaapi.com/billing" target="_blank">Kyma billing</a> (BYOK)
+      <div class="stat-card">
+        <div class="stat-value" id="latency">—</div>
+        <div class="stat-label">latency</div>
       </div>
-      <div class="hint">
-        Sessions auto-stop at 60 minutes. Press Stop to end early.
+      <div class="stat-card">
+        <div class="stat-value" id="words">—</div>
+        <div class="stat-label">words</div>
+      </div>
+    </section>
+
+    <!-- Start / Stop button — signed-in only (locked: hidden, CTA card replaces it) -->
+    <button class="action signedin-only" id="toggle">
+      <svg class="ico ico-play" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1.5v7l6 -3.5z" fill="currentColor"/></svg>
+      <svg class="ico ico-stop" viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="2" width="6" height="6" fill="currentColor"/></svg>
+      <span class="action-label" id="actionLabel">Start translating</span>
+    </button>
+
+    <!-- Usage hint row (signed-in only, idle only) -->
+    <div class="usage-hint-row signedin-only idle-only" id="usage-hint-row">
+      <span class="usage-hint-left">
+        <svg class="ico" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+          <circle cx="6" cy="6" r="4.5"/>
+          <path d="M6 3.5V6l1.7 1.2" stroke-linecap="round"/>
+        </svg>
+        <span><b id="usage-hint-amount">120 min</b> <span id="usage-hint-label">Realtime left this month</span></span>
+      </span>
+      <span class="usage-hint-right" id="usage-hint-reset">Jun 1</span>
+    </div>
+
+    <!-- Mix panel -->
+    <section class="mix-panel">
+      <div class="mix-row">
+        <label for="originalVolume">Original</label>
+        <input id="originalVolume" type="range" min="0" max="100" value="18" />
+        <output id="originalOut">18</output>
+      </div>
+      <div class="mix-row">
+        <label for="voiceVolume">Voice</label>
+        <input id="voiceVolume" type="range" min="0" max="100" value="100" />
+        <output id="voiceOut">100</output>
+      </div>
+      <label class="toggle-row">
+        <span>Show source captions</span>
+        <input id="showSource" type="checkbox" />
+      </label>
+    </section>
+
+    <!-- Advanced V2 — purpose-grouped settings -->
+    <details class="advanced idle-only">
+      <summary>
+        <svg class="ico" viewBox="0 0 14 14" aria-hidden="true">
+          <path d="M7 4.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z" stroke="currentColor" stroke-width="1.2" fill="none"/>
+          <path d="M7 1v1.6M7 11.4V13M1 7h1.6M11.4 7H13M2.6 2.6l1.1 1.1M10.3 10.3l1.1 1.1M2.6 11.4l1.1-1.1M10.3 3.7l1.1-1.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        <span class="adv-label">Advanced</span>
+        <span class="adv-meta">
+          <span class="adv-count">per site &amp; voice</span>
+          <svg class="adv-chev" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+      </summary>
+
+      <div class="advanced-body">
+
+        <!-- TRANSLATION -->
+        <div class="sub-label">Translation</div>
+        <div class="adv-row">
+          <div class="adv-row-label">Style</div>
+          <div class="segmented" data-count="3" data-setting="translationStyle">
+            <button type="button" data-value="literal">Literal</button>
+            <button type="button" data-value="natural">Natural</button>
+            <button type="button" data-value="casual">Casual</button>
+          </div>
+          <div class="adv-hint">Natural balances accuracy and flow</div>
+        </div>
+        <div class="adv-row">
+          <div class="adv-row-label">Latency</div>
+          <div class="segmented" data-count="2" data-setting="latencyPreset">
+            <button type="button" data-value="snappy">Snappy</button>
+            <button type="button" data-value="smooth">Smooth</button>
+          </div>
+          <div class="adv-hint">snappier = shorter chunks · smoother = fewer corrections</div>
+        </div>
+
+        <!-- ON VIDEO -->
+        <div class="sub-label">On video</div>
+        <div class="adv-row">
+          <div class="adv-row-label">Captions</div>
+          <div class="segmented" data-count="3" data-setting="captionPosition">
+            <button type="button" data-value="top">Top</button>
+            <button type="button" data-value="bottom">Bottom</button>
+            <button type="button" data-value="float">Float</button>
+          </div>
+          <div class="adv-hint">overlay position on the page</div>
+        </div>
+        <div class="adv-row adv-row--inline">
+          <div class="adv-row-stack">
+            <span class="adv-row-label">Auto-start on this site</span>
+            <span class="adv-hint mono" id="autoStartDomain">—</span>
+          </div>
+          <label class="adv-toggle">
+            <input type="checkbox" id="autoStart" />
+          </label>
+        </div>
+
+        <!-- AUDIO ROUTING -->
+        <div class="sub-label">Audio routing</div>
+        <div class="adv-row">
+          <div class="adv-row-label">Output device</div>
+          <select id="outputDevice" class="adv-select" aria-label="Audio output device">
+            <option value="">System default</option>
+          </select>
+          <div class="adv-hint">where the translated voice plays</div>
+        </div>
+        <div class="adv-row">
+          <div class="adv-row-label">Noise gate</div>
+          <div class="segmented" data-count="2" data-setting="noiseGate">
+            <button type="button" data-value="off">Off</button>
+            <button type="button" data-value="on">On</button>
+          </div>
+          <div class="adv-hint">drop near-silence and background music</div>
+        </div>
+
+        <!-- Footer -->
+        <div class="adv-footer">
+          <button type="button" class="adv-footer-link" id="advResetBtn">Reset to defaults</button>
+          <button type="button" class="adv-footer-cta" id="advSaveBtn" disabled>Save for this site</button>
+        </div>
+
+      </div>
+    </details>
+
+  </div>
+  <!-- end .settings-group -->
+
+  <footer class="status-footer">
+    <span class="status-text">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="status">Signed out · settings read-only</span>
+    </span>
+    <span class="dirty-pill" id="advDirtyPill" hidden>Saving locally — will sync when online</span>
+    <span class="version">v0.6.3</span>
+  </footer>
+
+  <!-- ===== Account menu popover (anchored under avatar; hidden until open) ===== -->
+  <div id="account-menu-dim" class="account-menu-dim" hidden aria-hidden="true"></div>
+  <div id="account-menu" class="account-menu" hidden role="menu" aria-labelledby="account-trigger">
+    <div class="account-menu-caret" aria-hidden="true"></div>
+
+    <div class="am-identity">
+      <div class="am-avatar" id="am-avatar">D</div>
+      <div class="am-id-text">
+        <div class="am-email" id="am-email"></div>
+        <div class="am-plan-line">
+          <span class="plan-badge" id="am-plan-badge" data-plan="free">
+            <svg class="plan-badge-spark" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M6 1L7 5L11 6L7 7L6 11L5 7L1 6L5 5L6 1Z" fill="currentColor"/>
+            </svg>
+            <span class="plan-badge-text" id="am-plan-badge-text">FREE</span>
+          </span>
+          <span class="am-days-left" id="am-days-left" hidden></span>
+        </div>
       </div>
     </div>
-  </details>
 
-  <p class="status" id="status">Ready.</p>
+    <div class="am-divider"></div>
+
+    <div class="am-usage">
+      <div class="am-usage-head">
+        <span class="am-eyebrow">This month</span>
+        <span class="am-reset" id="am-reset">resets …</span>
+      </div>
+      <div class="um-block" id="um-std">
+        <div class="um-row">
+          <span class="um-label">Standard</span>
+          <span class="um-numbers"><span id="um-std-used">0</span> / <span id="um-std-cap">3,000</span> min</span>
+        </div>
+        <div class="um-track"><div class="um-fill" id="um-std-fill" style="width:0%"></div></div>
+      </div>
+      <div class="um-block um-block--accent" id="um-rt" hidden>
+        <div class="um-row">
+          <span class="um-label">
+            <svg viewBox="0 0 9 9" fill="currentColor" aria-hidden="true" class="um-bolt">
+              <path d="M4.9 0.5L2.5 5.2h1.9L4 8.5l2.6-4.5H4.6L4.9 0.5z"/>
+            </svg>
+            Realtime
+          </span>
+          <span class="um-numbers"><span id="um-rt-used">0</span> / <span id="um-rt-cap">120</span> min</span>
+        </div>
+        <div class="um-track"><div class="um-fill" id="um-rt-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="am-divider"></div>
+
+    <button type="button" class="am-row" id="am-billing" role="menuitem">
+      <span class="am-row-icon" aria-hidden="true">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.5" y="3" width="11" height="8" rx="1.5"/><path d="M1.5 5.5h11M3.5 9h2" stroke-linecap="round"/></svg>
+      </span>
+      <span class="am-row-label">Manage billing</span>
+    </button>
+    <button type="button" class="am-row" id="am-invoices" role="menuitem">
+      <span class="am-row-icon" aria-hidden="true">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M3 1.5h8v11l-2-1-2 1-2-1-2 1V1.5z"/><path d="M5 4.5h4M5 7h4M5 9.5h2" stroke-linecap="round"/></svg>
+      </span>
+      <span class="am-row-label">Invoices &amp; usage history</span>
+    </button>
+    <button type="button" class="am-row" id="am-help" role="menuitem">
+      <span class="am-row-icon" aria-hidden="true">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="7" cy="7" r="5.5"/><path d="M5.4 5.6c0-1 .8-1.6 1.6-1.6.9 0 1.6.6 1.6 1.4 0 .8-.6 1.1-1.2 1.6-.4.3-.4.7-.4 1" stroke-linecap="round"/><circle cx="7" cy="10" r=".7" fill="currentColor"/></svg>
+      </span>
+      <span class="am-row-label">Help &amp; shortcuts</span>
+      <span class="am-row-trail">?</span>
+    </button>
+
+    <div class="am-divider"></div>
+
+    <button type="button" class="am-row am-row--muted" id="am-signout" role="menuitem">
+      <span class="am-row-icon" aria-hidden="true">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 12H2.5V2H5.5M9 4.5L11.5 7L9 9.5M11 7H5"/></svg>
+      </span>
+      <span class="am-row-label">Sign out</span>
+    </button>
+  </div>
 
 </main>
 

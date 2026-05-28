@@ -75,3 +75,27 @@ export function nextResetLabel(now: Date = new Date()): string {
   );
   return next.toLocaleDateString("en-US", { month: "long", day: "numeric" });
 }
+
+/** Darken a hex color by `pct` percent (negative ⇒ darker). Ported verbatim
+ *  from the design's `echoly-shared.jsx:251`. Used by the popup to render
+ *  per-voice gradient avatars; kept here so the math is goldened in tests
+ *  (regression risk: a future voice swatch addition flips a sign).
+ *  Returns `rgb(r, g, b)` with channels integer-clamped to 0–255. */
+export function shade(hex: string, pct: number): string {
+  const num = parseInt(hex.replace("#", ""), 16);
+  const r = Math.max(0, Math.min(255, (num >> 16) + pct * 2.55));
+  const g = Math.max(0, Math.min(255, ((num >> 8) & 0xff) + pct * 2.55));
+  const b = Math.max(0, Math.min(255, (num & 0xff) + pct * 2.55));
+  return `rgb(${r | 0}, ${g | 0}, ${b | 0})`;
+}
+
+/** Format seconds as `mm:ss` (or `h:mm:ss` over an hour). Used by the popup's
+ *  elapsed counter. Negative and NaN inputs collapse to `00:00`. */
+export function fmtElapsed(seconds: number): string {
+  const s = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
+}

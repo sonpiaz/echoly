@@ -8,7 +8,17 @@
 // The .ec-* classes, data-ec-* hooks, and data-ec-resize values are LOAD-BEARING
 // (CSS targets classes; JS queries data-ec-*; drag/resize keys off data-ec-resize)
 // — reproduce verbatim.
+//
+// Caption-position presets (Advanced setting) are re-exported from the shared
+// contract; the helper here maps a preset → Layout delta. Width/height are
+// preserved (the user's drag size still wins); only left/top change.
 // ────────────────────────────────────────────────────────────────────────────
+
+import {
+  CAPTION_PRESETS as SHARED_CAPTION_PRESETS,
+  type CaptionPosition,
+  type OverlayPreset,
+} from "@/shared/advanced";
 
 /** Persisted overlay layout (localStorage[LAYOUT_KEY]). Verbatim shape from
  *  legacy loadLayout (content.js:139-148). */
@@ -104,4 +114,41 @@ export function isCompact(width: number, height: number): boolean {
 /** is-roomy threshold (width > 760 && height > 235) — legacy content.js:178. */
 export function isRoomy(width: number, height: number): boolean {
   return width > 760 && height > 235;
+}
+
+/** Re-export of the shared CAPTION_PRESETS map so overlay-side code has one
+ *  import path. Source of truth lives in `@/shared/advanced`. */
+export const CAPTION_PRESETS: Record<CaptionPosition, OverlayPreset> =
+  SHARED_CAPTION_PRESETS;
+
+/** Parse a preset percentage string ("50%" / "8%") into a viewport-pixel value.
+ *  Layout.left/top are NUMBERS (pixels) — clampLayout works in pixel space — so
+ *  we resolve the preset's %-string against the current viewport. Falls back to
+ *  the integer parse of the raw value when the string isn't a "%" form. */
+function resolvePreset(value: string, axis: number): number {
+  const trimmed = value.trim();
+  if (trimmed.endsWith("%")) {
+    const pct = parseFloat(trimmed.slice(0, -1));
+    if (Number.isFinite(pct)) return (pct / 100) * axis;
+  }
+  const n = parseFloat(trimmed);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Apply a caption-position preset to a Layout, returning a new Layout. The
+ *  user's width/height (and sideCollapsed) are preserved — only left/top move.
+ *  When viewport dims are unknown (SSR/test edge), falls back to 1024×768 so
+ *  the helper is pure. clampLayout will re-snap on next applyLayout(). */
+export function applyCaptionPositionPreset(
+  layout: Layout,
+  pos: CaptionPosition,
+  innerWidth: number = typeof window !== "undefined" ? window.innerWidth : 1024,
+  innerHeight: number = typeof window !== "undefined" ? window.innerHeight : 768,
+): Layout {
+  const preset = CAPTION_PRESETS[pos];
+  return {
+    ...layout,
+    left: resolvePreset(preset.left, innerWidth),
+    top: resolvePreset(preset.top, innerHeight),
+  };
 }

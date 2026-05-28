@@ -5,6 +5,9 @@
 // applyState). Build agents import these — do NOT redefine.
 // ────────────────────────────────────────────────────────────────────────────
 
+import type { AdvancedSettings, SiteOverrideMap } from "./advanced";
+import { DEFAULT_ADVANCED } from "./advanced";
+
 /** Translation mode chosen by the user (settings.tier). NOT the account tier. */
 export type TranslationTier = "realtime" | "standard";
 
@@ -51,6 +54,32 @@ export interface Usage {
   realtime: number; // used minutes
 }
 
+// ── Guest language policy ────────────────────────────────────────────────────
+// In the GUEST world (apiMode === "byok": user brings their own Kyma key, no
+// Echoly account) the extension limits the languages it offers. The policy is
+// served by the Echoly server at GET /v1/config/guest (public, admin-editable
+// on the server). The extension fetches it, caches it, and falls back to a
+// default (en→vi) on failure. Enforcement is client-side — it's a UX nudge,
+// not a security boundary (the guest spends their own Kyma credit, so no
+// Echoly resource is at risk). See the approved plan §4.
+
+export interface GuestLanguagePolicy {
+  /** ISO codes (e.g. "en", "vi") allowed as the SOURCE language for guests. */
+  allowedSource: string[];
+  /** ISO codes allowed as the TARGET language for guests. */
+  allowedTarget: string[];
+  /** Defaults the extension pre-selects when entering guest mode or when the
+   *  currently-selected language is outside the allowed set. */
+  defaults: { source: string; target: string };
+}
+
+/** Default served when the policy fetch fails or shape-validates as invalid. */
+export const DEFAULT_GUEST_LANGUAGE_POLICY: GuestLanguagePolicy = {
+  allowedSource: ["en"],
+  allowedTarget: ["vi"],
+  defaults: { source: "en", target: "vi" },
+};
+
 /** The canonical session snapshot owned by the background SW (single source of
  *  truth). Popup is a passive renderer of this; content holds no copy. */
 export interface State extends Settings {
@@ -63,6 +92,32 @@ export interface State extends Settings {
   apiMode: ApiMode;
   signedInUser: SignedInUser | null;
   usage: Usage | null;
+  /** Guest language policy (null until the first fetch lands; popup gates on
+   *  this when apiMode === "byok"). */
+  guestPolicy: GuestLanguagePolicy | null;
+  /** Wall-clock millis when the current session went `running=true`. Set by
+   *  the session coordinator on START, cleared on STOP. The popup uses this
+   *  to render an authoritative elapsed counter; without it the counter
+   *  would only know "time since popup opened". */
+  sessionStartedAt: number | null;
+
+  // ── Advanced settings (server-authoritative, per-user) ─────────────────
+  /** Global Advanced settings for the signed-in user. Defaults applied when
+   *  signed-out / first sync hasn't landed. */
+  advanced: AdvancedSettings;
+  /** Per-site overrides: `{ [hostname]: Partial<AdvancedSettings> }`. */
+  siteOverrides: SiteOverrideMap;
+  /** Monotonically-increasing version assigned by the server. 0 ⇒ never
+   *  synced (defaults in use); used as the optimistic-concurrency token on
+   *  PUT. Server returns the new version on success. */
+  advancedVersion: number;
+  /** When a popup edit succeeds locally but the server PUT failed (offline /
+   *  500), this flag persists. SW retries on next boot / sign-in / popup open. */
+  advancedDirty: boolean;
+  /** Hostname of the active translation tab. Set when the SW resolves a
+   *  YouTube tab for START; used for per-site override lookup + auto-start
+   *  matching. null when no active tab. */
+  currentDomain: string | null;
 }
 
 /** Verbatim initial in-memory state (legacy/background.js:170-183). */
@@ -76,6 +131,13 @@ export const INITIAL_STATE: State = {
   apiMode: null,
   signedInUser: null,
   usage: null,
+  guestPolicy: null,
+  sessionStartedAt: null,
+  advanced: { ...DEFAULT_ADVANCED },
+  siteOverrides: {},
+  advancedVersion: 0,
+  advancedDirty: false,
+  currentDomain: null,
   ...DEFAULT_SETTINGS,
 };
 

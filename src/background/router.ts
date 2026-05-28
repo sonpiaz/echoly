@@ -19,11 +19,14 @@ import type {
   ContentToBgMessage,
   PopupToBgMessage,
   YtCcUrlResponse,
+  AudioDeviceList,
 } from "@/shared/protocol";
+import { ECHOLY_WEB_ORIGIN } from "@/shared/constants";
 import type { Store } from "./store";
 import type { EcholyAuth } from "./auth";
 import type { SessionCoordinator } from "./session-coordinator";
 import type { CaptionCache } from "./caption-cache";
+import { setSigninTabId } from "./auth-listener";
 
 export interface RouterDeps {
   store: Store;
@@ -70,9 +73,10 @@ async function handlePopupMessage(
   switch (message.type) {
     case "GET_STATE":
       await store.loadSettings();
-      // Refresh auth opportunistically so the popup renders the signed-in
-      // banner without an extra round trip.
-      await store.refreshAuth();
+      // Refresh auth + the guest language policy opportunistically so the popup
+      // renders the signed-in banner AND can immediately gate the language
+      // picker (in guest/BYOK mode) without an extra round trip.
+      await Promise.all([store.refreshAuth(), store.refreshGuestPolicy()]);
       return { ok: true, state: store.snapshot() };
     case "GET_AUTH":
       await store.refreshAuth();
@@ -82,6 +86,23 @@ async function handlePopupMessage(
       store.clearAuth();
       store.broadcast();
       return { ok: true, state: store.snapshot() };
+    case "OPEN_SIGNIN": {
+      // Background owns the signin tab's lifecycle: open it, store the id, and
+      // the cookie-listener closes it after the magic-link callback succeeds.
+      // Surface chrome.tabs.create errors (do NOT swallow) so the popup can
+      // fall back to instructing the user to open the URL manually.
+      try {
+        const tab = await chrome.tabs.create({
+          url: `${ECHOLY_WEB_ORIGIN}/signin`,
+          active: true,
+        });
+        setSigninTabId(tab.id ?? null);
+        return { ok: true };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        return { ok: false, error };
+      }
+    }
     case "START":
       return session.start(message.settings);
     case "STOP":
@@ -90,10 +111,50 @@ async function handlePopupMessage(
       return session.updateSettings(message.settings);
     case "UPDATE_VOLUME":
       return session.updateVolume(message.originalVolume, message.voiceVolume);
+    case "UPDATE_ADVANCED_SETTINGS":
+      return session.updateAdvancedSettings(message.patch);
+    case "UPDATE_SITE_OVERRIDE":
+      return session.updateSiteOverride(message.domain, message.patch);
+    case "REMOVE_SITE_OVERRIDE":
+      return session.removeSiteOverride(message.domain);
+    case "SAVE_SITE_DEFAULT":
+      return session.saveSiteDefault(message.domain);
+    case "REFRESH_SETTINGS":
+      return session.refreshSettings();
+    case "LIST_AUDIO_OUTPUT_DEVICES":
+      return listAudioOutputDevices();
     default: {
       const unknown = message as { type?: string };
       return { ok: false, error: "Unknown message: " + unknown.type };
     }
+  }
+}
+
+/** Output-device enumeration. The MV3 service-worker context does NOT expose
+ *  navigator.mediaDevices (it's a window-only API). The popup or content
+ *  script must enumerate locally and apply via HTMLMediaElement.setSinkId.
+ *  This handler returns a typed sentinel so the popup knows to fall back —
+ *  it does NOT mock a device list (the SW has no way to know what's plugged
+ *  in). The contract documents this as the architected behaviour, not a
+ *  TODO: enumeration is a presentation concern. */
+async function listAudioOutputDevices(): Promise<AudioDeviceList> {
+  const md: MediaDevices | undefined = (
+    globalThis as { navigator?: { mediaDevices?: MediaDevices } }
+  ).navigator?.mediaDevices;
+  if (!md || typeof md.enumerateDevices !== "function") {
+    return { ok: false, error: "enumerate in popup context" };
+  }
+  try {
+    const devices = await md.enumerateDevices();
+    return {
+      ok: true,
+      devices: devices
+        .filter((d) => d.kind === "audiooutput")
+        .map((d) => ({ deviceId: d.deviceId, label: d.label })),
+    };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    return { ok: false, error };
   }
 }
 

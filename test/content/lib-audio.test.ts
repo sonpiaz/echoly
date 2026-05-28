@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   audioBufferToWavBlob,
   computeGain,
+  computeRmsDbFs,
   downmixAndResample,
   type DecodedAudio,
 } from "@/lib/audio";
@@ -106,5 +107,53 @@ describe("audioBufferToWavBlob (16 kHz mono 16-bit PCM WAV header)", () => {
     expect(view.getInt16(48, true)).toBe(-0x8000);
     // setInt16 truncates toward zero: 0.5 * 0x7FFF = 16383.5 → 16383 (legacy).
     expect(view.getInt16(50, true)).toBe(16383);
+  });
+});
+
+/** Synthesise N samples of a full-amplitude sine wave at `freq` Hz, scaled by
+ *  `amplitude`. Used to verify the dBFS calculation against known references. */
+function sine(
+  amplitude: number,
+  freq: number,
+  sampleRate: number,
+  n: number,
+): Float32Array {
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = amplitude * Math.sin((2 * Math.PI * freq * i) / sampleRate);
+  }
+  return out;
+}
+
+describe("computeRmsDbFs (noise-gate floor)", () => {
+  it("returns -Infinity for an empty buffer", () => {
+    expect(computeRmsDbFs(new Float32Array(0))).toBe(-Infinity);
+  });
+
+  it("returns -Infinity for an all-zero buffer (digital silence)", () => {
+    expect(computeRmsDbFs(new Float32Array(1024))).toBe(-Infinity);
+  });
+
+  it("full-scale sine (amplitude 1.0) is ~-3 dBFS (RMS = 1/√2)", () => {
+    const buf = sine(1.0, 1000, 16000, 16000);
+    const db = computeRmsDbFs(buf);
+    // RMS of a unit-amplitude sine = 1/√2 ≈ 0.7071 → 20*log10(0.7071) ≈ -3.01 dB.
+    expect(db).toBeGreaterThan(-3.5);
+    expect(db).toBeLessThan(-2.5);
+  });
+
+  it("amplitude 0.1 sine is ~-23 dBFS (20 dB drop per ÷10 amplitude)", () => {
+    const buf = sine(0.1, 1000, 16000, 16000);
+    const db = computeRmsDbFs(buf);
+    // 0.1× amplitude = -20 dB from full-scale → ~-23 dBFS RMS.
+    expect(db).toBeGreaterThan(-23.5);
+    expect(db).toBeLessThan(-22.5);
+  });
+
+  it("very quiet content (amplitude 0.001) is well below the -45 dBFS gate", () => {
+    const buf = sine(0.001, 1000, 16000, 16000);
+    const db = computeRmsDbFs(buf);
+    // 0.001× amplitude = -60 dB from full-scale → ~-63 dBFS RMS.
+    expect(db).toBeLessThan(-45);
   });
 });

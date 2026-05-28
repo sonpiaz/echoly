@@ -8,3 +8,10 @@ store-assets/_*
 # WXT build artifacts
 .output/
 .wxt/
+
+# Env overrides — `.env.example` + `.env.development` are committed (no
+# secrets, just localhost URLs); `.env`, `.env.local`, and `.env.*.local`
+# stay per-developer.
+.env
+.env.local
+.env.*.local

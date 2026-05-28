@@ -204,16 +204,23 @@ export class SessionManager {
 
   // ───── Heartbeat + session timer (60-min cap, one-shot 55-min warning) ───
 
-  /** 30s keepalive POST for realtime sessions only (others pass null id). */
+  /** 30s keepalive POST for realtime sessions only (others pass null id).
+   *  Two URL shapes (Wave 3):
+   *    • proxy : POST ${apiBase}/rtc/translate/${sessionId}/heartbeat (Echoly)
+   *    • byok  : POST ${apiBase}/realtime/translations/sessions/${id}/heartbeat (Kyma legacy) */
   startHeartbeat(kymaSessionId: string | null, kymaKey: string): void {
     this.stopHeartbeat();
     if (!kymaSessionId || !kymaKey) return;
+    const isProxy = this.settings?.apiMode === "proxy";
+    const url = isProxy
+      ? `${this.apiBase}/rtc/translate/${kymaSessionId}/heartbeat`
+      : `${this.apiBase}/realtime/translations/sessions/${kymaSessionId}/heartbeat`;
     this.heartbeatTimer = setInterval(() => {
       if (!this.session) return;
-      fetch(
-        `${this.apiBase}/realtime/translations/sessions/${kymaSessionId}/heartbeat`,
-        { method: "POST", headers: { Authorization: "Bearer " + kymaKey } },
-      ).catch(() => {});
+      fetch(url, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + kymaKey },
+      }).catch(() => {});
     }, HEARTBEAT_MS);
   }
 
@@ -253,21 +260,30 @@ export class SessionManager {
   // ───── End Kyma session (release collateral immediately) ─────────────────
 
   /** keepalive POST /end, fire-and-forget. NOT abort-wired (intentional —
-   *  research 02 §4). (legacy endKymaSession.) */
+   *  research 02 §4). Two URL shapes (Wave 3):
+   *    • proxy : POST ${apiBase}/rtc/translate/${id}/end + body {requestId: rt_${id}}
+   *              (the requestId is the exact-once idempotency key the server expects).
+   *    • byok  : POST ${apiBase}/realtime/translations/sessions/${id}/end (Kyma legacy) */
   async endKymaSession(
     kymaSessionId: string | null,
     kymaKey: string,
   ): Promise<void> {
     if (!kymaSessionId || !kymaKey) return;
+    const isProxy = this.settings?.apiMode === "proxy";
+    const url = isProxy
+      ? `${this.apiBase}/rtc/translate/${kymaSessionId}/end`
+      : `${this.apiBase}/realtime/translations/sessions/${kymaSessionId}/end`;
+    const init: RequestInit = {
+      method: "POST",
+      headers: { Authorization: "Bearer " + kymaKey },
+      keepalive: true,
+    };
+    if (isProxy) {
+      (init.headers as Record<string, string>)["Content-Type"] = "application/json";
+      init.body = JSON.stringify({ requestId: `rt_${kymaSessionId}` });
+    }
     try {
-      await fetch(
-        `${this.apiBase}/realtime/translations/sessions/${kymaSessionId}/end`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer " + kymaKey },
-          keepalive: true,
-        },
-      );
+      await fetch(url, init);
     } catch {
       /* fire-and-forget */
     }

@@ -27,6 +27,10 @@ export class AudioCapture {
   private onRateChange: (() => void) | null = null;
   private lastRateToastAt = 0;
 
+  // Advanced.outputDeviceId — last successfully-applied sink id, so a no-op
+  // repeat (popup settings push with no change) doesn't re-invoke setSinkId.
+  private lastAppliedSinkId: string | null = null;
+
   constructor(
     private readonly sm: SessionManager,
     private readonly overlay: OverlayView,
@@ -218,5 +222,45 @@ export class AudioCapture {
       }
     }
     this.onRateChange = null;
+  }
+
+  // ───── Advanced output-device hot-swap (HTMLMediaElement.setSinkId) ────────
+
+  /** Swap the dub output device mid-session. Walks the active session's
+   *  remoteAudio (realtime or standard-with-sinkId path) and re-invokes
+   *  setSinkId. Idempotent: a no-change call short-circuits. Failures log + keep
+   *  the previous sink (silent fallback would surprise the user — they picked
+   *  the device). Empty string `""` is the explicit "system default" sentinel
+   *  per the setSinkId spec. */
+  applyOutputDevice(deviceId: string): void {
+    if (this.lastAppliedSinkId === deviceId) return;
+    const session = this.sm.session;
+    const audio = session?.remoteAudio;
+    if (!audio) {
+      // No audio element to drive (e.g. Standard pipeline without a sink id set
+      // at start — it's connected straight to audioCtx.destination). Remember
+      // the requested id so a future build picks it up on session start.
+      this.lastAppliedSinkId = deviceId;
+      return;
+    }
+    const a = audio as HTMLAudioElement & {
+      setSinkId?: (id: string) => Promise<void>;
+    };
+    if (typeof a.setSinkId !== "function") {
+      console.warn(
+        "[echoly] HTMLAudioElement.setSinkId unavailable; cannot apply output device change live",
+      );
+      return;
+    }
+    a.setSinkId(deviceId)
+      .then(() => {
+        this.lastAppliedSinkId = deviceId;
+      })
+      .catch((err: unknown) => {
+        console.warn(
+          "[echoly] setSinkId hot-swap failed; keeping previous output device",
+          err,
+        );
+      });
   }
 }

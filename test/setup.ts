@@ -43,6 +43,8 @@ export interface FakeChrome {
   tabs: {
     sendMessage: ReturnType<typeof vi.fn>;
     query: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
+    remove: ReturnType<typeof vi.fn>;
     onRemoved: FakeEvent;
     onUpdated: FakeEvent;
   };
@@ -51,6 +53,7 @@ export interface FakeChrome {
       _data: Record<string, unknown>;
       get: ReturnType<typeof vi.fn>;
       set: ReturnType<typeof vi.fn>;
+      remove: ReturnType<typeof vi.fn>;
       setAccessLevel: ReturnType<typeof vi.fn>;
     };
   };
@@ -61,6 +64,7 @@ export interface FakeChrome {
   cookies: {
     get: ReturnType<typeof vi.fn>;
     remove: ReturnType<typeof vi.fn>;
+    onChanged: FakeEvent;
   };
   webRequest: {
     onCompleted: FakeEvent;
@@ -78,23 +82,45 @@ export function makeChrome(): FakeChrome {
     tabs: {
       sendMessage: vi.fn().mockResolvedValue({ ok: true }),
       query: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ id: 1 }),
+      remove: vi.fn().mockResolvedValue(undefined),
       onRemoved: makeEvent(),
       onUpdated: makeEvent(),
     },
     storage: {
       local: {
         _data: store,
-        // get(defaults) → merge stored over defaults (matches chrome semantics)
-        get: vi.fn(async (defaults?: Record<string, unknown>) => {
-          if (!defaults) return { ...store };
-          const out: Record<string, unknown> = { ...defaults };
-          for (const k of Object.keys(defaults)) {
+        // chrome.storage.local.get supports four shapes (we mirror them):
+        //   undefined → return the whole store
+        //   string    → return {[key]: store[key]} if present
+        //   array     → return {[k]: store[k]} for each present k
+        //   object    → return defaults merged with stored values (defaults seed missing keys)
+        get: vi.fn(async (keys?: string | string[] | Record<string, unknown> | null) => {
+          if (keys == null) return { ...store };
+          if (typeof keys === "string") {
+            return keys in store ? { [keys]: store[keys] } : {};
+          }
+          if (Array.isArray(keys)) {
+            const out: Record<string, unknown> = {};
+            for (const k of keys) {
+              if (k in store) out[k] = store[k];
+            }
+            return out;
+          }
+          // object form: defaults; merge stored over them.
+          const out: Record<string, unknown> = { ...keys };
+          for (const k of Object.keys(keys)) {
             if (k in store) out[k] = store[k];
           }
           return out;
         }),
         set: vi.fn(async (obj: Record<string, unknown>) => {
           Object.assign(store, obj);
+        }),
+        // chrome.storage.local.remove accepts a string or array of strings.
+        remove: vi.fn(async (keys: string | string[]) => {
+          const arr = typeof keys === "string" ? [keys] : keys;
+          for (const k of arr) delete store[k];
         }),
         setAccessLevel: vi.fn().mockResolvedValue(undefined),
       },
@@ -106,6 +132,7 @@ export function makeChrome(): FakeChrome {
     cookies: {
       get: vi.fn().mockResolvedValue(null),
       remove: vi.fn().mockResolvedValue(undefined),
+      onChanged: makeEvent(),
     },
     webRequest: {
       onCompleted: makeEvent(),

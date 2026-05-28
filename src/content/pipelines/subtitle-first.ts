@@ -11,13 +11,38 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import { LANG_NAME, STANDARD_DEFAULT_VOICE } from "@/shared/constants";
+import { STYLE_PROMPTS } from "@/shared/advanced";
 import { parseKymaError, type ParsedKymaError } from "@/lib/kyma";
+import { parseServerError } from "@/lib/server-errors";
 import { computeGain } from "@/lib/audio";
 import { regroupToSentences } from "@/lib/caption";
 import type { Ack } from "@/shared/protocol";
 import type { SubtitleFirstSession } from "../session-manager";
 import type { ContentApp } from "../index";
 import { fetchYouTubeCaptions, getYouTubeVideoId } from "./captions";
+
+/** Path for the chat-completions endpoint by world.
+ *  • byok  → `/chat/completions` (Kyma OpenAI-shape)
+ *  • proxy → `/proxy/chat/completions` (Echoly server's metered shim — same shape)
+ *  TODO: port proxy path to `/v1/chat` (zod schema-based) in a follow-up wave. */
+function chatPath(apiMode: string | null | undefined): string {
+  return apiMode === "proxy" ? "/proxy/chat/completions" : "/chat/completions";
+}
+
+/** Path for the TTS endpoint by world (same pattern as standard-chunked). */
+function speechPath(apiMode: string | null | undefined): string {
+  return apiMode === "proxy" ? "/proxy/audio/speech" : "/audio/speech";
+}
+
+/** Adapt server Response → ParsedKymaError so the toast surface is uniform. */
+async function parsedFromServerError(res: Response): Promise<ParsedKymaError> {
+  const parsed = await parseServerError(res);
+  return {
+    user: parsed.user,
+    ...(parsed.cta ? { cta: parsed.cta } : {}),
+    ...(parsed.ctaLabel ? { ctaLabel: parsed.ctaLabel } : {}),
+  };
+}
 
 const SUBFIRST_BATCH_SIZE = 10; // sentences per translate request
 const SUBFIRST_LOOKAHEAD_MS = 30_000; // render this far ahead of playhead
@@ -38,7 +63,10 @@ export class SubtitleFirstPipeline {
     if (!videoId)
       return { ok: false, error: "Could not detect YouTube video id." };
 
-    overlay.buildOverlay(this.app.callbacks);
+    overlay.buildOverlay(
+      this.app.callbacks,
+      settings.advanced?.captionPosition ?? null,
+    );
     capture.bindRateChangeWarn(video);
     overlay.setStatusText("Loading captions");
     overlay.setOverlayState("connecting");
@@ -267,7 +295,10 @@ export class SubtitleFirstPipeline {
   ): Promise<string[]> {
     const { sm } = this.app;
     const items = sentences.map((s) => s.text);
+    const stylePrefix =
+      STYLE_PROMPTS[sm.settings?.advanced?.translationStyle ?? "natural"];
     const prompt =
+      `${stylePrefix}` +
       `Translate these ${items.length} subtitle lines to ${langName}. ` +
       `Return ONLY a JSON object {"lines": [...]} with exactly ${items.length} ` +
       `strings in the same order. Preserve names, brand names, and technical ` +
@@ -276,7 +307,8 @@ export class SubtitleFirstPipeline {
       `phrasing over literal word-for-word, so the dub fits the same time ` +
       `slot as the original cue.\n\n` +
       `Input: ${JSON.stringify(items)}`;
-    const res = await fetch(`${sm.apiBase}/chat/completions`, {
+    const isProxy = sm.settings?.apiMode === "proxy";
+    const res = await fetch(`${sm.apiBase}${chatPath(sm.settings?.apiMode)}`, {
       method: "POST",
       headers: {
         Authorization: "Bearer " + kymaKey,
@@ -298,6 +330,7 @@ export class SubtitleFirstPipeline {
       signal,
     });
     if (!res.ok) {
+      if (isProxy) throw await parsedFromServerError(res);
       const txt = await res.text().catch(() => "");
       throw parseKymaError(res.status, txt);
     }
@@ -335,7 +368,8 @@ export class SubtitleFirstPipeline {
     signal: AbortSignal,
   ): Promise<AudioBuffer> {
     const { sm } = this.app;
-    const res = await fetch(`${sm.apiBase}/audio/speech`, {
+    const isProxy = sm.settings?.apiMode === "proxy";
+    const res = await fetch(`${sm.apiBase}${speechPath(sm.settings?.apiMode)}`, {
       method: "POST",
       headers: {
         Authorization: "Bearer " + kymaKey,
@@ -350,6 +384,7 @@ export class SubtitleFirstPipeline {
       signal,
     });
     if (!res.ok) {
+      if (isProxy) throw await parsedFromServerError(res);
       const txt = await res.text().catch(() => "");
       throw parseKymaError(res.status, txt);
     }

@@ -33,7 +33,9 @@ import type {
   ToastOptions,
 } from "@/shared/ports";
 import type { HistoryTurn, TranslationTier } from "@/shared/types";
+import type { CaptionPosition } from "@/shared/advanced";
 import {
+  applyCaptionPositionPreset,
   clampLayout,
   DEFAULT_LAYOUT,
   isCompact,
@@ -89,7 +91,7 @@ function emptyElements(): Elements {
 export const createOverlay: CreateOverlay = (): OverlayView => {
   let root: HTMLElement | null = null;
   let elements: Elements = emptyElements();
-  let layout: Layout = loadLayout();
+  let layout: Layout = loadLayout(null);
   let history: RenderedTurn[] = [];
   let currentTargetText = "";
   let currentSourceText = "";
@@ -104,15 +106,28 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   // Keep a stable bound reference so removeOverlay can unbind the window listener.
   const onWindowResize = () => applyLayout();
 
-  function loadLayout(): Layout {
+  /** Load persisted Layout, optionally seeding from the Advanced caption-position
+   *  preset when nothing is persisted. The user's drag still wins — localStorage
+   *  takes precedence over the preset. (Caption-position Advanced setting.) */
+  function loadLayout(captionPosition: CaptionPosition | null): Layout {
+    let stored: Partial<Layout> = {};
+    let hasStored = false;
     try {
-      return {
-        ...DEFAULT_LAYOUT,
-        ...JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}"),
-      };
+      const raw = localStorage.getItem(LAYOUT_KEY);
+      if (raw && raw !== "{}") {
+        stored = JSON.parse(raw) as Partial<Layout>;
+        hasStored = true;
+      }
     } catch {
-      return { ...DEFAULT_LAYOUT };
+      /* localStorage may throw on access — fall through to defaults */
     }
+    if (hasStored) {
+      return { ...DEFAULT_LAYOUT, ...stored };
+    }
+    if (captionPosition) {
+      return applyCaptionPositionPreset({ ...DEFAULT_LAYOUT }, captionPosition);
+    }
+    return { ...DEFAULT_LAYOUT };
   }
   function saveLayout(): void {
     try {
@@ -177,8 +192,16 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     }
   }
 
-  function buildOverlay(callbacks: OverlayCallbacks): void {
+  function buildOverlay(
+    callbacks: OverlayCallbacks,
+    captionPosition?: CaptionPosition | null,
+  ): void {
     if (root) return;
+    // Re-seed the layout from the Advanced caption-position preset (only when
+    // nothing persisted yet). This is the right moment — by buildOverlay time,
+    // the SW has merged effective Advanced into StartSettings.advanced and the
+    // controller passes it through. (No-op when the user has already dragged.)
+    layout = loadLayout(captionPosition ?? null);
     root = document.createElement("aside");
     root.className = "ec-root";
     root.dataset.state = "ready";
@@ -352,6 +375,15 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     if (elements.langSelect) elements.langSelect.value = lang;
   }
 
+  /** Apply a caption-position preset live (Advanced setting hot-swap). Writes
+   *  the preset's left/top into the in-memory Layout + re-applies — does NOT
+   *  call saveLayout, so the user's subsequent drag still wins on the next
+   *  session via the LAYOUT_KEY persistence path. Safe to call when unmounted. */
+  function setCaptionPosition(pos: CaptionPosition): void {
+    layout = applyCaptionPositionPreset(layout, pos);
+    if (root) applyLayout();
+  }
+
   // Toast — built via DOM APIs (NEVER innerHTML). Default 8000ms; replaces any
   // existing toast; auto-removes. (legacy showToast, content.js:333-353.)
   function showToast(text: string, opts?: number | ToastOptions): void {
@@ -458,6 +490,7 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     showToast,
     populateVoicePicker,
     setLanguageSelection,
+    setCaptionPosition,
     isMounted,
   };
 };

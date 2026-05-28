@@ -13,6 +13,7 @@ import {
   REALTIME_VOICES,
   STANDARD_VOICES,
 } from "@/shared/constants";
+import { CAPTION_PRESETS } from "@/shared/advanced";
 
 function makeCallbacks(): OverlayCallbacks & {
   onLanguageChange: ReturnType<typeof vi.fn>;
@@ -364,5 +365,129 @@ describe("overlay view methods", () => {
     const toast = root.querySelector(".ec-toast")!;
     expect(toast.textContent).toBe("plain message");
     expect(toast.querySelector("a")).toBeNull();
+  });
+});
+
+// ─── Advanced — caption-position preset (Layout seed + live setter) ─────────
+
+/** Resolve a preset's % string against jsdom's default viewport. */
+function pct(value: string, axis: number): number {
+  if (value.endsWith("%")) return (parseFloat(value) / 100) * axis;
+  return parseFloat(value);
+}
+
+describe("buildOverlay — caption-position preset seeds Layout when LAYOUT_KEY empty", () => {
+  it("seeds Layout.left/top from CAPTION_PRESETS.top when localStorage is empty", () => {
+    // jsdom default viewport: 1024×768. Preset "top": left=50%, top=8%.
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks(), "top");
+    const root = document.documentElement.querySelector(
+      ".ec-root",
+    ) as HTMLElement;
+    // The seed is then run through clampLayout (defaults width 560, height 200),
+    // which clamps to within the viewport but starts from the preset's pixels.
+    // The "top" preset places the overlay near the top — top px = 8% × 768 ≈ 61.
+    const topPx = parseFloat(root.style.top);
+    expect(topPx).toBeLessThan(120); // well above the bottom default (~478)
+    expect(topPx).toBeGreaterThan(0);
+    // "top" preset has left=50% × 1024 ≈ 512, but clampLayout will keep it
+    // visible. Just verify it isn't the bottom default (innerHeight - 200 - 96).
+    const bottomDefault = 768 - 200 - 96; // 472
+    expect(Math.abs(topPx - bottomDefault)).toBeGreaterThan(50);
+  });
+
+  it("seeds Layout.top from CAPTION_PRESETS.bottom (~78% of viewport)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks(), "bottom");
+    const root = document.documentElement.querySelector(
+      ".ec-root",
+    ) as HTMLElement;
+    const expectedTop = pct(CAPTION_PRESETS.bottom.top, 768);
+    const topPx = parseFloat(root.style.top);
+    // clampLayout snaps so it isn't off-screen; allow generous tolerance.
+    expect(topPx).toBeLessThanOrEqual(expectedTop + 50);
+    expect(topPx).toBeGreaterThan(expectedTop - 200);
+  });
+
+  it("LAYOUT_KEY (user's drag) WINS over the captionPosition preset", () => {
+    // Persist a custom layout — buildOverlay should not seed from the preset.
+    localStorage.setItem(
+      LAYOUT_KEY,
+      JSON.stringify({
+        left: 42,
+        top: 100,
+        width: 600,
+        height: 220,
+        sideCollapsed: false,
+      }),
+    );
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks(), "top");
+    const root = document.documentElement.querySelector(
+      ".ec-root",
+    ) as HTMLElement;
+    // Persisted values flow through clampLayout (which won't shrink under 300×130).
+    expect(parseFloat(root.style.left)).toBeCloseTo(42, 0);
+    expect(parseFloat(root.style.top)).toBeCloseTo(100, 0);
+    expect(parseFloat(root.style.width)).toBeCloseTo(600, 0);
+    expect(parseFloat(root.style.height)).toBeCloseTo(220, 0);
+  });
+
+  it("no captionPosition arg → falls back to DEFAULT_LAYOUT (legacy behaviour)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const root = document.documentElement.querySelector(
+      ".ec-root",
+    ) as HTMLElement;
+    // clampLayout defaults: width=560, height=200, bottom-right with 24px margin.
+    expect(parseFloat(root.style.width)).toBeCloseTo(560, 0);
+    expect(parseFloat(root.style.height)).toBeCloseTo(200, 0);
+  });
+});
+
+describe("setCaptionPosition — live preset hot-swap", () => {
+  it("setCaptionPosition('top') updates root.style.top to the top preset (live)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks()); // default-seeded (bottom)
+    const root = document.documentElement.querySelector(
+      ".ec-root",
+    ) as HTMLElement;
+    const beforeTop = parseFloat(root.style.top);
+    ov.setCaptionPosition("top");
+    const afterTop = parseFloat(root.style.top);
+    expect(afterTop).not.toBeCloseTo(beforeTop, 0);
+    // "top" preset: top=8% × 768 ≈ 61 (clamped to ≥12 from edges).
+    expect(afterTop).toBeLessThan(120);
+  });
+
+  it("setCaptionPosition('float') updates root.style.left/top to the float preset", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const root = document.documentElement.querySelector(
+      ".ec-root",
+    ) as HTMLElement;
+    ov.setCaptionPosition("float");
+    // "float" preset: left=20% × 1024 ≈ 205, top=40% × 768 ≈ 307.
+    const expectedLeft = pct(CAPTION_PRESETS.float.left, 1024);
+    const expectedTop = pct(CAPTION_PRESETS.float.top, 768);
+    expect(parseFloat(root.style.left)).toBeCloseTo(expectedLeft, 0);
+    expect(parseFloat(root.style.top)).toBeCloseTo(expectedTop, 0);
+  });
+
+  it("setCaptionPosition does NOT write LAYOUT_KEY (user's drag still wins)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    expect(localStorage.getItem(LAYOUT_KEY)).toBeNull();
+    ov.setCaptionPosition("top");
+    expect(localStorage.getItem(LAYOUT_KEY)).toBeNull();
+    ov.setCaptionPosition("float");
+    expect(localStorage.getItem(LAYOUT_KEY)).toBeNull();
+  });
+
+  it("setCaptionPosition is a safe no-op when the overlay is unmounted", () => {
+    const ov = createOverlay();
+    // Not built → no root. Should not throw, no DOM created.
+    expect(() => ov.setCaptionPosition("top")).not.toThrow();
+    expect(document.documentElement.querySelector(".ec-root")).toBeNull();
   });
 });

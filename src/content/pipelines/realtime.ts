@@ -9,9 +9,22 @@
 
 import { LANG_NAME, OPENAI_CALLS_URL } from "@/shared/constants";
 import { parseKymaError } from "@/lib/kyma";
+import { parseServerError, type ParsedServerError } from "@/lib/server-errors";
 import { computeGain } from "@/lib/audio";
 import type { RealtimeSession } from "../session-manager";
 import type { ContentApp } from "../index";
+
+/** Result of the SDP exchange — same shape for BYOK (client-direct OpenAI)
+ *  and proxy (server-mediated /v1/rtc/translate). */
+interface SignalingResult {
+  answerSdp: string;
+  /** Server-issued realtime session id (BYOK: Kyma's; proxy: rt_<ulid>). Used
+   *  as the keying for heartbeat + end. */
+  sessionId: string | null;
+  /** Auth bearer for subsequent heartbeat/end calls. BYOK: client_secret;
+   *  proxy: the Echoly ec_session token. */
+  bearer: string;
+}
 
 /** A build error that may carry a CTA (insufficient_balance). */
 interface CtaError extends Error {
@@ -48,46 +61,56 @@ export class RealtimePipeline {
     overlay.setStatusText("Connecting");
     overlay.setOverlayState("connecting");
 
-    let mintResp: Response;
-    try {
-      mintResp = await fetch(
-        `${sm.apiBase}/realtime/translations/client_secrets`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: "Bearer " + kymaKey,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            session: {
-              model: "gpt-realtime-translate",
-              audio: {
-                output: { language: lang, ...(voice ? { voice } : {}) },
-              },
+    // World switch (Wave 3): proxy (signed-in) skips the Kyma mint entirely —
+    // SDP goes straight to /v1/rtc/translate with ec_session Bearer. BYOK
+    // (guest) keeps the legacy client_secret mint + SDP-direct-to-OpenAI flow.
+    const isProxy = sm.settings?.apiMode === "proxy";
+
+    let clientSecret: string | undefined;
+    let kymaSessionId: string | null = null;
+
+    if (!isProxy) {
+      let mintResp: Response;
+      try {
+        mintResp = await fetch(
+          `${sm.apiBase}/realtime/translations/client_secrets`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer " + kymaKey,
+              "Content-Type": "application/json",
             },
-          }),
-        },
-      );
-    } catch {
-      throw new Error("Network error reaching Kyma.");
+            body: JSON.stringify({
+              session: {
+                model: "gpt-realtime-translate",
+                audio: {
+                  output: { language: lang, ...(voice ? { voice } : {}) },
+                },
+              },
+            }),
+          },
+        );
+      } catch {
+        throw new Error("Network error reaching Kyma.");
+      }
+      if (token !== sm.pageToken) throw new Error("Stale session.");
+      if (!mintResp.ok) {
+        const text = await mintResp.text().catch(() => "");
+        const parsed = parseKymaError(mintResp.status, text);
+        const err: CtaError = new Error(parsed.user);
+        err.cta = parsed.cta;
+        err.ctaLabel = parsed.ctaLabel;
+        throw err;
+      }
+      const mint = (await mintResp.json()) as {
+        value?: string;
+        kyma_session_id?: string;
+      };
+      if (token !== sm.pageToken) throw new Error("Stale session.");
+      clientSecret = mint.value;
+      kymaSessionId = mint.kyma_session_id ?? null;
+      if (!clientSecret) throw new Error("Kyma response missing client_secret.");
     }
-    if (token !== sm.pageToken) throw new Error("Stale session.");
-    if (!mintResp.ok) {
-      const text = await mintResp.text().catch(() => "");
-      const parsed = parseKymaError(mintResp.status, text);
-      const err: CtaError = new Error(parsed.user);
-      err.cta = parsed.cta;
-      err.ctaLabel = parsed.ctaLabel;
-      throw err;
-    }
-    const mint = (await mintResp.json()) as {
-      value?: string;
-      kyma_session_id?: string;
-    };
-    if (token !== sm.pageToken) throw new Error("Stale session.");
-    const clientSecret = mint.value;
-    const kymaSessionId = mint.kyma_session_id ?? null;
-    if (!clientSecret) throw new Error("Kyma response missing client_secret.");
 
     const pc = new RTCPeerConnection();
     for (const track of audioStream.getAudioTracks())
@@ -147,6 +170,22 @@ export class RealtimePipeline {
       document.body.appendChild(audio);
       newSession.remoteAudio = audio;
 
+      // Advanced outputDeviceId — route the dub track to the user-chosen sink.
+      // setSinkId may reject (Bluetooth removal, permissioned device gone, etc.);
+      // we log and stay on the default sink so playback never silently breaks.
+      const sinkId = sm.settings?.advanced?.outputDeviceId ?? "";
+      const a = audio as HTMLAudioElement & {
+        setSinkId?: (id: string) => Promise<void>;
+      };
+      if (sinkId && typeof a.setSinkId === "function") {
+        a.setSinkId(sinkId).catch((err: unknown) => {
+          console.warn(
+            "[echoly] setSinkId failed for Realtime remote audio; falling back to default",
+            err,
+          );
+        });
+      }
+
       const ctxRunning =
         !!newSession.audioCtx && newSession.audioCtx.state !== "closed";
       if (newSession.outputGain && ctxRunning) {
@@ -204,15 +243,36 @@ export class RealtimePipeline {
     if (token !== sm.pageToken) throw new Error("Stale session.");
     await pc.setLocalDescription(offer);
 
-    // SDP exchange goes DIRECT to OpenAI, NOT apiBase (client-direct seam).
-    const sdpResp = await fetch(OPENAI_CALLS_URL, {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer " + clientSecret,
-        "Content-Type": "application/sdp",
-      },
-      body: offer.sdp,
-    });
+    // SDP exchange — two worlds:
+    //  • BYOK  : DIRECT to OpenAI (ephemeral clientSecret from the Kyma mint
+    //            above). Kyma cannot relay WebRTC media plane, hence the
+    //            client-direct seam — see plan §2 / patch comments.
+    //  • Proxy : single POST to ${apiBase}/rtc/translate with the ec_session
+    //            Bearer; server (mediasoup) terminates the peer + bridges to
+    //            OpenAI server-side using its own provider key. Server-issued
+    //            session id arrives in the `X-Echoly-Session-Id` response header.
+    let sdpResp: Response;
+    if (isProxy) {
+      const qs = new URLSearchParams({ targetLanguage: lang });
+      if (voice) qs.set("voice", voice);
+      sdpResp = await fetch(`${sm.apiBase}/rtc/translate?${qs.toString()}`, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + kymaKey, // proxy mode: kymaKey === ec_session
+          "Content-Type": "application/sdp",
+        },
+        body: offer.sdp,
+      });
+    } else {
+      sdpResp = await fetch(OPENAI_CALLS_URL, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + clientSecret!,
+          "Content-Type": "application/sdp",
+        },
+        body: offer.sdp,
+      });
+    }
     if (token !== sm.pageToken) {
       try {
         pc.close();
@@ -222,14 +282,30 @@ export class RealtimePipeline {
       throw new Error("Stale session.");
     }
     if (!sdpResp.ok) {
-      const t = await sdpResp.text().catch(() => "");
       try {
         pc.close();
       } catch {
         /* ignore */
       }
+      // Proxy mode: server returns the unified 402/429/413 envelope on
+      // tier_locked/quota/etc. — parse it so the controller can surface the
+      // Upgrade CTA. BYOK: the legacy raw-text path is sufficient (mint already
+      // burned its own error path; SDP failures here are mostly OpenAI-internal).
+      if (isProxy) {
+        const parsed = await parseServerError(sdpResp);
+        const err: CtaError = new Error(parsed.user);
+        if (parsed.cta) err.cta = parsed.cta;
+        if (parsed.ctaLabel) err.ctaLabel = parsed.ctaLabel;
+        throw err;
+      }
+      const t = await sdpResp.text().catch(() => "");
       void sm.endKymaSession(kymaSessionId, kymaKey);
       throw new Error(`SDP exchange ${sdpResp.status}: ${t.slice(0, 160)}`);
+    }
+    // Capture the server-issued session id (proxy) — used for heartbeat + end.
+    // BYOK kymaSessionId came from the mint response above.
+    if (isProxy) {
+      kymaSessionId = sdpResp.headers.get("x-echoly-session-id") || null;
     }
     const answerSdp = await sdpResp.text();
     if (token !== sm.pageToken) {

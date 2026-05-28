@@ -19,6 +19,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import type { State, StartSettings, YtCaptionEntry, Settings } from "./types";
+import type { AdvancedPatch } from "./advanced";
 
 // ───── Generic response shapes ─────
 export type Ok = { ok: true };
@@ -33,19 +34,40 @@ export type PopupToBgMessage =
   | { type: "GET_STATE" }
   | { type: "GET_AUTH" } // defined in legacy but never sent by popup — keep
   | { type: "SIGN_OUT_ECHOLY" }
+  | { type: "OPEN_SIGNIN" } // Wave: popup asks bg to open signin tab + track its id
   | { type: "START"; settings?: Partial<Settings> }
   | { type: "STOP" }
   | { type: "UPDATE_SETTINGS"; settings?: Partial<Settings> }
-  | { type: "UPDATE_VOLUME"; originalVolume?: number; voiceVolume?: number };
+  | { type: "UPDATE_VOLUME"; originalVolume?: number; voiceVolume?: number }
+  // ── Advanced settings sync (Wave: per-user Advanced controls) ──────────
+  | { type: "UPDATE_ADVANCED_SETTINGS"; patch: AdvancedPatch }
+  | { type: "UPDATE_SITE_OVERRIDE"; domain: string; patch: AdvancedPatch }
+  | { type: "REMOVE_SITE_OVERRIDE"; domain: string }
+  | { type: "SAVE_SITE_DEFAULT"; domain: string }       // popup snapshots current advanced into the override
+  | { type: "REFRESH_SETTINGS" }                        // force GET /v1/me/settings
+  // ── Output device enumeration (popup picker populating) ────────────────
+  | { type: "LIST_AUDIO_OUTPUT_DEVICES" };
+
+export type AudioDeviceList = {
+  ok: true;
+  devices: { deviceId: string; label: string }[];
+} | Err;
 
 export interface PopupToBgResponse {
   GET_STATE: StateResult;
   GET_AUTH: StateResult;
   SIGN_OUT_ECHOLY: StateResult;
+  OPEN_SIGNIN: Ack;
   START: StateResult;
   STOP: StateResult;
   UPDATE_SETTINGS: StateResult;
-  UPDATE_VOLUME: Ack; // fire-and-forget from popup; bg still acks {ok:true}
+  UPDATE_VOLUME: Ack;
+  UPDATE_ADVANCED_SETTINGS: StateResult;
+  UPDATE_SITE_OVERRIDE:     StateResult;
+  REMOVE_SITE_OVERRIDE:     StateResult;
+  SAVE_SITE_DEFAULT:        StateResult;
+  REFRESH_SETTINGS:         StateResult;
+  LIST_AUDIO_OUTPUT_DEVICES: AudioDeviceList;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -58,6 +58,22 @@ export function downmixAndResample(
   return out;
 }
 
+/** Compute RMS amplitude (dBFS) of a mono Float32 PCM buffer.
+ *  Silent buffer (empty or all-zero) returns -Infinity; full-scale sine returns
+ *  ~-3 dBFS. Pure — used by the Standard pipeline noise-gate (NOISE_GATE_DBFS)
+ *  to drop near-silent chunks before they hit /audio/understand. */
+export function computeRmsDbFs(samples: Float32Array): number {
+  if (samples.length === 0) return -Infinity;
+  let sumSq = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i]!;
+    sumSq += v * v;
+  }
+  const rms = Math.sqrt(sumSq / samples.length);
+  if (rms <= 0) return -Infinity;
+  return 20 * Math.log10(rms);
+}
+
 /** Encode a decoded buffer to a 16 kHz mono 16-bit PCM WAV Blob (the format
  *  Kyma's audio gateway whitelists). (legacy audioBufferToWavBlob.) */
 export function audioBufferToWavBlob(audioBuf: DecodedAudio): Blob {

@@ -101,6 +101,12 @@ export class ContentApp {
     this.lastSeenCaption = "";
     this.sm.captionPollTimer = setInterval(() => {
       if (!this.sm.settings?.showSource) return;
+      // Bug H1: subtitle-first owns the source pane — it writes its own
+      // per-sentence source text (subtitle-first.ts ~531). Letting the YT-CC
+      // poll ALSO write here causes a ~350ms flicker as the two writers alternate.
+      // Realtime + chunked Standard don't write source text themselves, so the
+      // poll remains the source-of-truth there.
+      if (this.sm.session?.type === "subtitle-first") return;
       const text = this.readYTCaptions();
       if (!text || text === this.lastSeenCaption) return;
       this.lastSeenCaption = text;
@@ -217,7 +223,10 @@ export class ContentApp {
 
     let stream: MediaStream;
     try {
-      overlay.buildOverlay(this.callbacks);
+      overlay.buildOverlay(
+        this.callbacks,
+        sm.settings.advanced?.captionPosition ?? null,
+      );
       capture.bindRateChangeWarn(video);
       overlay.setStatusText("Acquiring audio");
       stream = await capture.captureWithRetry(video);
@@ -448,24 +457,66 @@ export class ContentApp {
       if (sm.settings.showSource && sm.session) this.startCaptionPoll();
       else this.stopCaptionPoll();
     }
-    // Realtime swaps require a full handover. Standard picks up lang/voice on
-    // the next chunk — no tear-down. (C1/H3 preserved: subtitle-first is also
-    // not "standard", so it falls into the handover path — matching legacy.)
-    if (sm.session?.type !== "standard") {
-      if (
-        ("targetLanguage" in newSettings &&
-          newSettings.targetLanguage !== prev.targetLanguage) ||
-        ("realtimeVoice" in newSettings &&
-          newSettings.realtimeVoice !== prev.realtimeVoice)
-      ) {
+    // Only REALTIME needs the zero-gap handover (PeerConnection tear-down +
+    // rebuild). Standard chunked picks up new lang/voice on the next chunk —
+    // settings already mutated above. Subtitle-first must additionally cancel
+    // its in-flight TTS queue so already-rendered sentences in the OLD lang
+    // don't keep playing; the rolling renderer then picks up the new lang on
+    // its next batch. (Bug C1: legacy fell into the realtime handover path
+    // for subtitle-first sessions and silently no-op'd.)
+    const langOrVoiceChanged =
+      ("targetLanguage" in newSettings &&
+        newSettings.targetLanguage !== prev.targetLanguage) ||
+      ("realtimeVoice" in newSettings &&
+        newSettings.realtimeVoice !== prev.realtimeVoice) ||
+      ("standardVoice" in newSettings &&
+        newSettings.standardVoice !== prev.standardVoice);
+    if (langOrVoiceChanged && sm.session) {
+      // RealtimeSession is the only branch without a `type` tag (legacy shape).
+      if (sm.session.type === undefined) {
         void this.realtime.requestHandover(newSettings);
+      } else if (sm.session.type === "subtitle-first") {
+        // Drop already-scheduled TTS (old lang/voice). The rolling renderer
+        // will re-translate + re-render from the next batch with new settings.
+        this.subtitleFirst.cancelPendingSources(
+          sm.session as SubtitleFirstSession,
+        );
+        sm.currentTargetText = "";
+        overlay.setTargetText("");
+        overlay.setStatusText("Switching language…");
+        overlay.setOverlayState("live");
       }
+      // Standard chunked: settings mutation alone is enough — next chunk uses
+      // them. No further action.
     }
     if ("originalVolume" in newSettings || "voiceVolume" in newSettings) {
       this.capture.applyVolumes(
         sm.settings.originalVolume,
         sm.settings.voiceVolume,
       );
+    }
+
+    // Advanced settings — apply the side-effectful subset live.
+    //  • outputDeviceId  → hot-swap setSinkId on the active <audio> element.
+    //  • captionPosition → re-position the overlay (user's drag still wins on
+    //                       subsequent persistence — no LAYOUT_KEY write).
+    //  • translationStyle / latencyPreset / noiseGate → no live action needed;
+    //    the Standard pipeline reads them fresh per chunk from sm.settings.
+    if ("advanced" in newSettings && newSettings.advanced) {
+      const nextAdv = newSettings.advanced;
+      const prevAdv = (prev as Partial<StartSettings>).advanced;
+      if (
+        nextAdv.outputDeviceId !== undefined &&
+        nextAdv.outputDeviceId !== prevAdv?.outputDeviceId
+      ) {
+        this.capture.applyOutputDevice(nextAdv.outputDeviceId);
+      }
+      if (
+        nextAdv.captionPosition !== undefined &&
+        nextAdv.captionPosition !== prevAdv?.captionPosition
+      ) {
+        overlay.setCaptionPosition(nextAdv.captionPosition);
+      }
     }
   }
 
