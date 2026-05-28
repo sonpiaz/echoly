@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Echoly</title>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body data-state="idle">
+
+<main class="shell">
+
+  <header class="topline">
+    <div class="brand">
+      <span class="mark aurora-mark" aria-hidden="true">
+        <span style="color:#fff;font-weight:700;font-size:14px;line-height:1">e</span>
+      </span>
+      <div>
+        <h1>echoly</h1>
+      </div>
+    </div>
+    <span id="tier-badge" class="tier-badge" data-tier="free">Free</span>
+  </header>
+
+  <!-- Account card — sign-in CTA / signed-in identity + usage meter / BYOK badge.
+       popup.js flips data-state based on auth + Kyma key. -->
+  <section id="account-band" class="account-band" data-state="loading">
+    <!-- Signed-out state -->
+    <div class="account-out">
+      <span class="account-msg">Sign in to use a subscription, or paste a Kyma key for BYOK.</span>
+      <a href="https://echolyhq.com/signin" target="_blank" class="account-link">Sign in →</a>
+    </div>
+
+    <!-- Signed-in state -->
+    <div class="account-in">
+      <div class="account-id-row">
+        <div class="account-id">
+          <span class="account-email" id="acct-email"></span>
+          <span class="account-tier" id="acct-tier"></span>
+        </div>
+        <button type="button" id="signOutBtn" class="account-link-btn">Sign out</button>
+      </div>
+      <!-- Usage meter — std + optional realtime. Hidden until populated. -->
+      <div class="usage-block" id="usage-std" hidden>
+        <div class="usage-row">
+          <span class="usage-label" id="usage-std-label">Standard</span>
+          <span class="usage-numbers"><span id="usage-std-used">0</span><span class="muted"> / <span id="usage-std-cap">0</span> min</span></span>
+        </div>
+        <div class="usage-track"><div class="usage-fill" id="usage-std-fill" style="width:0%"></div></div>
+      </div>
+      <div class="usage-block" id="usage-rt" hidden>
+        <div class="usage-row">
+          <span class="usage-label">Realtime</span>
+          <span class="usage-numbers"><span id="usage-rt-used">0</span><span class="muted"> / <span id="usage-rt-cap">0</span> min</span></span>
+        </div>
+        <div class="usage-track"><div class="usage-fill" id="usage-rt-fill" style="width:0%"></div></div>
+      </div>
+      <div class="usage-hint" id="usage-hint" hidden></div>
+    </div>
+
+    <!-- BYOK state — Kyma key set, no subscription needed -->
+    <div class="account-byok">
+      <span class="account-msg"><strong>BYOK active</strong> · unlimited at wholesale</span>
+      <a href="https://echolyhq.com/signin" target="_blank" class="account-link">Switch to subscription</a>
+    </div>
+  </section>
+
+  <section class="row">
+    <label for="tier">Tier</label>
+    <select id="tier">
+      <option value="realtime">Realtime · clones speaker · &lt;1s</option>
+      <option value="standard">Standard · ~5s lag · cheaper</option>
+    </select>
+  </section>
+
+  <section class="row">
+    <label for="voice">Voice</label>
+    <select id="voice"></select>
+  </section>
+
+  <section class="row">
+    <label for="lang">Language</label>
+    <select id="lang"></select>
+  </section>
+
+  <section class="secret">
+    <div class="row">
+      <label for="kymaKey">Kyma key <span class="badge" style="font-weight:500;color:var(--label-tertiary);background:transparent;padding:0">— optional, BYOK</span></label>
+      <span id="keyBadge" class="badge">missing</span>
+    </div>
+    <input id="kymaKey" type="password" placeholder="ky-... (leave empty to use subscription)" autocomplete="off" spellcheck="false" />
+  </section>
+
+  <button class="action" id="toggle">Start</button>
+
+  <section class="mix">
+    <div class="mix-row">
+      <label for="originalVolume">Original</label>
+      <input id="originalVolume" type="range" min="0" max="100" value="18" />
+      <output id="originalOut">18</output>
+    </div>
+    <div class="mix-row">
+      <label for="voiceVolume">Voice</label>
+      <input id="voiceVolume" type="range" min="0" max="100" value="100" />
+      <output id="voiceOut">100</output>
+    </div>
+  </section>
+
+  <label class="toggle-row">
+    <span>Show source captions</span>
+    <input id="showSource" type="checkbox" />
+  </label>
+
+  <details class="advanced">
+    <summary>Advanced</summary>
+    <div class="advanced-body">
+      <div>
+        <strong>Plans</strong>: Free 30 min/month, Pro $9/mo (600 min), Max $24.90/mo (3,000 + 120 min realtime). Annual saves Pro 18% / Max 33%. Or paste a Kyma key above for unlimited at wholesale cost.
+      </div>
+      <div>
+        <a href="https://echolyhq.com/#pricing" target="_blank">Subscribe</a> ·
+        <a href="https://echolyhq.com/account" target="_blank">Account</a> ·
+        <a href="https://kymaapi.com/billing" target="_blank">Kyma billing</a> (BYOK)
+      </div>
+      <div class="hint">
+        Sessions auto-stop at 60 minutes. Press Stop to end early.
+      </div>
+    </div>
+  </details>
+
+  <p class="status" id="status">Ready.</p>
+
+</main>
+
+<script type="module" src="./main.ts"></script>
+</body>
+</html>

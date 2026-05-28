@@ -4,3 +4,7 @@ node_modules/
 Thumbs.db
 *.zip
 store-assets/_*
+
+# WXT build artifacts
+.output/
+.wxt/

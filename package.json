@@ -1,0 +1,24 @@
+{
+  "name": "echoly-extension",
+  "version": "0.6.3",
+  "private": true,
+  "description": "Echoly — Live YouTube Translation (Chrome MV3 extension)",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "postinstall": "wxt prepare",
+    "typecheck": "wxt prepare && tsc --noEmit",
+    "lint": "wxt prepare && tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.300",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5",
+    "wxt": "^0.20.26"
+  }
+}
