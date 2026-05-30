@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADVANCED } from "@/shared/advanced";
+import { DEFAULT_TRANSLATION_TIER, TIER_REALTIME, TIER_STANDARD } from "@/shared/constants";
 import type { State } from "@/shared/types";
 import { initPopup } from "@/popup";
 
@@ -31,8 +32,8 @@ const FIXTURE_HTML = `
         <span id="tier-primary"></span>
         <span id="tier-secondary"></span>
         <select id="tier">
-          <option value="realtime">Realtime</option>
-          <option value="standard">Standard</option>
+          <option value="${TIER_REALTIME}">Realtime</option>
+          <option value="${TIER_STANDARD}">Standard</option>
         </select>
       </div>
       <div id="voice-trigger">
@@ -68,27 +69,13 @@ const FIXTURE_HTML = `
       <output id="originalOut">18</output>
       <input id="voiceVolume" type="range" min="0" max="100" value="100" />
       <output id="voiceOut">100</output>
+      <label><input id="showTargetCaptions" type="checkbox" checked /></label>
       <label><input id="showSource" type="checkbox" /></label>
     </section>
 
     <details class="advanced idle-only" open>
       <summary><span class="adv-label">Advanced</span></summary>
       <div class="advanced-body">
-        <div class="adv-row">
-          <div class="adv-row-label">Style</div>
-          <div class="segmented" data-count="3" data-setting="translationStyle">
-            <button type="button" data-value="literal">Literal</button>
-            <button type="button" data-value="natural">Natural</button>
-            <button type="button" data-value="casual">Casual</button>
-          </div>
-        </div>
-        <div class="adv-row">
-          <div class="adv-row-label">Latency</div>
-          <div class="segmented" data-count="2" data-setting="latencyPreset">
-            <button type="button" data-value="snappy">Snappy</button>
-            <button type="button" data-value="smooth">Smooth</button>
-          </div>
-        </div>
         <div class="adv-row">
           <div class="adv-row-label">Captions</div>
           <div class="segmented" data-count="3" data-setting="captionPosition">
@@ -103,12 +90,6 @@ const FIXTURE_HTML = `
         </div>
         <div class="adv-row">
           <select id="outputDevice"><option value="">System default</option></select>
-        </div>
-        <div class="adv-row">
-          <div class="segmented" data-count="2" data-setting="noiseGate">
-            <button type="button" data-value="off">Off</button>
-            <button type="button" data-value="on">On</button>
-          </div>
         </div>
         <div class="adv-footer">
           <button type="button" id="advResetBtn">Reset to defaults</button>
@@ -161,16 +142,20 @@ function makeState(overrides: Partial<State> = {}): State {
     apiMode: "proxy",
     signedInUser: { email: "u@e.com", tier: "max" },
     usage: { standard: 0, realtime: 0 },
-    guestPolicy: null,
+    languagePicker: null,
+    languageNames: null,
+    standardVoices: null,
+    standardVoiceDefaultId: null,
     sessionStartedAt: null,
-    tier: "realtime",
+    tier: DEFAULT_TRANSLATION_TIER,
     targetLanguage: "vi",
     realtimeVoice: "marin",
     standardVoice: "English_magnetic_voiced_man",
     originalVolume: 18,
     voiceVolume: 100,
     showSource: false,
-    kymaKey: "",
+    showTargetCaptions: true,
+    apiBearer: "",
     advanced: { ...DEFAULT_ADVANCED },
     siteOverrides: {},
     advancedVersion: 1,
@@ -242,29 +227,6 @@ describe("popup Advanced section — dispatch contract", () => {
     document.documentElement.innerHTML = "";
   });
 
-  it("style = literal → UPDATE_ADVANCED_SETTINGS { translationStyle: 'literal' }", async () => {
-    const literalBtn = document.querySelector<HTMLButtonElement>(
-      '.segmented[data-setting="translationStyle"] button[data-value="literal"]',
-    );
-    expect(literalBtn).not.toBeNull();
-    literalBtn!.click();
-    await flush();
-
-    const updates = sent.filter((m) => m.type === "UPDATE_ADVANCED_SETTINGS");
-    expect(updates.length).toBeGreaterThanOrEqual(1);
-    expect(updates[updates.length - 1]!.patch).toEqual({ translationStyle: "literal" });
-  });
-
-  it("latency = snappy → UPDATE_ADVANCED_SETTINGS { latencyPreset: 'snappy' }", async () => {
-    const btn = document.querySelector<HTMLButtonElement>(
-      '.segmented[data-setting="latencyPreset"] button[data-value="snappy"]',
-    );
-    btn!.click();
-    await flush();
-    const updates = sent.filter((m) => m.type === "UPDATE_ADVANCED_SETTINGS");
-    expect(updates[updates.length - 1]!.patch).toEqual({ latencyPreset: "snappy" });
-  });
-
   it("captions = top → UPDATE_ADVANCED_SETTINGS { captionPosition: 'top' }", async () => {
     const btn = document.querySelector<HTMLButtonElement>(
       '.segmented[data-setting="captionPosition"] button[data-value="top"]',
@@ -273,16 +235,6 @@ describe("popup Advanced section — dispatch contract", () => {
     await flush();
     const updates = sent.filter((m) => m.type === "UPDATE_ADVANCED_SETTINGS");
     expect(updates[updates.length - 1]!.patch).toEqual({ captionPosition: "top" });
-  });
-
-  it("noise gate on→off → UPDATE_ADVANCED_SETTINGS { noiseGate: false }", async () => {
-    const off = document.querySelector<HTMLButtonElement>(
-      '.segmented[data-setting="noiseGate"] button[data-value="off"]',
-    );
-    off!.click();
-    await flush();
-    const updates = sent.filter((m) => m.type === "UPDATE_ADVANCED_SETTINGS");
-    expect(updates[updates.length - 1]!.patch).toEqual({ noiseGate: false });
   });
 
   it("reset to defaults → UPDATE_ADVANCED_SETTINGS with full DEFAULT_ADVANCED patch", async () => {

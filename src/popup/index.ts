@@ -5,72 +5,76 @@
 // messages. The popup NEVER touches DOM outside its own document; single
 // input is applyState(state), single output is runtime messages.
 //
-// Account states (body[data-account]):
-//   "welcome" — first ever open (chrome.storage.local !hasEverSignedIn)
-//   "locked"  — returning user, signed out (hasEverSignedIn=true, no session)
-//   "in"      — signed in (signedInUser !== null)
-//   "loading" — transient at boot, before GET_STATE resolves
+// Account states (body[data-account]) — two sign-in surfaces, never at once:
+//   "welcome" — first open only (!hasEverSignedIn): marketing shell + one CTA
+//   "locked"  — returning user, signed out: main settings shell + sign-in card
+//   "in"      — signed in
+//   "loading" — boot; data-loading-shell picks welcome vs main skeleton
 // ────────────────────────────────────────────────────────────────────────────
 
+import { offlineLanguagePicker } from "@/lib/offline-language-bootstrap";
 import {
-  LANG_NAME,
-  LANGUAGES,
-  REALTIME_VOICES,
-  STANDARD_VOICES,
+  DEFAULT_TRANSLATION_TIER,
+  TIER_REALTIME,
+  TIER_REALTIME_GATED_SECONDARY,
+  TIER_REALTIME_START_GATED_SECONDARY,
+  TIER_STANDARD,
+  TIER_UI,
   type LangPair,
+  type TranslationTier,
 } from "@/shared/constants";
+import { offlineStandardVoices } from "@/lib/offline-voice-bootstrap";
+import { ECHOLY_WEB_URLS } from "@/shared/echoly-config";
 import {
   sendToBackground,
   type PopupToBgMessage,
   type PopupToBgResponse,
 } from "@/shared/protocol";
 import type { State } from "@/shared/types";
+import { siteDisplayLabel } from "@/shared/active-site";
 import {
   DEFAULT_ADVANCED,
   effectiveAdvanced,
   normalizeDomain,
   type AdvancedSettings,
   type CaptionPosition,
-  type LatencyPreset,
-  type TranslationStyle,
 } from "@/shared/advanced";
+import { resolveLangName } from "@/lib/resolve-lang-name";
 import {
-  capsForTier,
+  capsForUsage,
+  daysLeftLabel,
   fillPercent,
   fmtElapsed,
   fmtMin,
   meterLevel,
-  nextResetLabel,
+  resetsAtLabel,
   shade,
 } from "@/lib/popup-format";
+import { applySignedLanguageGate, filterPickerForRealtime } from "@/lib/language-picker";
 import { attachDropdown, type DropdownItem, type DropdownHandle } from "./dropdown";
-import { attachPopover } from "./popover";
-
-// Local key under chrome.storage.local: once true, popup skips Welcome and
-// shows Locked instead. Set by background on first sign-in; popup reads on
-// every open. Never cleared.
-const HAS_EVER_SIGNED_IN_KEY = "echoly_has_ever_signed_in";
+import { attachPopover, type PopoverHandle } from "./popover";
+import { tierIconHtml, tierRowIconClass } from "./tier-icons";
+import {
+  HAS_EVER_SIGNED_IN_KEY,
+  markHasEverSignedIn,
+} from "@/shared/storage-keys";
 
 interface VoiceOption {
   id: string;
   name: string;
 }
+/** Realtime uses gpt-realtime-translate — output language only; voice is not configurable. */
 const POPUP_REALTIME_VOICES: VoiceOption[] = [
-  { id: "", name: "Auto · clones speaker" },
-  ...REALTIME_VOICES.map((v) => ({
-    id: v,
-    name: v.charAt(0).toUpperCase() + v.slice(1),
-  })),
+  { id: "", name: "Auto · OpenAI output" },
 ];
-const POPUP_STANDARD_VOICES: VoiceOption[] = STANDARD_VOICES.map(
-  ([id, name]) => ({ id, name }),
-);
-
-interface RowMeta { primary: string; secondary: string; }
-const TIER_META: Record<string, RowMeta> = {
-  realtime: { primary: "Realtime", secondary: "· <1s · clones speaker" },
-  standard: { primary: "Standard", secondary: "· ~5s lag · cheaper" },
-};
+function popupStandardVoices(
+  standardVoices: State["standardVoices"],
+): VoiceOption[] {
+  if (standardVoices?.length) {
+    return standardVoices.map((v) => ({ id: v.id, name: v.label }));
+  }
+  return offlineStandardVoices().map(([id, name]) => ({ id, name }));
+}
 
 interface VoiceMeta { swatch: string; tagline: string; }
 const VOICE_META: Record<string, VoiceMeta> = {
@@ -106,6 +110,7 @@ export function initPopup(): void {
   const originalOut = $("originalOut") as HTMLOutputElement;
   const voiceOut = $("voiceOut") as HTMLOutputElement;
   const showSourceCheckbox = $("showSource") as HTMLInputElement;
+  const showTargetCaptionsCheckbox = $("showTargetCaptions") as HTMLInputElement;
   const actionLabelEl = $("actionLabel");
 
   // ── Header chips / avatar ─────────────────────────────────────────────
@@ -117,6 +122,7 @@ export function initPopup(): void {
   // ── Row labels (tier/voice/translating) ───────────────────────────────
   const tierPrimary = $("tier-primary");
   const tierSecondary = $("tier-secondary");
+  const tierRowIcon = $("tier-row-icon");
   const voicePrimary = $("voice-primary");
   const voiceSecondary = $("voice-secondary");
   const voiceAvatarRow = $("voice-avatar");
@@ -172,13 +178,14 @@ export function initPopup(): void {
     running: false,
     connecting: false,
     paused: false,
-    tier: "realtime",
+    tier: DEFAULT_TRANSLATION_TIER,
     targetLanguage: "vi",
     realtimeVoice: "marin",
     standardVoice: "English_magnetic_voiced_man",
     originalVolume: 18,
     voiceVolume: 100,
     showSource: false,
+    showTargetCaptions: true,
     status: "Ready",
     advanced: { ...DEFAULT_ADVANCED },
     siteOverrides: {},
@@ -187,6 +194,10 @@ export function initPopup(): void {
     currentDomain: null,
   };
   let hasEverSignedIn = false;
+  let lastAccountClass: string | null = null;
+  let lastLangPickerKey = "";
+  let lastVoiceTierKey = "";
+  let accountPopover: PopoverHandle | null = null;
 
   // ── Helpers ───────────────────────────────────────────────────────────
   function send<T extends PopupToBgMessage["type"]>(
@@ -202,11 +213,25 @@ export function initPopup(): void {
     document.body.dataset.state = name;
   }
   function setAccountClass(name: "welcome" | "locked" | "in" | "loading") {
+    if (lastAccountClass === name) return;
+    const prev = lastAccountClass;
+    lastAccountClass = name;
     document.body.dataset.account = name;
+    if (prev && name !== "loading") {
+      document.body.classList.add("account-transition");
+      window.setTimeout(
+        () => document.body.classList.remove("account-transition"),
+        260,
+      );
+    }
+    if (name !== "in") accountPopover?.close();
   }
 
   function populateLanguages(subset?: readonly LangPair[]) {
-    const list = subset ?? LANGUAGES;
+    const list =
+      subset ??
+      state.languagePicker ??
+      [...offlineLanguagePicker()];
     langSelect.replaceChildren();
     for (const [code, name] of list) {
       const opt = document.createElement("option");
@@ -215,8 +240,9 @@ export function initPopup(): void {
       langSelect.appendChild(opt);
     }
   }
-  function repopulateVoices(tier: string, preferredVoiceId?: string) {
-    const list = tier === "standard" ? POPUP_STANDARD_VOICES : POPUP_REALTIME_VOICES;
+  function repopulateVoices(tier: TranslationTier | string, preferredVoiceId?: string) {
+    const list =
+      tier === TIER_STANDARD ? popupStandardVoices(state.standardVoices ?? null) : POPUP_REALTIME_VOICES;
     voiceSelect.replaceChildren();
     for (const v of list) {
       const opt = document.createElement("option");
@@ -261,11 +287,13 @@ export function initPopup(): void {
 
   // ── Tier / Voice / Lang rows ──────────────────────────────────────────
   function activeVoiceId(): string {
-    return (state.tier === "standard" ? state.standardVoice : state.realtimeVoice) ?? "";
+    return (state.tier === TIER_STANDARD ? state.standardVoice : state.realtimeVoice) ?? "";
   }
   function lookupVoiceLabel(): string {
-    const tier = state.tier === "standard" ? "standard" : "realtime";
-    const list = tier === "standard" ? POPUP_STANDARD_VOICES : POPUP_REALTIME_VOICES;
+    const tier: TranslationTier =
+      state.tier === TIER_STANDARD ? TIER_STANDARD : TIER_REALTIME;
+    const list =
+      tier === TIER_STANDARD ? popupStandardVoices(state.standardVoices ?? null) : POPUP_REALTIME_VOICES;
     const id = activeVoiceId();
     const found = list.find((v) => v.id === id) ?? list[0] ?? null;
     const raw = found?.name ?? "Voice";
@@ -279,15 +307,44 @@ export function initPopup(): void {
     const m = voiceMeta();
     el.style.background = `linear-gradient(135deg, ${m.swatch}, ${shade(m.swatch, -18)})`;
   }
+  function accountAllowsRealtime(): boolean {
+    return state.signedInUser?.tier === "max";
+  }
+
+  /** Signed-in user picked Realtime but plan is Free/Pro — Start stays off. */
+  function isRealtimeStartGated(): boolean {
+    return (
+      !!state.signedInUser &&
+      !accountAllowsRealtime() &&
+      tierSelect.value === TIER_REALTIME
+    );
+  }
+
   function renderTierRow() {
-    const meta = TIER_META[tierSelect.value] ?? TIER_META.realtime!;
+    const tier = tierSelect.value as TranslationTier;
+    const meta = TIER_UI[tier] ?? TIER_UI[TIER_STANDARD];
     if (tierPrimary) tierPrimary.textContent = meta.primary;
+    if (tierRowIcon) {
+      tierRowIcon.className = tierRowIconClass(tier);
+      tierRowIcon.innerHTML = tierIconHtml(tier);
+    }
     if (tierSecondary) {
-      // Realtime gating: only Max-tier users can use realtime
-      const isPaid = state.signedInUser?.tier === "max";
-      const gated = tierSelect.value === "realtime" && !isPaid && !!state.signedInUser;
-      tierSecondary.textContent = gated ? "· Max only" : meta.secondary;
+      const gated = isRealtimeStartGated();
+      tierSecondary.textContent = gated
+        ? TIER_REALTIME_START_GATED_SECONDARY
+        : meta.secondary;
       tierSecondary.dataset.gated = gated ? "true" : "false";
+    }
+  }
+
+  function renderStartGate(): void {
+    const gated = isRealtimeStartGated();
+    if (gated && decideAccountState(state.signedInUser) === "in") {
+      if (!state.running && !state.connecting) {
+        statusEl.textContent =
+          "Realtime is included with Max. Switch to Standard or upgrade.";
+        setStateClass("idle");
+      }
     }
   }
   function renderVoiceRow() {
@@ -302,7 +359,7 @@ export function initPopup(): void {
   }
   function renderTargetLang(code: string) {
     const c = (code || "vi").slice(0, 2);
-    if (tgtName) tgtName.textContent = LANG_NAME[c] ?? c;
+    if (tgtName) tgtName.textContent = resolveLangName(c, state.languageNames);
     if (tgtFlag) tgtFlag.textContent = c.toUpperCase();
   }
   function updateLiveSummary() {
@@ -341,17 +398,19 @@ export function initPopup(): void {
   // ── Usage hint + account menu meters ──────────────────────────────────
   function renderUsageHint(tier: string | undefined,
                           usage: State["usage"] | undefined) {
-    const caps = capsForTier(tier);
+    const caps = capsForUsage(tier, usage ?? undefined);
     const used = usage ?? { standard: 0, realtime: 0 };
     // Show Realtime remaining if the tier has rt allowance, else Standard.
     const isRt = caps.rt > 0;
     const remaining = isRt
-      ? Math.max(0, caps.rt - used.realtime)
-      : Math.max(0, caps.std - used.standard);
+      ? (usage?.realtimeRemaining ??
+        Math.max(0, caps.rt - used.realtime))
+      : (usage?.standardRemaining ??
+        Math.max(0, caps.std - used.standard));
     if (usageHintAmount) usageHintAmount.textContent = `${remaining} min`;
     if (usageHintLabel)
       usageHintLabel.textContent = isRt ? "Realtime left this month" : "Standard left this month";
-    if (usageHintReset) usageHintReset.textContent = nextResetLabel();
+    if (usageHintReset) usageHintReset.textContent = resetsAtLabel(usage?.resetsAt);
   }
 
   function renderAccountMenu(user: State["signedInUser"] | undefined | null,
@@ -360,22 +419,23 @@ export function initPopup(): void {
     if (amEmail) amEmail.textContent = user.email;
     renderPlanBadge(amPlanBadge, amPlanBadgeText, user.tier);
 
-    // Days left from subscriptionExpiresAt (optional field; hide if absent)
-    const expiresAt = (user as { subscriptionExpiresAt?: number | null })
-      .subscriptionExpiresAt ?? null;
     if (amDaysLeft) {
-      if (expiresAt && Number.isFinite(expiresAt)) {
-        const days = Math.max(0, Math.ceil((expiresAt - Date.now()) / 86_400_000));
-        amDaysLeft.textContent = `· ${days} days left`;
+      const left = daysLeftLabel(usage?.resetsAt);
+      if (left) {
         amDaysLeft.hidden = false;
+        amDaysLeft.textContent = left;
       } else {
         amDaysLeft.hidden = true;
         amDaysLeft.textContent = "";
       }
     }
-    if (amReset) amReset.textContent = `resets ${nextResetLabel()}`;
+    if (user.cancel_at_period_end) {
+      if (amReset) amReset.textContent = "auto-renewal off · access until period end";
+    } else if (amReset) {
+      amReset.textContent = `resets ${resetsAtLabel(usage?.resetsAt ?? undefined)}`;
+    }
 
-    const caps = capsForTier(user.tier);
+    const caps = capsForUsage(user.tier, usage ?? undefined);
     const u = usage ?? { standard: 0, realtime: 0 };
     if (umStdUsed) umStdUsed.textContent = fmtMin(u.standard);
     if (umStdCap)  umStdCap.textContent  = fmtMin(caps.std);
@@ -402,33 +462,69 @@ export function initPopup(): void {
   function applyState(s: Partial<State>) {
     state = { ...state, ...s };
 
-    // Body class for account state
     const acct = decideAccountState(state.signedInUser);
     setAccountClass(acct);
+    if (state.signedInUser) {
+      hasEverSignedIn = true;
+      void markHasEverSignedIn();
+    }
 
-    // Plan badge / avatar
-    renderPlanBadge(planBadge, planBadgeText, state.signedInUser?.tier);
+    const sessionLive = !!(state.running || state.connecting);
+    if (sessionLive && planBadge && planBadgeText) {
+      planBadge.dataset.plan = "max";
+      planBadgeText.textContent = "LIVE";
+    } else {
+      renderPlanBadge(planBadge, planBadgeText, state.signedInUser?.tier);
+    }
     renderAccountAvatar(state.signedInUser);
-
-    // Account menu identity + meters
     renderAccountMenu(state.signedInUser, state.usage ?? null);
 
-    // Tier picker mirror
     if (typeof state.tier === "string") {
-      const allowed = state.tier === "standard" ? "standard" : "realtime";
-      if (tierSelect.value !== allowed) tierSelect.value = allowed;
+      let allowed: TranslationTier =
+        state.tier === TIER_STANDARD ? TIER_STANDARD : TIER_REALTIME;
+      if (!accountAllowsRealtime() && allowed === TIER_REALTIME) {
+        allowed = TIER_STANDARD;
+      }
+      const previewingGated =
+        !accountAllowsRealtime() && tierSelect.value === TIER_REALTIME;
+      if (!previewingGated && tierSelect.value !== allowed) {
+        tierSelect.value = allowed;
+      }
     }
 
-    // Target language picker
-    populateLanguages();
-    if (typeof state.targetLanguage === "string") {
-      langSelect.value = state.targetLanguage;
-      renderTargetLang(state.targetLanguage);
+    let effectiveLang = state.targetLanguage ?? "vi";
+    const pickerKey = state.languagePicker?.map((p) => p[0]).join("\0") ?? "";
+    if (pickerKey !== lastLangPickerKey) {
+      lastLangPickerKey = pickerKey;
+      if (state.languagePicker?.length) {
+        const tierPicker =
+          tierSelect.value === TIER_REALTIME
+            ? filterPickerForRealtime(state.languagePicker)
+            : state.languagePicker;
+        const gate = applySignedLanguageGate({
+          currentLang: effectiveLang,
+          picker: tierPicker,
+        });
+        populateLanguages(gate.renderable);
+        effectiveLang = gate.effectiveLang;
+        if (gate.autoSwitched) {
+          state.targetLanguage = effectiveLang;
+          void pushSettings({ targetLanguage: effectiveLang });
+        }
+      } else {
+        populateLanguages();
+      }
     }
+    langSelect.value = effectiveLang;
+    renderTargetLang(effectiveLang);
 
-    // Voice list depends on tier
-    const activeVoice = tierSelect.value === "standard" ? state.standardVoice : state.realtimeVoice;
-    repopulateVoices(tierSelect.value, activeVoice);
+    const voiceTierKey = `${tierSelect.value}:${state.standardVoice ?? ""}:${state.realtimeVoice ?? ""}:${state.standardVoices?.length ?? 0}`;
+    if (voiceTierKey !== lastVoiceTierKey) {
+      lastVoiceTierKey = voiceTierKey;
+      const activeVoice =
+        tierSelect.value === TIER_STANDARD ? state.standardVoice : state.realtimeVoice;
+      repopulateVoices(tierSelect.value, activeVoice);
+    }
     renderTierRow();
     renderVoiceRow();
 
@@ -444,6 +540,11 @@ export function initPopup(): void {
     }
     if (typeof state.showSource === "boolean")
       showSourceCheckbox.checked = state.showSource;
+    if (showTargetCaptionsCheckbox) {
+      if (typeof state.showTargetCaptions === "boolean")
+        showTargetCaptionsCheckbox.checked = state.showTargetCaptions;
+      else showTargetCaptionsCheckbox.checked = true;
+    }
 
     // Status + toggle button
     if (state.connecting) {
@@ -451,6 +552,7 @@ export function initPopup(): void {
       statusEl.textContent = state.status || "Connecting";
       setActionLabel("Stop translating");
       toggleBtn.classList.add("is-live");
+      updateLiveSummary();
     } else if (state.running && state.paused) {
       setStateClass("paused");
       statusEl.textContent = "Paused.";
@@ -458,7 +560,10 @@ export function initPopup(): void {
       toggleBtn.classList.add("is-live");
     } else if (state.running) {
       setStateClass("active");
-      const langName = LANGUAGES.find(([c]) => c === state.targetLanguage)?.[1] || state.targetLanguage;
+      const langName = resolveLangName(
+        state.targetLanguage ?? "",
+        state.languageNames,
+      );
       statusEl.textContent = `Translating to ${langName}.`;
       setActionLabel("Stop translating");
       toggleBtn.classList.add("is-live");
@@ -476,17 +581,14 @@ export function initPopup(): void {
       toggleBtn.classList.remove("is-live");
     }
 
-    // LIVE badge override on plan-badge: when running, show LIVE-styled chip
-    if ((state.running || state.connecting) && planBadge && planBadgeText) {
-      planBadge.dataset.plan = "max";
-      planBadgeText.textContent = "LIVE";
-    }
-
     updateLiveSummary();
     if (state.running || state.connecting) startElapsedTimer();
     else stopElapsedTimer();
 
     toggleBtn.disabled = false;
+    if (acct === "locked") toggleBtn.disabled = true;
+    else if (isRealtimeStartGated()) toggleBtn.disabled = true;
+    renderStartGate();
     renderUsageHint(state.signedInUser?.tier, state.usage ?? undefined);
 
     // Advanced section reflection — segmented buttons, output device, auto-start,
@@ -505,16 +607,12 @@ export function initPopup(): void {
   /** Sync DOM to state.advanced. Idempotent. */
   function renderAdvanced() {
     const adv = effectiveAdv();
-    // Segmented buttons (translationStyle, latencyPreset, captionPosition, noiseGate)
     for (const seg of document.querySelectorAll<HTMLElement>(".segmented[data-setting]")) {
       const setting = seg.dataset.setting;
       if (!setting) continue;
       const buttons = Array.from(seg.querySelectorAll<HTMLButtonElement>("button"));
       let activeValue: string | null = null;
-      if (setting === "translationStyle") activeValue = adv.translationStyle;
-      else if (setting === "latencyPreset") activeValue = adv.latencyPreset;
-      else if (setting === "captionPosition") activeValue = adv.captionPosition;
-      else if (setting === "noiseGate") activeValue = adv.noiseGate ? "on" : "off";
+      if (setting === "captionPosition") activeValue = adv.captionPosition;
       for (const b of buttons) {
         if (b.dataset.value === activeValue) b.setAttribute("aria-pressed", "true");
         else b.removeAttribute("aria-pressed");
@@ -532,7 +630,9 @@ export function initPopup(): void {
 
     // Auto-start toggle (per-domain) + domain label
     const domain = state.currentDomain ?? null;
-    if (autoStartDomain) autoStartDomain.textContent = domain ?? "no active site";
+    if (autoStartDomain) {
+      autoStartDomain.textContent = siteDisplayLabel(domain);
+    }
     if (autoStart) {
       autoStart.checked = !!(domain && adv.autoStartHosts?.[domain] === true);
       autoStart.disabled = !domain || !state.signedInUser;
@@ -552,8 +652,8 @@ export function initPopup(): void {
 
   // ── Settings push ─────────────────────────────────────────────────────
   function readSettings() {
-    const tier = tierSelect.value as "realtime" | "standard";
-    const voiceKey = tier === "standard" ? "standardVoice" : "realtimeVoice";
+    const tier = tierSelect.value as TranslationTier;
+    const voiceKey = tier === TIER_STANDARD ? "standardVoice" : "realtimeVoice";
     return {
       tier,
       targetLanguage: langSelect.value,
@@ -561,11 +661,15 @@ export function initPopup(): void {
       originalVolume: Number(originalVolumeInput.value),
       voiceVolume: Number(voiceVolumeInput.value),
       showSource: showSourceCheckbox.checked,
+      showTargetCaptions: showTargetCaptionsCheckbox.checked,
     };
   }
-  async function pushSettings() {
+  async function pushSettings(patch?: Partial<import("@/shared/types").Settings>) {
     try {
-      const reply = await send({ type: "UPDATE_SETTINGS", settings: readSettings() });
+      const reply = await send({
+        type: "UPDATE_SETTINGS",
+        settings: { ...readSettings(), ...patch },
+      });
       if (reply?.ok && reply.state) applyState(reply.state);
     } catch (err) {
       const msg = (err as Error).message;
@@ -607,8 +711,9 @@ export function initPopup(): void {
           toggleBtn.disabled = false;
           return;
         }
-        if (state.tier === "realtime" && state.signedInUser.tier !== "max") {
-          statusEl.textContent = "Realtime is a Max-tier feature. Upgrade to continue.";
+        if (isRealtimeStartGated()) {
+          statusEl.textContent =
+            "Realtime is included with Max. Switch to Standard or upgrade.";
           setStateClass("error");
           toggleBtn.disabled = false;
           return;
@@ -634,16 +739,23 @@ export function initPopup(): void {
   // ── Events ────────────────────────────────────────────────────────────
   tierSelect.addEventListener("change", () => {
     const tier = tierSelect.value;
-    const wanted = tier === "standard" ? state.standardVoice : state.realtimeVoice;
+    const wanted =
+      tier === TIER_STANDARD ? state.standardVoice : state.realtimeVoice;
     repopulateVoices(tier, wanted);
-    state.tier = tier as "realtime" | "standard";
+    state.tier = tier as TranslationTier;
     renderTierRow();
     renderVoiceRow();
+    renderStartGate();
+    if (isRealtimeStartGated()) {
+      toggleBtn.disabled = true;
+      return;
+    }
     void pushSettings();
   });
   voiceSelect.addEventListener("change", () => {
-    const tier = tierSelect.value === "standard" ? "standard" : "realtime";
-    if (tier === "standard") state.standardVoice = voiceSelect.value;
+    const tier: TranslationTier =
+      tierSelect.value === TIER_STANDARD ? TIER_STANDARD : TIER_REALTIME;
+    if (tier === TIER_STANDARD) state.standardVoice = voiceSelect.value;
     else state.realtimeVoice = voiceSelect.value;
     renderVoiceRow();
     void pushSettings();
@@ -654,6 +766,7 @@ export function initPopup(): void {
     void pushSettings();
   });
   showSourceCheckbox.addEventListener("change", () => void pushSettings());
+  showTargetCaptionsCheckbox.addEventListener("change", () => void pushSettings());
   originalVolumeInput.addEventListener("input", onVolumeChange);
   voiceVolumeInput.addEventListener("input", onVolumeChange);
   toggleBtn.addEventListener("click", () => void onToggle());
@@ -676,21 +789,39 @@ export function initPopup(): void {
     }
   });
 
+  // Re-sync when the popup regains focus (user returned from the sign-in tab).
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    void send({ type: "GET_STATE" })
+      .then((reply) => {
+        if (reply?.ok && reply.state) applyState(reply.state);
+      })
+      .catch(() => {});
+  });
+
   // ── Custom dropdowns (tier / voice / lang) ────────────────────────────
-  const TIER_ICON_HTML = '<svg viewBox="0 0 12 12"><path d="M6.5 1L3 7h2.5L5 11l3.5-6H6L6.5 1z" fill="currentColor"/></svg>';
   function tierItems(): DropdownItem[] {
-    const isPaid = state.signedInUser?.tier === "max";
-    const allow = isPaid;
+    const allow = accountAllowsRealtime();
     return [
-      { value: "realtime", primary: TIER_META.realtime!.primary,
-        secondary: allow ? TIER_META.realtime!.secondary : "· Max only",
-        iconHtml: TIER_ICON_HTML, disabled: !allow && !!state.signedInUser },
-      { value: "standard", primary: TIER_META.standard!.primary,
-        secondary: TIER_META.standard!.secondary, iconHtml: TIER_ICON_HTML },
+      {
+        value: TIER_STANDARD,
+        primary: TIER_UI[TIER_STANDARD].primary,
+        secondary: TIER_UI[TIER_STANDARD].secondary,
+        iconHtml: tierIconHtml(TIER_STANDARD),
+      },
+      {
+        value: TIER_REALTIME,
+        primary: TIER_UI[TIER_REALTIME].primary,
+        secondary: allow ? TIER_UI[TIER_REALTIME].secondary : TIER_REALTIME_GATED_SECONDARY,
+        iconHtml: tierIconHtml(TIER_REALTIME),
+      },
     ];
   }
   function voiceItems(): DropdownItem[] {
-    const list = tierSelect.value === "standard" ? POPUP_STANDARD_VOICES : POPUP_REALTIME_VOICES;
+    const list =
+      tierSelect.value === TIER_STANDARD
+        ? popupStandardVoices(state.standardVoices ?? null)
+        : POPUP_REALTIME_VOICES;
     return list.map((v) => {
       const meta = VOICE_META[v.id] ?? DEFAULT_VOICE_META;
       const initial = (v.name[0] || "·").toUpperCase();
@@ -728,7 +859,7 @@ export function initPopup(): void {
 
   // ── Account menu popover ──────────────────────────────────────────────
   if (accountTrigger && accountMenuPanel) {
-    attachPopover({
+    accountPopover = attachPopover({
       trigger: accountTrigger,
       panel: accountMenuPanel,
       dim: accountMenuDim,
@@ -740,15 +871,22 @@ export function initPopup(): void {
 
   // ── Account-menu row handlers ─────────────────────────────────────────
   $("am-billing")?.addEventListener("click", () => {
-    window.open("https://echolyhq.com/account/billing", "_blank");
+    window.open(ECHOLY_WEB_URLS.accountBilling(), "_blank");
   });
   $("am-invoices")?.addEventListener("click", () => {
-    window.open("https://echolyhq.com/account/usage", "_blank");
+    window.open(ECHOLY_WEB_URLS.accountUsage(), "_blank");
   });
   $("am-help")?.addEventListener("click", () => {
-    window.open("https://echolyhq.com/help", "_blank");
+    window.open(ECHOLY_WEB_URLS.help(), "_blank");
   });
+
+  for (const el of document.querySelectorAll<HTMLAnchorElement>("[data-ec-web-href]")) {
+    const key = el.dataset.ecWebHref;
+    if (key === "privacy") el.href = ECHOLY_WEB_URLS.privacy();
+    else if (key === "terms") el.href = ECHOLY_WEB_URLS.terms();
+  }
   $("am-signout")?.addEventListener("click", async () => {
+    accountPopover?.close();
     try {
       const reply = await send({ type: "SIGN_OUT_ECHOLY" });
       if (reply?.ok && reply.state) applyState(reply.state);
@@ -792,14 +930,8 @@ export function initPopup(): void {
         for (const b of buttons) b.removeAttribute("aria-pressed");
         btn.setAttribute("aria-pressed", "true");
 
-        if (setting === "translationStyle") {
-          void dispatchAdvancedPatch({ translationStyle: value as TranslationStyle });
-        } else if (setting === "latencyPreset") {
-          void dispatchAdvancedPatch({ latencyPreset: value as LatencyPreset });
-        } else if (setting === "captionPosition") {
+        if (setting === "captionPosition") {
           void dispatchAdvancedPatch({ captionPosition: value as CaptionPosition });
-        } else if (setting === "noiseGate") {
-          void dispatchAdvancedPatch({ noiseGate: value === "on" });
         }
       });
     }
@@ -911,23 +1043,38 @@ export function initPopup(): void {
   }
 
   // ── Init ──────────────────────────────────────────────────────────────
-  setAccountClass("loading");
+  // Mirror <select> values/labels from TIER_UI (HTML is first-paint fallback only).
+  const tierOpts = [...tierSelect.options];
+  if (tierOpts[0]) {
+    tierOpts[0].value = TIER_STANDARD;
+    tierOpts[0].textContent = TIER_UI[TIER_STANDARD].optionLabel;
+  }
+  if (tierOpts[1]) {
+    tierOpts[1].value = TIER_REALTIME;
+    tierOpts[1].textContent = TIER_UI[TIER_REALTIME].optionLabel;
+  }
+  tierSelect.value = TIER_STANDARD;
+  lastAccountClass = "loading";
+  document.body.dataset.account = "loading";
+  document.body.dataset.loadingShell = "main";
+
   populateLanguages();
-  repopulateVoices(state.tier!, state.tier === "standard" ? state.standardVoice : state.realtimeVoice);
+  repopulateVoices(
+    state.tier!,
+    state.tier === TIER_STANDARD ? state.standardVoice : state.realtimeVoice,
+  );
   renderTierRow();
   renderVoiceRow();
   renderTargetLang(state.targetLanguage ?? "vi");
   setSliderFill(originalVolumeInput);
   setSliderFill(voiceVolumeInput);
 
-  // Read hasEverSignedIn from chrome.storage.local; default false.
-  // Advanced settings are NOT read from chrome.storage here — the SW owns them
-  // and ships the current state via GET_STATE / BACKGROUND_STATE_UPDATE.
   void (async () => {
     try {
       const r = await chrome.storage?.local?.get?.(HAS_EVER_SIGNED_IN_KEY);
       hasEverSignedIn = !!r?.[HAS_EVER_SIGNED_IN_KEY];
     } catch { /* storage unavailable */ }
+    document.body.dataset.loadingShell = hasEverSignedIn ? "main" : "welcome";
 
     try {
       const reply = await send({ type: "GET_STATE" });

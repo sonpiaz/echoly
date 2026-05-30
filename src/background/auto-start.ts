@@ -67,8 +67,7 @@ export function registerAutoStart(
       return;
     }
     if (!host) return;
-    // Gate 3 — signed in. Auto-start does NOT support BYOK guests (Advanced
-    // settings are server-owned; a guest has no autoStartHosts entry).
+    // Gate 3 — signed in (Advanced settings are server-owned).
     if (store.state.signedInUser === null) return;
     // Gate 4 — host opted in.
     if (store.state.advanced.autoStartHosts[host] !== true) return;

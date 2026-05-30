@@ -1,5 +1,16 @@
 import { defineConfig } from "wxt";
 
+/** Host permission for a build-time API/web origin (see .env.development / .env.production). */
+function hostPermForOrigin(origin: string): string {
+  const base = origin.replace(/\/$/, "");
+  return `${base}/*`;
+}
+
+const ECHOLY_API_ORIGIN =
+  process.env.WXT_ECHOLY_API_ORIGIN ?? "https://api.echolyhq.com";
+const ECHOLY_WEB_ORIGIN =
+  process.env.WXT_ECHOLY_WEB_ORIGIN ?? "https://echolyhq.com";
+
 // WXT config — generates an MV3 manifest byte-equivalent to legacy/manifest.json
 // (0.6.3). `version` is single-sourced from package.json (fixes the old
 // 0.6.1/0.6.3 content-guard drift). Content scripts emit at the stable,
@@ -27,16 +38,15 @@ export default defineConfig({
     name: "Echoly — Live YouTube Translation",
     short_name: "Echoly",
     description:
-      "Hear any YouTube video in your language. Live AI dubbing, 40+ language pairs. Free 30 min/month or bring your own Kyma key.",
+      "Hear any YouTube video in your language. Live AI dubbing, 40+ language pairs. Sign in for free and paid plans.",
     minimum_chrome_version: "116",
     permissions: ["activeTab", "scripting", "storage", "webRequest", "cookies"],
     host_permissions: [
       "https://*.youtube.com/*",
       "https://youtube.com/*",
-      "https://api.kymaapi.com/*",
-      "https://api.openai.com/*",
-      "https://api.echolyhq.com/*",
-      "https://echolyhq.com/*",
+      hostPermForOrigin(ECHOLY_API_ORIGIN),
+      hostPermForOrigin(ECHOLY_WEB_ORIGIN),
+      // Dev convenience: always allow local stack even if .env points elsewhere.
       ...(mode === "development"
         ? ["http://localhost:8787/*", "http://localhost:4321/*"]
         : []),
@@ -50,8 +60,7 @@ export default defineConfig({
     // can't accidentally widen prod surface.
     //
     // Do NOT add `connect-src` — network egress is governed by host_permissions;
-    // a connect-src would break the realtime OpenAI SDP POST and the Kyma /
-    // Echoly fetches.
+    // a connect-src would break Echoly API fetches.
     content_security_policy: {
       extension_pages: mode === "development"
         ? "script-src 'self' http://localhost:* http://127.0.0.1:*; object-src 'none'"

@@ -17,16 +17,13 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import { EC_SESSION_COOKIE } from "@/shared/constants";
+import { echolySessionCookieDomains } from "@/shared/echoly-config";
 import type { Store } from "./store";
 import type { EcholyAuth } from "./auth";
 import type { SettingsClient } from "./settings-client";
+import { scheduleHydrateSignedIn } from "./hydrate-signed-in";
 
-const COOKIE_DOMAIN_APEX = "echolyhq.com";
-const COOKIE_DOMAIN_DOT = ".echolyhq.com";
-// Dev-only: the local web (`localhost:4321`) sets cookies scoped to "localhost".
-// import.meta.env.DEV is statically replaced at build time — the prod bundle
-// has `false` here and the localhost branch is dead-code-eliminated.
-const COOKIE_DOMAIN_DEV = "localhost";
+const SESSION_COOKIE_DOMAINS = echolySessionCookieDomains();
 const DEBOUNCE_MS = 250;
 
 let pending: ReturnType<typeof setTimeout> | null = null;
@@ -66,11 +63,7 @@ export function installAuthListener(
     // EXACT domain match — endsWith would allow `evil-echolyhq.com`.
     // Dev builds additionally accept "localhost" so the local web's sign-in
     // event reaches the listener (prod build strips this branch via DCE).
-    if (
-      cookie.domain !== COOKIE_DOMAIN_APEX &&
-      cookie.domain !== COOKIE_DOMAIN_DOT &&
-      !(import.meta.env.DEV && cookie.domain === COOKIE_DOMAIN_DEV)
-    ) {
+    if (!SESSION_COOKIE_DOMAINS.includes(cookie.domain)) {
       return;
     }
     // Pair coalescing: the browser emits `overwrite` removed→added for an
@@ -80,32 +73,15 @@ export function installAuthListener(
     if (removed) {
       // Sign-out / explicit removal — server cookie removal is authoritative.
       // Clear locally; do NOT roundtrip /auth/me.
-      store.clearAuth();
-      store.broadcast();
+      void store.refreshAuth().finally(() => store.broadcast());
       return;
     }
 
-    // Sign-in detected — debounce 250ms, then refresh + sync settings +
-    // broadcast + close tab. Settings sync runs alongside refreshAuth so the
-    // popup renders user-customized Advanced values right after sign-in
-    // (otherwise it shows defaults until the next GET_STATE).
+    // Sign-in detected — debounce 250ms, then coalesced hydrate (300ms) + broadcast.
     if (pending) clearTimeout(pending);
     pending = setTimeout(() => {
       pending = null;
-      void (async () => {
-        try {
-          await store.refreshAuth();
-          if (settings) {
-            const bundle = await settings.fetchBundle().catch(() => null);
-            if (bundle) {
-              store.applyServerBundle(bundle);
-              await store.persistAdvanced();
-            }
-          }
-        } finally {
-          store.broadcast();
-        }
-      })();
+      scheduleHydrateSignedIn(store, settings);
       if (signinTabId != null) {
         const id = signinTabId;
         signinTabId = null;

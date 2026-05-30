@@ -20,14 +20,11 @@ import { routeMessage, type RouterDeps } from "@/background/router";
 import { Store } from "@/background/store";
 import { EcholyAuth } from "@/background/auth";
 import { SessionCoordinator } from "@/background/session-coordinator";
-import { CaptionCache } from "@/background/caption-cache";
-
 function buildDeps(): RouterDeps {
   const auth = new EcholyAuth();
   const store = new Store(auth);
   const session = new SessionCoordinator(store, auth);
-  const captions = new CaptionCache();
-  return { store, auth, session, captions };
+  return { store, auth, session };
 }
 
 /** Build a chrome.cookies.onChanged event payload. The `cause` enum is the
@@ -81,7 +78,7 @@ describe("auth-listener — chrome.cookies.onChanged semantics", () => {
   });
 
   // ── Spec 1 ────────────────────────────────────────────────────────────────
-  it("added/explicit → debounced refreshAuth + broadcast called once after 250ms", () => {
+  it("added/explicit → debounced hydrate + broadcast after 250ms", async () => {
     const refreshSpy = vi
       .spyOn(deps.store, "refreshAuth")
       .mockResolvedValue();
@@ -93,24 +90,15 @@ describe("auth-listener — chrome.cookies.onChanged semantics", () => {
       cookieEvent({ removed: false, cause: "explicit" }),
     );
 
-    // Nothing happens before the debounce window closes.
     expect(refreshSpy).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(249);
-    expect(refreshSpy).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(1); // hit 250ms
-    expect(refreshSpy).toHaveBeenCalledTimes(1);
-
-    // Allow the .then() microtask after refreshAuth resolves.
-    return Promise.resolve().then(() => {
-      expect(broadcastSpy).toHaveBeenCalledTimes(1);
-    });
+    vi.advanceTimersByTime(250); // cookie debounce
+    vi.advanceTimersByTime(300); // hydrate debounce
+    await vi.waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(broadcastSpy).toHaveBeenCalled());
   });
 
   // ── Spec 2 ────────────────────────────────────────────────────────────────
-  it("removed/explicit → clearAuth + broadcast; NO /auth/me roundtrip", () => {
-    const clearSpy = vi.spyOn(deps.store, "clearAuth");
+  it("removed/explicit → refreshAuth + broadcast; NO /auth/me roundtrip", async () => {
     const broadcastSpy = vi.spyOn(deps.store, "broadcast");
     const refreshSpy = vi
       .spyOn(deps.store, "refreshAuth")
@@ -125,10 +113,9 @@ describe("auth-listener — chrome.cookies.onChanged semantics", () => {
       cookieEvent({ removed: true, cause: "explicit" }),
     );
 
-    // Removed path is synchronous — no timer to advance.
-    expect(clearSpy).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
     expect(broadcastSpy).toHaveBeenCalledTimes(1);
-    expect(refreshSpy).not.toHaveBeenCalled();
     expect(fetchUserSpy).not.toHaveBeenCalled();
   });
 
@@ -157,8 +144,7 @@ describe("auth-listener — chrome.cookies.onChanged semantics", () => {
   });
 
   // ── Spec 4 ────────────────────────────────────────────────────────────────
-  it("storm — removed then added within 100ms → ONE clearAuth + ONE refreshAuth", () => {
-    const clearSpy = vi.spyOn(deps.store, "clearAuth");
+  it("storm — removed then added within 100ms → refreshAuth on remove + one debounced hydrate", async () => {
     const refreshSpy = vi
       .spyOn(deps.store, "refreshAuth")
       .mockResolvedValue();
@@ -169,24 +155,23 @@ describe("auth-listener — chrome.cookies.onChanged semantics", () => {
     chromeMock.cookies.onChanged.emit(
       cookieEvent({ removed: true, cause: "explicit" }),
     );
-    vi.advanceTimersByTime(50);
-    chromeMock.cookies.onChanged.emit(
-      cookieEvent({ removed: false, cause: "explicit" }),
-    );
-    vi.advanceTimersByTime(50);
-    // A second `added` arriving inside the debounce window must reset the timer
-    // (standard debounce). Net effect: still exactly one refreshAuth.
-    chromeMock.cookies.onChanged.emit(
-      cookieEvent({ removed: false, cause: "explicit" }),
-    );
-    vi.advanceTimersByTime(250); // flush the trailing debounce
+    await Promise.resolve();
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
 
-    expect(clearSpy).toHaveBeenCalledTimes(1); // from the `removed`
-    expect(refreshSpy).toHaveBeenCalledTimes(1); // debounce coalesces the two `added`s
-    // broadcast fires twice: once on remove (sync), once after refreshAuth resolves.
-    return Promise.resolve().then(() => {
-      expect(broadcastSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
-    });
+    vi.advanceTimersByTime(50);
+    chromeMock.cookies.onChanged.emit(
+      cookieEvent({ removed: false, cause: "explicit" }),
+    );
+    vi.advanceTimersByTime(50);
+    chromeMock.cookies.onChanged.emit(
+      cookieEvent({ removed: false, cause: "explicit" }),
+    );
+    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(300);
+
+    expect(refreshSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await Promise.resolve();
+    expect(broadcastSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   // ── Spec 5 ────────────────────────────────────────────────────────────────

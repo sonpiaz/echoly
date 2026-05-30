@@ -6,7 +6,7 @@
 <title>Echoly</title>
 <link rel="stylesheet" href="./style.css" />
 </head>
-<body data-state="idle" data-account="welcome">
+<body data-state="idle" data-account="loading" data-loading-shell="main">
 
 <!-- Glass gradient bed + noise — direct body children so they stay below the
      shell stacking layer. -->
@@ -55,7 +55,7 @@
     </span>
     <div>
       Audio is processed only while you're translating.<br>
-      <span class="trust-muted">No recordings stored. <a href="https://echolyhq.com/privacy" target="_blank">Privacy</a> · <a href="https://echolyhq.com/terms" target="_blank">Terms</a></span>
+      <span class="trust-muted">No recordings stored. <a href="#" data-ec-web-href="privacy" target="_blank" rel="noopener">Privacy</a> · <a href="#" data-ec-web-href="terms" target="_blank" rel="noopener">Terms</a></span>
     </div>
   </div>
 </main>
@@ -72,15 +72,6 @@
       </div>
     </div>
     <div class="header-actions">
-      <!-- Locked state: "Sign in →" pill on the right -->
-      <button type="button" class="signin-pill locked-only" id="lockedSigninBtn" data-ec-signin>
-        Sign in
-        <svg class="ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
-          <circle cx="7" cy="7" r="5.5"/>
-          <path d="M1.5 7h11M7 1.5c2 1.6 2 9.4 0 11M7 1.5c-2 1.6-2 9.4 0 11"/>
-        </svg>
-      </button>
-
       <!-- Signed-in: PlanBadge + Avatar -->
       <span id="plan-badge" class="plan-badge signedin-only" data-plan="free">
         <svg class="plan-badge-spark" viewBox="0 0 12 12" aria-hidden="true">
@@ -104,7 +95,7 @@
       </div>
       <div class="locked-cta-text">
         <div class="locked-cta-title">Sign in to start translating</div>
-        <div class="locked-cta-sub">Echoly needs an account to stream your translation tokens. Your settings below are saved locally.</div>
+        <div class="locked-cta-sub">Your language and tier choices are saved on this device until you sign in.</div>
       </div>
     </div>
     <button class="action" id="lockedCtaSigninBtn" data-ec-signin>
@@ -169,19 +160,20 @@
         <div class="row-text">
           <span class="label">Tier</span>
           <div class="row-value">
-            <span class="row-icon row-icon--tier" aria-hidden="true">
-              <svg viewBox="0 0 12 12"><path d="M6.5 1L3 7h2.5L5 11l3.5-6H6L6.5 1z" fill="currentColor"/></svg>
+            <span class="row-icon row-icon--tier-standard" id="tier-row-icon" aria-hidden="true">
+              <svg viewBox="0 0 12 12"><path d="M2 8.2c1.4-2.8 3.2-4.2 4-4.2s2.6 1.4 4 4.2" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M3.2 9.4h5.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             </span>
-            <span class="row-primary" id="tier-primary">Realtime</span>
-            <span class="row-secondary" id="tier-secondary">· &lt;1s · clones speaker</span>
+            <span class="row-primary" id="tier-primary">Standard</span>
+            <span class="row-secondary" id="tier-secondary">· ~5s lag · cheaper</span>
           </div>
         </div>
         <svg class="row-chev" viewBox="0 0 12 12" aria-hidden="true">
           <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
+        <!-- option value= must match TIER_REALTIME / TIER_STANDARD (shared/constants.ts) -->
         <select id="tier" class="dropdown-mirror-select" aria-label="Tier">
-          <option value="realtime">Realtime · clones speaker · &lt;1s</option>
-          <option value="standard">Standard · ~5s lag · cheaper</option>
+          <option value="standard" selected>Standard · ~5s lag · cheaper</option>
+          <option value="realtime">Realtime · &lt;1s · Max only</option>
         </select>
       </div>
       <div class="divider"></div>
@@ -217,7 +209,7 @@
         <i></i><i></i><i></i><i></i><i></i><i></i>
       </span>
     </section>
-    <div class="live-note live-only">Captions are showing on the video →</div>
+    <div class="live-note live-only">Translation shows on the video →</div>
     <section class="live-stats live-only">
       <div class="stat-card">
         <div class="stat-value" id="elapsed">00:00</div>
@@ -265,6 +257,10 @@
         <output id="voiceOut">100</output>
       </div>
       <label class="toggle-row">
+        <span>Subtitles on video</span>
+        <input id="showTargetCaptions" type="checkbox" checked />
+      </label>
+      <label class="toggle-row">
         <span>Show source captions</span>
         <input id="showSource" type="checkbox" />
       </label>
@@ -287,26 +283,6 @@
       </summary>
 
       <div class="advanced-body">
-
-        <!-- TRANSLATION -->
-        <div class="sub-label">Translation</div>
-        <div class="adv-row">
-          <div class="adv-row-label">Style</div>
-          <div class="segmented" data-count="3" data-setting="translationStyle">
-            <button type="button" data-value="literal">Literal</button>
-            <button type="button" data-value="natural">Natural</button>
-            <button type="button" data-value="casual">Casual</button>
-          </div>
-          <div class="adv-hint">Natural balances accuracy and flow</div>
-        </div>
-        <div class="adv-row">
-          <div class="adv-row-label">Latency</div>
-          <div class="segmented" data-count="2" data-setting="latencyPreset">
-            <button type="button" data-value="snappy">Snappy</button>
-            <button type="button" data-value="smooth">Smooth</button>
-          </div>
-          <div class="adv-hint">snappier = shorter chunks · smoother = fewer corrections</div>
-        </div>
 
         <!-- ON VIDEO -->
         <div class="sub-label">On video</div>
@@ -338,15 +314,6 @@
           </select>
           <div class="adv-hint">where the translated voice plays</div>
         </div>
-        <div class="adv-row">
-          <div class="adv-row-label">Noise gate</div>
-          <div class="segmented" data-count="2" data-setting="noiseGate">
-            <button type="button" data-value="off">Off</button>
-            <button type="button" data-value="on">On</button>
-          </div>
-          <div class="adv-hint">drop near-silence and background music</div>
-        </div>
-
         <!-- Footer -->
         <div class="adv-footer">
           <button type="button" class="adv-footer-link" id="advResetBtn">Reset to defaults</button>

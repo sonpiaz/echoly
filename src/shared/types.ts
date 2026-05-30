@@ -1,26 +1,21 @@
-// ────────────────────────────────────────────────────────────────────────────
-// LOCKED CONTRACT — shared domain types. Shapes are derived verbatim from the
-// legacy 0.6.3 `state` object (legacy/background.js:170-183), DEFAULT_SETTINGS
-// (legacy/background.js:9-20), and the popup render contract (legacy/popup.js
-// applyState). Build agents import these — do NOT redefine.
-// ────────────────────────────────────────────────────────────────────────────
+// Shared domain types — background state, settings, and cross-surface contracts.
 
+import type { LangPair, TranslationTier } from "./constants";
+import { DEFAULT_TRANSLATION_TIER } from "./constants";
 import type { AdvancedSettings, SiteOverrideMap } from "./advanced";
 import { DEFAULT_ADVANCED } from "./advanced";
 
-/** Translation mode chosen by the user (settings.tier). NOT the account tier. */
-export type TranslationTier = "realtime" | "standard";
+export type { TranslationTier } from "./constants";
+export { TIER_REALTIME, TIER_STANDARD, DEFAULT_TRANSLATION_TIER } from "./constants";
 
 /** Account / subscription tier (signedInUser.tier). NOT the translation mode. */
 export type AccountTier = "free" | "pro" | "max";
 
-/** How the content script's provider calls are routed.
- *  "byok" = user's own Kyma key (wins when present); "proxy" = Echoly session. */
-export type ApiMode = "byok" | "proxy" | null;
+/** Signed-in Echoly session routes API calls through the server proxy. */
+export type ApiMode = "proxy" | null;
 
-/** The 8 persisted settings keys (chrome.storage.local). `kymaKey` is the
- *  LEGACY name for the resolved bearer (a Kyma key OR an Echoly session token);
- *  keep the name unless renamed on BOTH sides. */
+/** The 8 persisted settings keys (chrome.storage.local). `apiBearer` is not
+ *  user-editable; CONTENT_START overwrites it with the session bearer. */
 export interface Settings {
   tier: TranslationTier;
   targetLanguage: string;
@@ -29,56 +24,42 @@ export interface Settings {
   originalVolume: number;
   voiceVolume: number;
   showSource: boolean;
-  kymaKey: string;
+  /** Show translated subtitles on the video overlay strip (all platforms). */
+  showTargetCaptions: boolean;
+  apiBearer: string;
 }
 
-/** Verbatim DEFAULT_SETTINGS (legacy/background.js:9-20). */
 export const DEFAULT_SETTINGS: Settings = {
-  tier: "realtime",
+  tier: DEFAULT_TRANSLATION_TIER,
   targetLanguage: "vi",
   realtimeVoice: "marin",
   standardVoice: "English_magnetic_voiced_man",
   originalVolume: 18,
   voiceVolume: 100,
   showSource: false,
-  kymaKey: "",
+  showTargetCaptions: true,
+  apiBearer: "",
 };
 
 export interface SignedInUser {
+  id?: string;
   email: string;
   tier: AccountTier;
+  cancel_at_period_end?: boolean;
 }
 
 export interface Usage {
-  standard: number; // used minutes
-  realtime: number; // used minutes
+  standard: number; // used minutes (legacy flat)
+  realtime: number;
+  /** Server caps from session bootstrap `usage` when signed in. */
+  standardCap?: number;
+  realtimeCap?: number;
+  /** Server-computed remaining (preferred over cap - used). */
+  standardRemaining?: number;
+  realtimeRemaining?: number;
+  /** Period end from bootstrap `usage.resets_at` (anchor-based; not calendar month). */
+  resetsAt?: string;
 }
-
-// ── Guest language policy ────────────────────────────────────────────────────
-// In the GUEST world (apiMode === "byok": user brings their own Kyma key, no
-// Echoly account) the extension limits the languages it offers. The policy is
-// served by the Echoly server at GET /v1/config/guest (public, admin-editable
-// on the server). The extension fetches it, caches it, and falls back to a
-// default (en→vi) on failure. Enforcement is client-side — it's a UX nudge,
-// not a security boundary (the guest spends their own Kyma credit, so no
-// Echoly resource is at risk). See the approved plan §4.
-
-export interface GuestLanguagePolicy {
-  /** ISO codes (e.g. "en", "vi") allowed as the SOURCE language for guests. */
-  allowedSource: string[];
-  /** ISO codes allowed as the TARGET language for guests. */
-  allowedTarget: string[];
-  /** Defaults the extension pre-selects when entering guest mode or when the
-   *  currently-selected language is outside the allowed set. */
-  defaults: { source: string; target: string };
-}
-
-/** Default served when the policy fetch fails or shape-validates as invalid. */
-export const DEFAULT_GUEST_LANGUAGE_POLICY: GuestLanguagePolicy = {
-  allowedSource: ["en"],
-  allowedTarget: ["vi"],
-  defaults: { source: "en", target: "vi" },
-};
 
 /** The canonical session snapshot owned by the background SW (single source of
  *  truth). Popup is a passive renderer of this; content holds no copy. */
@@ -92,9 +73,14 @@ export interface State extends Settings {
   apiMode: ApiMode;
   signedInUser: SignedInUser | null;
   usage: Usage | null;
-  /** Guest language policy (null until the first fetch lands; popup gates on
-   *  this when apiMode === "byok"). */
-  guestPolicy: GuestLanguagePolicy | null;
+  /** Target-language options from server catalog (tier-filtered when signed in). */
+  languagePicker: LangPair[] | null;
+  /** Display names from server `languages` map (catalog SoT). */
+  languageNames: Record<string, string> | null;
+  /** Standard-tier voice catalog from bootstrap or GET /v1/config/voices (signed-out). */
+  standardVoices: ReadonlyArray<{ id: string; label: string }> | null;
+  /** Default standard voice_id from server catalog. */
+  standardVoiceDefaultId: string | null;
   /** Wall-clock millis when the current session went `running=true`. Set by
    *  the session coordinator on START, cleared on STOP. The popup uses this
    *  to render an authoritative elapsed counter; without it the counter
@@ -131,7 +117,10 @@ export const INITIAL_STATE: State = {
   apiMode: null,
   signedInUser: null,
   usage: null,
-  guestPolicy: null,
+  languagePicker: null,
+  languageNames: null,
+  standardVoices: null,
+  standardVoiceDefaultId: null,
   sessionStartedAt: null,
   advanced: { ...DEFAULT_ADVANCED },
   siteOverrides: {},
@@ -141,30 +130,17 @@ export const INITIAL_STATE: State = {
   ...DEFAULT_SETTINGS,
 };
 
-/** Result of resolveApiMode (legacy/background.js:153-166). null when neither
- *  a BYOK key nor a signed-in Echoly session is available. */
+/** Result of resolveApiMode — null when not signed in. */
 export interface ResolvedApiMode {
   apiBase: string;
   apiKey: string;
-  mode: Exclude<ApiMode, null>;
-  user: SignedInUser | null;
+  mode: "proxy";
+  user: SignedInUser;
 }
 
-/** Settings payload the SW relays to content on CONTENT_START
- *  (legacy/background.js:304-308): a full state snapshot with apiBase added and
- *  `kymaKey` OVERRIDDEN to the resolved bearer. */
+/** Full state snapshot relayed to content on CONTENT_START (apiBase + apiBearer). */
 export interface StartSettings extends State {
   apiBase: string;
-}
-
-/** A YouTube caption-track cache entry (legacy/background.js:45-52). */
-export interface YtCaptionEntry {
-  url: string;
-  lang: string | null;
-  kind: string | null;
-  tlang: string | null;
-  isAsr: boolean;
-  capturedAt: number;
 }
 
 /** One translated turn in the overlay history (newest-first, capped HISTORY_MAX). */

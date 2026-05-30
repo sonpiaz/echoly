@@ -11,17 +11,22 @@ import { SessionCoordinator } from "@/background/session-coordinator";
 import {
   CONTENT_SCRIPT_PATH,
   CONTENT_CSS_PATH,
-  KYMA_DIRECT_BASE,
+  DEFAULT_TRANSLATION_TIER,
+  ECHOLY_PROXY_BASE,
 } from "@/shared/constants";
+import type { SignedInUser } from "@/shared/types";
+
+const SIGNED_IN: SignedInUser = { email: "a@b.com", tier: "max" };
 
 function build(chromeMock: FakeChrome): {
   store: Store;
   session: SessionCoordinator;
+  auth: EcholyAuth;
 } {
   const auth = new EcholyAuth();
   const store = new Store(auth);
   const session = new SessionCoordinator(store, auth);
-  return { store, session };
+  return { store, session, auth };
 }
 
 describe("ensureContentScript — PING-then-inject at the WXT-stable path", () => {
@@ -60,45 +65,43 @@ describe("ensureContentScript — PING-then-inject at the WXT-stable path", () =
   });
 });
 
-describe("start — happy path with BYOK key", () => {
+describe("start — signed-in proxy", () => {
   let chromeMock: FakeChrome;
   let store: Store;
   let session: SessionCoordinator;
+  let auth: EcholyAuth;
   beforeEach(() => {
     chromeMock = resetChrome();
-    ({ store, session } = build(chromeMock));
-    // BYOK key present → resolveApiMode = byok, no cookie/fetch needed
-    chromeMock.storage.local._data["kymaKey"] = "sk-kyma-xyz";
+    ({ store, session, auth } = build(chromeMock));
+    vi.spyOn(auth, "getSessionToken").mockResolvedValue("ec-session-tok");
+    vi.spyOn(auth, "fetchUser").mockResolvedValue(SIGNED_IN);
     chromeMock.tabs.query.mockResolvedValue([
       { id: 9, url: "https://www.youtube.com/watch?v=abc" },
     ]);
     chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
   });
 
-  it("resolves BYOK, injects, relays CONTENT_START with apiBase + overridden bearer", async () => {
-    await store.loadSettings(); // hydrate kymaKey into state
+  it("resolves proxy, injects, relays CONTENT_START with apiBase + session bearer", async () => {
+    await store.loadSettings();
     const result = await session.start({ targetLanguage: "ja" });
 
     expect(result.ok).toBe(true);
     expect(store.state.running).toBe(true);
     expect(store.state.connecting).toBe(false);
     expect(store.state.status).toBe("Translating");
-    expect(store.state.apiMode).toBe("byok");
+    expect(store.state.apiMode).toBe("proxy");
     expect(store.state.tabId).toBe(9);
 
-    // find the CONTENT_START relay among the tabs.sendMessage calls
     const startCall = chromeMock.tabs.sendMessage.mock.calls.find(
       (c) => (c[1] as { type?: string })?.type === "CONTENT_START",
     );
     expect(startCall).toBeDefined();
     const settings = (startCall![1] as { settings: Record<string, unknown> })
       .settings;
-    // apiBase injected, kymaKey overridden to the resolved bearer
-    expect(settings.apiBase).toBe(KYMA_DIRECT_BASE);
-    expect(settings.kymaKey).toBe("sk-kyma-xyz");
-    // full snapshot fields present
+    expect(settings.apiBase).toBe(ECHOLY_PROXY_BASE);
+    expect(settings.apiBearer).toBe("ec-session-tok");
     expect(settings.targetLanguage).toBe("ja");
-    expect(settings.tier).toBe("realtime");
+    expect(settings.tier).toBe(DEFAULT_TRANSLATION_TIER);
   });
 
   it("rejects a second start while running/connecting", async () => {
@@ -172,6 +175,23 @@ describe("updateVolume — active-tab fallback when tabId is null", () => {
     );
     expect(volCall).toBeDefined();
     expect(volCall![0]).toBe(3);
+  });
+
+  it("stop with null tabId falls back to active YT tab and relays CONTENT_STOP", async () => {
+    store.setTabId(null);
+    store.setRunning(true);
+    chromeMock.tabs.query.mockResolvedValue([
+      { id: 7, url: "https://www.youtube.com/watch?v=x" },
+    ]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+    const r = await session.stop();
+    expect(r.ok).toBe(true);
+    expect(store.state.running).toBe(false);
+    const stopCall = chromeMock.tabs.sendMessage.mock.calls.find(
+      (c) => (c[1] as { type?: string })?.type === "CONTENT_STOP",
+    );
+    expect(stopCall).toBeDefined();
+    expect(stopCall![0]).toBe(7);
   });
 
   it("no active YT tab → applies volume to state but relays nothing", async () => {

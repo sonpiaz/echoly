@@ -40,7 +40,7 @@ export interface SettingsBundle {
 export class SettingsHttpError extends Error {
   constructor(
     readonly status: number,
-    readonly body: unknown,
+    readonly body: string | Record<string, object | string | number | boolean | null> | null,
     message: string,
   ) {
     super(message);
@@ -50,19 +50,21 @@ export class SettingsHttpError extends Error {
 
 /** Best-effort JSON parse — non-JSON bodies (HTML 500 pages, etc.) become
  *  the raw text. Never throws. */
-async function readBody(r: Response): Promise<unknown> {
+async function readBody(
+  r: Response,
+): Promise<Record<string, object | string | number | boolean | null> | string | null> {
   const text = await r.text().catch(() => "");
   if (!text) return null;
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as Record<string, object | string | number | boolean | null>;
   } catch {
     return text;
   }
 }
 
-function shapeBundle(raw: unknown): SettingsBundle | null {
+function shapeBundle(raw: Record<string, object | string | number | boolean | null> | string | null): SettingsBundle | null {
   if (!raw || typeof raw !== "object") return null;
-  const v = raw as Record<string, unknown>;
+  const v = raw as Record<string, object | string | number | boolean | null>;
   if (
     !v.settings ||
     typeof v.settings !== "object" ||
@@ -113,7 +115,7 @@ export class SettingsClient {
     if (!r.ok) {
       const msg =
         body && typeof body === "object" && "error" in body
-          ? String((body as { error: unknown }).error)
+          ? String((body as { error: object | string | number | boolean | null }).error)
           : `HTTP ${r.status}`;
       throw new SettingsHttpError(r.status, body, msg);
     }

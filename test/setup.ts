@@ -147,6 +147,15 @@ export function resetChrome(): FakeChrome {
   return c;
 }
 
+/** jsdom omits rAF in some teardown paths; media-stage uses it for layout sync. */
+if (typeof globalThis.requestAnimationFrame !== "function") {
+  globalThis.requestAnimationFrame = (cb: FrameRequestCallback) =>
+    setTimeout(() => cb(performance.now()), 0) as unknown as number;
+}
+if (typeof globalThis.cancelAnimationFrame !== "function") {
+  globalThis.cancelAnimationFrame = (id: number) => clearTimeout(id);
+}
+
 beforeEach(() => {
   resetChrome();
 });

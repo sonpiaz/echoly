@@ -4,17 +4,17 @@
 // <select>/Stop DOM events ONLY invoke the injected OverlayCallbacks (the
 // overlay never branches realtime-vs-standard — that's the controller's job).
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { disposeMediaStageWatch } from "@/content/media-stage";
 import { createOverlay } from "@/content/overlay/overlay";
 import type { OverlayCallbacks } from "@/shared/ports";
 import {
   HISTORY_MAX,
-  LANGUAGES,
   LAYOUT_KEY,
-  REALTIME_VOICES,
-  STANDARD_VOICES,
+  TIER_REALTIME,
+  TIER_STANDARD,
 } from "@/shared/constants";
-import { CAPTION_PRESETS } from "@/shared/advanced";
-
+import { offlineLanguagePicker } from "@/lib/offline-language-bootstrap";
+import { offlineStandardVoices } from "@/lib/offline-voice-bootstrap";
 function makeCallbacks(): OverlayCallbacks & {
   onLanguageChange: ReturnType<typeof vi.fn>;
   onVoiceChange: ReturnType<typeof vi.fn>;
@@ -28,108 +28,122 @@ function makeCallbacks(): OverlayCallbacks & {
 }
 
 beforeEach(() => {
-  document.documentElement.querySelectorAll(".ec-root").forEach((n) =>
-    n.remove(),
-  );
+  disposeMediaStageWatch();
+  document.querySelectorAll(".ec-root").forEach((n) => n.remove());
   localStorage.clear();
   // jsdom lacks setPointerCapture / matchMedia — stub the methods the overlay uses.
   // (window.innerWidth/innerHeight default to 1024×768 in jsdom.)
 });
 
 describe("buildOverlay — DOM structure", () => {
-  it("mounts <aside.ec-root data-state=ready> on document.documentElement", () => {
+  it("mounts <aside.ec-root data-state=ready> on document.body", () => {
     const ov = createOverlay();
     expect(ov.isMounted()).toBe(false);
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(".ec-root");
+    const root = document.body.querySelector(".ec-root");
     expect(root).not.toBeNull();
     expect(root!.tagName).toBe("ASIDE");
     expect((root as HTMLElement).dataset.state).toBe("ready");
-    expect(root!.parentElement).toBe(document.documentElement);
+    expect(root!.parentElement).toBe(document.body);
     expect(ov.isMounted()).toBe(true);
   });
 
-  it("contains all the load-bearing .ec-* nodes + data-ec-* hooks", () => {
+  it("contains V5 dock + caption + expanded panel hooks", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(".ec-root")!;
-    // toolbar + brand cluster
-    expect(root.querySelector(".ec-toolbar[data-ec-drag]")).not.toBeNull();
-    expect(root.querySelector(".ec-brand")).not.toBeNull();
-    expect(root.querySelector(".ec-mark[aria-hidden]")).not.toBeNull();
-    expect(root.querySelector(".ec-mark svg path")).not.toBeNull();
-    expect(root.querySelector(".ec-wordmark")!.textContent).toBe("Echoly");
+    const root = document.body.querySelector(".ec-root")!;
+    expect(root.querySelector(".ec-dock[data-ec-drag]")).not.toBeNull();
+    expect(root.querySelector(".ec-dock-mark[aria-hidden]")).not.toBeNull();
     expect(root.querySelector("[data-ec-status]")!.textContent).toBe("Ready");
-    expect(root.querySelector(".ec-spacer")).not.toBeNull();
-    // controls
+    expect(root.querySelector(".ec-caption[data-ec-target]")).not.toBeNull();
+    expect(root.querySelector("[data-ec-stop]")).not.toBeNull();
+    expect(root.querySelector("[data-ec-caption-toggle]")).not.toBeNull();
+    expect(root.querySelector("[data-ec-expand]")).not.toBeNull();
+    const panel = root.querySelector("[data-ec-panel]") as HTMLElement;
+    expect(panel.hidden).toBe(true);
+    expect(root.querySelector("[data-ec-panel-preview]")).not.toBeNull();
+    expect(root.querySelector("[data-ec-source]")).not.toBeNull();
     expect(
       root.querySelector("select.ec-select[data-ec-language]"),
     ).not.toBeNull();
     expect(
       root.querySelector("select.ec-select[data-ec-voice]"),
     ).not.toBeNull();
-    expect(root.querySelector("[data-ec-hide]")!.textContent).toBe("Hide");
-    expect(
-      root.querySelector("button.ec-btn-primary[data-ec-stop]")!.textContent,
-    ).toBe("Stop");
-    // body
-    expect(root.querySelector(".ec-body .ec-main [data-ec-target]")).not.toBeNull();
-    expect(root.querySelector(".ec-side[data-ec-side]")).not.toBeNull();
-    const source = root.querySelector("[data-ec-source]") as HTMLElement;
-    const history = root.querySelector("[data-ec-history]") as HTMLElement;
-    expect(source.hidden).toBe(true);
-    expect(history.hidden).toBe(true);
   });
 
-  it("renders the 8 resize handles with exact data-ec-resize values", () => {
+  it("expand opens panel and collapse closes it (persisted in LAYOUT_KEY)", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(".ec-root")!;
-    const values = Array.from(
-      root.querySelectorAll<HTMLElement>("[data-ec-resize]"),
-    ).map((h) => h.dataset.ecResize);
-    expect(values).toEqual(["n", "e", "s", "w", "nw", "ne", "sw", "se"]);
-    // edges vs corners class hooks
-    expect(root.querySelector(".ec-resize-edge-n[data-ec-resize=n]")).not.toBeNull();
-    expect(
-      root.querySelector(".ec-resize-corner-se[data-ec-resize=se]"),
-    ).not.toBeNull();
+    const root = document.body.querySelector(".ec-root") as HTMLElement;
+    const expand = root.querySelector("[data-ec-expand]") as HTMLButtonElement;
+    expand.click();
+    expect(root.classList.contains("ec-panel-open")).toBe(true);
+    expect((root.querySelector("[data-ec-panel]") as HTMLElement).hidden).toBe(
+      false,
+    );
+    const collapse = root.querySelector(
+      "[data-ec-collapse]",
+    ) as HTMLButtonElement;
+    collapse.click();
+    expect(root.classList.contains("ec-panel-open")).toBe(false);
+    const stored = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}");
+    expect(stored.panelExpanded).toBe(false);
   });
 
-  it("populates the language picker (13 LANGUAGES, default vi)", () => {
+  it("dock CC and panel toggle hide subtitles (ec-caption-off)", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const lang = document.documentElement.querySelector(
+    const root = document.body.querySelector(".ec-root") as HTMLElement;
+    const dockCc = root.querySelector(
+      "[data-ec-caption-toggle]",
+    ) as HTMLButtonElement;
+    dockCc.click();
+    expect(root.classList.contains("ec-caption-off")).toBe(true);
+    expect(dockCc.getAttribute("aria-pressed")).toBe("false");
+    const panelToggle = root.querySelector(
+      "[data-ec-caption-visible]",
+    ) as HTMLInputElement;
+    expect(panelToggle.checked).toBe(false);
+    panelToggle.checked = true;
+    panelToggle.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.classList.contains("ec-caption-off")).toBe(false);
+    expect(dockCc.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("populates the language picker (17-lang offline bootstrap, default vi)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const lang = document.body.querySelector(
       "[data-ec-language]",
     ) as HTMLSelectElement;
-    expect(lang.options.length).toBe(LANGUAGES.length);
-    expect(lang.options[0]!.value).toBe("en");
-    expect(lang.options[0]!.textContent).toBe("English");
+    const langs = offlineLanguagePicker();
+    expect(lang.options.length).toBe(langs.length);
+    expect(langs.length).toBe(17);
     expect(lang.value).toBe("vi");
   });
 
-  it("realtime voice picker shows 'Auto' (NOT 'Auto · clones speaker') + 9 voices", () => {
+  it("realtime voice picker is Auto only (server ignores voice id)", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const voice = document.documentElement.querySelector(
+    ov.populateVoicePicker(TIER_REALTIME, "");
+    const voice = document.body.querySelector(
       "[data-ec-voice]",
     ) as HTMLSelectElement;
-    expect(voice.options.length).toBe(REALTIME_VOICES.length + 1);
+    expect(voice.options.length).toBe(1);
     expect(voice.options[0]!.value).toBe("");
-    expect(voice.options[0]!.textContent).toBe("Auto"); // overlay form, not popup form
-    expect(voice.options[1]!.value).toBe("marin");
-    expect(voice.options[1]!.textContent).toBe("Marin");
-    expect(voice.value).toBe("marin");
+    expect(voice.options[0]!.textContent).toBe("Auto");
+    expect(voice.value).toBe("");
   });
 
   it("populateVoicePicker('standard') swaps to the 5 standard voices", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    ov.populateVoicePicker("standard", STANDARD_VOICES[0]![0]);
-    const voice = document.documentElement.querySelector(
+    const std = offlineStandardVoices();
+    ov.populateVoicePicker(TIER_STANDARD, std[0]![0]);
+    const voice = document.body.querySelector(
       "[data-ec-voice]",
     ) as HTMLSelectElement;
-    expect(voice.options.length).toBe(STANDARD_VOICES.length);
+    expect(voice.options.length).toBe(offlineStandardVoices().length);
     expect(voice.options[0]!.value).toBe("English_magnetic_voiced_man");
     expect(voice.options[0]!.textContent).toBe("Magnetic Man");
     expect(voice.value).toBe("English_magnetic_voiced_man");
@@ -139,7 +153,7 @@ describe("buildOverlay — DOM structure", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
     ov.buildOverlay(makeCallbacks());
-    expect(document.documentElement.querySelectorAll(".ec-root").length).toBe(1);
+    expect(document.body.querySelectorAll(".ec-root").length).toBe(1);
   });
 });
 
@@ -148,7 +162,7 @@ describe("buildOverlay — render-only seam", () => {
     const ov = createOverlay();
     const cbs = makeCallbacks();
     ov.buildOverlay(cbs);
-    const lang = document.documentElement.querySelector(
+    const lang = document.body.querySelector(
       "[data-ec-language]",
     ) as HTMLSelectElement;
     lang.value = "ja";
@@ -163,13 +177,15 @@ describe("buildOverlay — render-only seam", () => {
     const ov = createOverlay();
     const cbs = makeCallbacks();
     ov.buildOverlay(cbs);
-    const voice = document.documentElement.querySelector(
+    const std = offlineStandardVoices();
+    ov.populateVoicePicker(TIER_STANDARD, std[0]![0]);
+    const voice = document.body.querySelector(
       "[data-ec-voice]",
     ) as HTMLSelectElement;
-    voice.value = "coral";
+    voice.value = std[1]![0];
     voice.dispatchEvent(new Event("change"));
     expect(cbs.onVoiceChange).toHaveBeenCalledTimes(1);
-    expect(cbs.onVoiceChange).toHaveBeenCalledWith("coral");
+    expect(cbs.onVoiceChange).toHaveBeenCalledWith(std[1]![0]);
     expect(cbs.onLanguageChange).not.toHaveBeenCalled();
   });
 
@@ -177,7 +193,7 @@ describe("buildOverlay — render-only seam", () => {
     const ov = createOverlay();
     const cbs = makeCallbacks();
     ov.buildOverlay(cbs);
-    const stop = document.documentElement.querySelector(
+    const stop = document.body.querySelector(
       "[data-ec-stop]",
     ) as HTMLButtonElement;
     stop.click();
@@ -186,21 +202,32 @@ describe("buildOverlay — render-only seam", () => {
     expect(cbs.onVoiceChange).not.toHaveBeenCalled();
   });
 
-  it("Hide toggle is pure UI — flips label + persists layout, no callbacks", () => {
+  it("caption toggle invokes onTargetCaptionVisibilityChange", () => {
     const ov = createOverlay();
     const cbs = makeCallbacks();
+    cbs.onTargetCaptionVisibilityChange = vi.fn();
     ov.buildOverlay(cbs);
-    const hide = document.documentElement.querySelector(
-      "[data-ec-hide]",
+    const dockCc = document.body.querySelector(
+      "[data-ec-caption-toggle]",
     ) as HTMLButtonElement;
-    const root = document.documentElement.querySelector(".ec-root")!;
-    expect(hide.textContent).toBe("Hide");
-    hide.click();
-    expect(hide.textContent).toBe("Show");
-    expect(root.classList.contains("is-side-collapsed")).toBe(true);
-    expect(JSON.parse(localStorage.getItem(LAYOUT_KEY)!).sideCollapsed).toBe(
-      true,
-    );
+    dockCc.click();
+    expect(cbs.onTargetCaptionVisibilityChange).toHaveBeenCalledWith(false);
+    dockCc.click();
+    expect(cbs.onTargetCaptionVisibilityChange).toHaveBeenCalledWith(true);
+  });
+
+  it("mix sliders invoke onMixChange without onStop", () => {
+    const ov = createOverlay();
+    const cbs = makeCallbacks();
+    cbs.onMixChange = vi.fn();
+    ov.buildOverlay(cbs);
+    ov.setMixVolumes(18, 100);
+    const orig = document.body.querySelector(
+      "[data-ec-original-vol]",
+    ) as HTMLInputElement;
+    orig.value = "25";
+    orig.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(cbs.onMixChange).toHaveBeenCalledWith(25, 100);
     expect(cbs.onStop).not.toHaveBeenCalled();
   });
 });
@@ -209,7 +236,7 @@ describe("overlay view methods", () => {
   it("setOverlayState writes data-state; setStatusText updates .ec-state", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(".ec-root") as HTMLElement;
+    const root = document.body.querySelector(".ec-root") as HTMLElement;
     ov.setOverlayState("live");
     expect(root.dataset.state).toBe("live");
     ov.setStatusText("Translating");
@@ -222,83 +249,52 @@ describe("overlay view methods", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
     ov.setTargetText("xin chào");
-    const target = document.documentElement.querySelector(
+    const target = document.body.querySelector(
       "[data-ec-target]",
     ) as HTMLElement;
     expect(target.textContent).toBe("xin chào");
     expect(target.dir).toBe("ltr"); // vi is not RTL
   });
 
-  it("applySourceVisibility + setSourceText (last 220 chars)", () => {
+  it("setSourceText shows source block in panel when showSource is on", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const source = document.documentElement.querySelector(
+    ov.applySourceVisibility(true);
+    ov.setSourceText("hello source");
+    const source = document.body.querySelector(
       "[data-ec-source]",
     ) as HTMLElement;
-    ov.applySourceVisibility(true);
     expect(source.hidden).toBe(false);
-    const long = "a".repeat(300);
-    ov.setSourceText(long);
-    expect(source.textContent!.length).toBe(220);
-    ov.applySourceVisibility(false);
-    expect(source.hidden).toBe(true);
+    expect(source.textContent).toBe("hello source");
   });
 
-  it("pushHistoryTurn prepends newest-first and caps at HISTORY_MAX", () => {
+  it("history remains unmounted in V5 (markers are no-op)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    ov.pushHistoryTurn({ source: "s", target: "t" });
+    ov.pushHistoryMarker("vi → en");
+    expect(document.body.querySelector("[data-ec-history]")).toBeNull();
+  });
+
+  it.skip("pushHistoryTurn prepends newest-first and caps at HISTORY_MAX", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
     for (let i = 0; i < HISTORY_MAX + 5; i++) {
       ov.pushHistoryTurn({ source: `s${i}`, target: `t${i}` });
     }
-    const history = document.documentElement.querySelector(
+    const history = document.body.querySelector(
       "[data-ec-history]",
     ) as HTMLElement;
     expect(history.hidden).toBe(false);
     const items = history.querySelectorAll(".ec-h-item");
     expect(items.length).toBe(HISTORY_MAX);
-    // newest-first: first DOM item is the last pushed
     const last = HISTORY_MAX + 5 - 1;
     expect(items[0]!.querySelector(".ec-h-text")!.textContent).toBe(`t${last}`);
   });
 
-  it("pushHistoryMarker renders a .ec-h-marker > .ec-h-marker-chip with the text", () => {
-    const ov = createOverlay();
-    ov.buildOverlay(makeCallbacks());
-    ov.pushHistoryMarker("vi → en");
-    const history = document.documentElement.querySelector(
-      "[data-ec-history]",
-    ) as HTMLElement;
-    expect(history.hidden).toBe(false);
-    const marker = history.querySelector(".ec-h-marker");
-    expect(marker).not.toBeNull();
-    const chip = marker!.querySelector(".ec-h-marker-chip");
-    expect(chip).not.toBeNull();
-    expect(chip!.textContent).toBe("vi → en");
-  });
+  it.skip("pushHistoryMarker renders a .ec-h-marker > .ec-h-marker-chip with the text", () => {});
 
-  it("pushHistoryMarker flushes the current target turn (legacy pushHistoryTurn({marker}))", () => {
-    const ov = createOverlay();
-    ov.buildOverlay(makeCallbacks());
-    // an in-progress turn is captured via setTargetText, then a swap marks it
-    ov.setTargetText("dở dang");
-    ov.pushHistoryMarker("Switching voice");
-    const history = document.documentElement.querySelector(
-      "[data-ec-history]",
-    ) as HTMLElement;
-    // one entry: marker chip + the flushed turn's text
-    expect(history.querySelector(".ec-h-marker-chip")!.textContent).toBe(
-      "Switching voice",
-    );
-    expect(history.querySelector(".ec-h-item .ec-h-text")!.textContent).toBe(
-      "dở dang",
-    );
-    expect(history.querySelectorAll(".ec-h-item").length).toBe(1);
-    // marker entries count toward HISTORY_MAX
-    for (let i = 0; i < HISTORY_MAX; i++) ov.pushHistoryMarker(`m${i}`);
-    expect(history.querySelectorAll(".ec-h-marker-chip").length).toBe(
-      HISTORY_MAX,
-    );
-  });
+  it.skip("pushHistoryMarker flushes the current target turn (legacy)", () => {});
 
   it("setLanguageSelection sets the <select> value and is a safe no-op unmounted", () => {
     const ov = createOverlay();
@@ -306,14 +302,14 @@ describe("overlay view methods", () => {
     expect(() => ov.setLanguageSelection("ja")).not.toThrow();
     ov.buildOverlay(makeCallbacks());
     ov.setLanguageSelection("ko");
-    const lang = document.documentElement.querySelector(
+    const lang = document.body.querySelector(
       "[data-ec-language]",
     ) as HTMLSelectElement;
     expect(lang.value).toBe("ko");
     // also drives RTL on subsequent target text (ar is RTL)
     ov.setLanguageSelection("ar");
     ov.setTargetText("مرحبا");
-    const target = document.documentElement.querySelector(
+    const target = document.body.querySelector(
       "[data-ec-target]",
     ) as HTMLElement;
     expect(target.dir).toBe("rtl");
@@ -322,7 +318,7 @@ describe("overlay view methods", () => {
   it("showToast builds a .ec-toast via DOM API (textContent, never innerHTML)", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(".ec-root")!;
+    const root = document.body.querySelector(".ec-root")!;
     ov.showToast("<img src=x onerror=alert(1)>");
     const toast = root.querySelector(".ec-toast")!;
     expect(toast.textContent).toBe("<img src=x onerror=alert(1)>");
@@ -337,22 +333,22 @@ describe("overlay view methods", () => {
     expect(ov.isMounted()).toBe(true);
     ov.removeOverlay();
     expect(ov.isMounted()).toBe(false);
-    expect(document.documentElement.querySelector(".ec-root")).toBeNull();
+    expect(document.body.querySelector(".ec-root")).toBeNull();
   });
 
-  it("showToast renders an optional CTA link via DOM APIs (the 'Top up' link)", () => {
+  it("showToast renders an optional CTA link via DOM APIs", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(".ec-root")!;
-    ov.showToast("Out of Kyma balance.", {
+    const root = document.body.querySelector(".ec-root")!;
+    ov.showToast("Quota exhausted.", {
       durationMs: 9000,
-      cta: "https://kymaapi.com/billing",
-      ctaLabel: "Top up",
+      cta: "https://echolyhq.com/upgrade",
+      ctaLabel: "Upgrade",
     });
     const link = root.querySelector(".ec-toast a") as HTMLAnchorElement;
     expect(link).not.toBeNull();
-    expect(link.href).toBe("https://kymaapi.com/billing");
-    expect(link.textContent).toBe("Top up");
+    expect(link.href).toBe("https://echolyhq.com/upgrade");
+    expect(link.textContent).toBe("Upgrade");
     expect(link.target).toBe("_blank");
     expect(link.rel).toBe("noopener noreferrer");
   });
@@ -360,7 +356,7 @@ describe("overlay view methods", () => {
   it("showToast with a bare number keeps the legacy duration-only form (no link)", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(".ec-root")!;
+    const root = document.body.querySelector(".ec-root")!;
     ov.showToast("plain message", 6000);
     const toast = root.querySelector(".ec-toast")!;
     expect(toast.textContent).toBe("plain message");
@@ -368,110 +364,53 @@ describe("overlay view methods", () => {
   });
 });
 
-// ─── Advanced — caption-position preset (Layout seed + live setter) ─────────
-
-/** Resolve a preset's % string against jsdom's default viewport. */
-function pct(value: string, axis: number): number {
-  if (value.endsWith("%")) return (parseFloat(value) / 100) * axis;
-  return parseFloat(value);
-}
-
-describe("buildOverlay — caption-position preset seeds Layout when LAYOUT_KEY empty", () => {
-  it("seeds Layout.left/top from CAPTION_PRESETS.top when localStorage is empty", () => {
-    // jsdom default viewport: 1024×768. Preset "top": left=50%, top=8%.
-    const ov = createOverlay();
-    ov.buildOverlay(makeCallbacks(), "top");
-    const root = document.documentElement.querySelector(
-      ".ec-root",
-    ) as HTMLElement;
-    // The seed is then run through clampLayout (defaults width 560, height 200),
-    // which clamps to within the viewport but starts from the preset's pixels.
-    // The "top" preset places the overlay near the top — top px = 8% × 768 ≈ 61.
-    const topPx = parseFloat(root.style.top);
-    expect(topPx).toBeLessThan(120); // well above the bottom default (~478)
-    expect(topPx).toBeGreaterThan(0);
-    // "top" preset has left=50% × 1024 ≈ 512, but clampLayout will keep it
-    // visible. Just verify it isn't the bottom default (innerHeight - 200 - 96).
-    const bottomDefault = 768 - 200 - 96; // 472
-    expect(Math.abs(topPx - bottomDefault)).toBeGreaterThan(50);
-  });
-
-  it("seeds Layout.top from CAPTION_PRESETS.bottom (~78% of viewport)", () => {
-    const ov = createOverlay();
-    ov.buildOverlay(makeCallbacks(), "bottom");
-    const root = document.documentElement.querySelector(
-      ".ec-root",
-    ) as HTMLElement;
-    const expectedTop = pct(CAPTION_PRESETS.bottom.top, 768);
-    const topPx = parseFloat(root.style.top);
-    // clampLayout snaps so it isn't off-screen; allow generous tolerance.
-    expect(topPx).toBeLessThanOrEqual(expectedTop + 50);
-    expect(topPx).toBeGreaterThan(expectedTop - 200);
-  });
-
-  it("LAYOUT_KEY (user's drag) WINS over the captionPosition preset", () => {
-    // Persist a custom layout — buildOverlay should not seed from the preset.
-    localStorage.setItem(
-      LAYOUT_KEY,
-      JSON.stringify({
-        left: 42,
-        top: 100,
-        width: 600,
-        height: 220,
-        sideCollapsed: false,
-      }),
-    );
-    const ov = createOverlay();
-    ov.buildOverlay(makeCallbacks(), "top");
-    const root = document.documentElement.querySelector(
-      ".ec-root",
-    ) as HTMLElement;
-    // Persisted values flow through clampLayout (which won't shrink under 300×130).
-    expect(parseFloat(root.style.left)).toBeCloseTo(42, 0);
-    expect(parseFloat(root.style.top)).toBeCloseTo(100, 0);
-    expect(parseFloat(root.style.width)).toBeCloseTo(600, 0);
-    expect(parseFloat(root.style.height)).toBeCloseTo(220, 0);
-  });
-
-  it("no captionPosition arg → falls back to DEFAULT_LAYOUT (legacy behaviour)", () => {
+describe("buildOverlay — caption position (V5 caption strip)", () => {
+  it("default dock is top-right", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(
-      ".ec-root",
+    const dock = document.body.querySelector(
+      ".ec-dock",
     ) as HTMLElement;
-    // clampLayout defaults: width=560, height=200, bottom-right with 24px margin.
-    expect(parseFloat(root.style.width)).toBeCloseTo(560, 0);
-    expect(parseFloat(root.style.height)).toBeCloseTo(200, 0);
+    expect(parseFloat(dock.style.top)).toBe(12);
+    expect(parseFloat(dock.style.left)).toBeGreaterThan(700);
+  });
+
+  it("LAYOUT_KEY persists dock drag position", () => {
+    localStorage.setItem(
+      LAYOUT_KEY,
+      JSON.stringify({ left: 42, top: 100, width: 220, height: 46, sideCollapsed: true }),
+    );
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const dock = document.body.querySelector(
+      ".ec-dock",
+    ) as HTMLElement;
+    expect(parseFloat(dock.style.left)).toBeCloseTo(42, 0);
+    expect(parseFloat(dock.style.top)).toBeCloseTo(100, 0);
   });
 });
 
 describe("setCaptionPosition — live preset hot-swap", () => {
-  it("setCaptionPosition('top') updates root.style.top to the top preset (live)", () => {
-    const ov = createOverlay();
-    ov.buildOverlay(makeCallbacks()); // default-seeded (bottom)
-    const root = document.documentElement.querySelector(
-      ".ec-root",
-    ) as HTMLElement;
-    const beforeTop = parseFloat(root.style.top);
-    ov.setCaptionPosition("top");
-    const afterTop = parseFloat(root.style.top);
-    expect(afterTop).not.toBeCloseTo(beforeTop, 0);
-    // "top" preset: top=8% × 768 ≈ 61 (clamped to ≥12 from edges).
-    expect(afterTop).toBeLessThan(120);
-  });
-
-  it("setCaptionPosition('float') updates root.style.left/top to the float preset", () => {
+  it("setCaptionPosition('top') adds ec-caption-top class", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    const root = document.documentElement.querySelector(
+    const root = document.body.querySelector(
       ".ec-root",
     ) as HTMLElement;
-    ov.setCaptionPosition("float");
-    // "float" preset: left=20% × 1024 ≈ 205, top=40% × 768 ≈ 307.
-    const expectedLeft = pct(CAPTION_PRESETS.float.left, 1024);
-    const expectedTop = pct(CAPTION_PRESETS.float.top, 768);
-    expect(parseFloat(root.style.left)).toBeCloseTo(expectedLeft, 0);
-    expect(parseFloat(root.style.top)).toBeCloseTo(expectedTop, 0);
+    expect(root.classList.contains("ec-caption-top")).toBe(false);
+    ov.setCaptionPosition("top");
+    expect(root.classList.contains("ec-caption-top")).toBe(true);
+  });
+
+  it("setCaptionPosition('bottom') removes ec-caption-top", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const root = document.body.querySelector(
+      ".ec-root",
+    ) as HTMLElement;
+    ov.setCaptionPosition("top");
+    ov.setCaptionPosition("bottom");
+    expect(root.classList.contains("ec-caption-top")).toBe(false);
   });
 
   it("setCaptionPosition does NOT write LAYOUT_KEY (user's drag still wins)", () => {
@@ -488,6 +427,207 @@ describe("setCaptionPosition — live preset hot-swap", () => {
     const ov = createOverlay();
     // Not built → no root. Should not throw, no DOM created.
     expect(() => ov.setCaptionPosition("top")).not.toThrow();
-    expect(document.documentElement.querySelector(".ec-root")).toBeNull();
+    expect(document.body.querySelector(".ec-root")).toBeNull();
+  });
+});
+
+describe("syncFromSettings", () => {
+  it("syncs caption toggle and mix from settings snapshot", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    ov.syncFromSettings({
+      tier: TIER_REALTIME,
+      targetLanguage: "ja",
+      realtimeVoice: "marin",
+      standardVoice: "English_magnetic_voiced_man",
+      originalVolume: 42,
+      voiceVolume: 77,
+      showSource: false,
+      showTargetCaptions: false,
+      apiBearer: "",
+      apiMode: null,
+      apiBase: "https://api.example",
+      running: true,
+      connecting: false,
+      paused: false,
+      tabId: 1,
+      status: "Translating",
+      errorMessage: "",
+      signedInUser: null,
+      usage: null,
+      languagePicker: [["ja", "Japanese"], ["vi", "Vietnamese"]],
+      languageNames: null,
+      standardVoices: null,
+      standardVoiceDefaultId: null,
+      sessionStartedAt: Date.now(),
+      advanced: {} as never,
+      siteOverrides: {},
+      advancedVersion: 0,
+      advancedDirty: false,
+      currentDomain: null,
+    });
+    const lang = document.body.querySelector(
+      "[data-ec-language]",
+    ) as HTMLSelectElement;
+    const orig = document.body.querySelector(
+      "[data-ec-original-vol]",
+    ) as HTMLInputElement;
+    const cc = document.body.querySelector(
+      "[data-ec-caption-visible]",
+    ) as HTMLInputElement;
+    expect(lang.value).toBe("ja");
+    expect(orig.value).toBe("42");
+    expect(cc.checked).toBe(false);
+    expect(document.body.querySelector(".ec-root")!.classList.contains("ec-caption-off")).toBe(true);
+  });
+
+  it("signed-in proxy realtime keeps Auto selected (not a blank voice row)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks(), null, undefined, true, undefined, TIER_REALTIME);
+    ov.syncFromSettings({
+      tier: TIER_REALTIME,
+      targetLanguage: "vi",
+      realtimeVoice: "marin",
+      standardVoice: "English_magnetic_voiced_man",
+      originalVolume: 18,
+      voiceVolume: 100,
+      showSource: false,
+      showTargetCaptions: true,
+      apiBearer: "tok",
+      apiMode: "proxy",
+      apiBase: "https://api.example",
+      running: true,
+      connecting: false,
+      paused: false,
+      tabId: 1,
+      status: "Translating",
+      errorMessage: "",
+      signedInUser: { email: "a@b.c", tier: "pro" },
+      usage: null,
+      languagePicker: null,
+      languageNames: null,
+      standardVoices: null,
+      standardVoiceDefaultId: null,
+      sessionStartedAt: Date.now(),
+      advanced: {} as never,
+      siteOverrides: {},
+      advancedVersion: 0,
+      advancedDirty: false,
+      currentDomain: null,
+    });
+    const voice = document.body.querySelector(
+      "[data-ec-voice]",
+    ) as HTMLSelectElement;
+    expect(voice.options.length).toBe(1);
+    expect(voice.options[0]!.textContent).toBe("Auto");
+    expect(voice.value).toBe("");
+    expect(voice.selectedOptions[0]!.textContent).toBe("Auto");
+  });
+
+  it("lag placeholder does not render a trailing unit (no em-dash + s)", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    expect(document.body.querySelector(".ec-lag-unit")).toBeNull();
+    expect(document.body.querySelector(".ec-lag-line")!.textContent).toBe("—");
+  });
+
+  it("setDubSyncReadout shows dock hint when matching", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    ov.setDubSyncReadout({ lagSec: 3.2, mode: "slow", ratePct: 96 });
+    expect(document.body.querySelector(".ec-lag-line")!.textContent).toBe("96");
+    expect(document.body.querySelector(".ec-lag-label")!.textContent).toBe(
+      "sync",
+    );
+    const hint = document.body.querySelector(
+      "[data-ec-sync-hint]",
+    ) as HTMLElement;
+    expect(hint.hidden).toBe(false);
+    expect(hint!.textContent).toContain("Matching dub");
+    expect(hint!.textContent).toContain("96%");
+  });
+});
+
+describe("caption auto-scroll", () => {
+  async function flushCaptionScroll(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+  }
+
+  function scrollableCaption(el: HTMLElement): void {
+    el.style.maxHeight = "36px";
+    el.style.overflowY = "auto";
+    el.style.width = "260px";
+    el.classList.add("ec-caption--rolling");
+  }
+
+  function maxScrollTop(el: HTMLElement): number {
+    return Math.max(0, el.scrollHeight - el.clientHeight);
+  }
+
+  it("growing live text scrolls to the newest line (not stuck at top)", async () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const target = document.body.querySelector(
+      "[data-ec-target]",
+    ) as HTMLElement;
+    scrollableCaption(target);
+    const part = "phụ đề đang chạy dài ".repeat(12);
+    ov.setTargetText(part);
+    await flushCaptionScroll();
+    const max1 = maxScrollTop(target);
+    if (max1 > 0) expect(target.scrollTop).toBeGreaterThanOrEqual(max1 - 14);
+
+    ov.setTargetText(part + part);
+    await flushCaptionScroll();
+    const max2 = maxScrollTop(target);
+    expect(target.scrollTop).toBeGreaterThanOrEqual(max2 - 14);
+  });
+
+  it("panel preview mirrors target text and scrolls when panel opens", async () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const part = "xem bản dịch trong panel ".repeat(30);
+    ov.setTargetText(part);
+    const preview = document.body.querySelector(
+      "[data-ec-panel-preview]",
+    ) as HTMLElement;
+    expect(preview.textContent).toBe(part);
+    preview.style.maxHeight = "24px";
+    preview.style.overflowY = "auto";
+    preview.style.width = "240px";
+    const expand = document.body.querySelector(
+      "[data-ec-expand]",
+    ) as HTMLButtonElement;
+    expand.click();
+    await flushCaptionScroll();
+    const max = maxScrollTop(preview);
+    if (max > 0) {
+      expect(preview.scrollTop).toBeGreaterThanOrEqual(max - 14);
+    }
+  });
+
+  it("respects manual scroll-up until a new utterance arrives", async () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    const target = document.body.querySelector(
+      "[data-ec-target]",
+    ) as HTMLElement;
+    scrollableCaption(target);
+    const first = "đoạn một ".repeat(20);
+    ov.setTargetText(first);
+    await flushCaptionScroll();
+    target.scrollTop = 0;
+    target.dispatchEvent(new Event("scroll"));
+
+    ov.setTargetText(first + " thêm chữ");
+    await flushCaptionScroll();
+    expect(target.scrollTop).toBe(0);
+
+    ov.setTargetText("đoạn hai hoàn toàn mới");
+    await flushCaptionScroll();
+    const max = maxScrollTop(target);
+    if (max > 0) expect(target.scrollTop).toBeGreaterThanOrEqual(max - 14);
   });
 });

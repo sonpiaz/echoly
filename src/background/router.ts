@@ -1,16 +1,6 @@
 // ────────────────────────────────────────────────────────────────────────────
-// Message router (legacy/background.js onMessage 406-501). Pivots on
-// isFromContent(sender):
-//
-//  • GET_YT_CC_URL from content → respond with the cache entry, return FALSE
-//    (handled FIRST so it doesn't fall through to the generic content branch).
-//  • any other content message → handleContentEvent, ack {ok:true}, return FALSE.
-//  • popup message → async switch, sendResponse from the IIFE, return TRUE
-//    (keeps the channel open for the async sendResponse).
-//
-// These exact return values are the MV3 channel semantics — returning true on a
-// sync content path would leak channels; returning false on the async popup path
-// would drop the response. Do NOT change them.
+// Message router — content (sender.tab) vs popup. MV3 return semantics:
+// content → false (sync ack); popup → true (async sendResponse).
 // ────────────────────────────────────────────────────────────────────────────
 
 import { isFromContent } from "@/shared/protocol";
@@ -18,31 +8,30 @@ import type {
   ToBackgroundMessage,
   ContentToBgMessage,
   PopupToBgMessage,
-  YtCcUrlResponse,
   AudioDeviceList,
 } from "@/shared/protocol";
-import { ECHOLY_WEB_ORIGIN } from "@/shared/constants";
+import { ECHOLY_WEB_URLS } from "@/shared/echoly-config";
 import type { Store } from "./store";
 import type { EcholyAuth } from "./auth";
 import type { SessionCoordinator } from "./session-coordinator";
-import type { CaptionCache } from "./caption-cache";
 import { setSigninTabId } from "./auth-listener";
+import { usagePatchFromServerError } from "@/lib/server-errors";
+import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
+import type { SettingsClient } from "./settings-client";
 
 export interface RouterDeps {
   store: Store;
   auth: EcholyAuth;
   session: SessionCoordinator;
-  captions: CaptionCache;
+  settings?: SettingsClient;
 }
 
-/** Apply a content-side push event to state (legacy handleContentEvent 407-423).
- *  CONTENT_STATE merges partial type-guarded fields; CONTENT_ENDED resets the
- *  session to idle. Other content message types (e.g. UPDATE_SETTINGS) are a
- *  no-op by routing — still acked by the caller. */
+/** Apply content push events: CONTENT_STATE, CONTENT_ENDED, CONTENT_QUOTA, UPDATE_SETTINGS. */
 export function handleContentEvent(
-  store: Store,
+  deps: RouterDeps,
   message: ContentToBgMessage,
 ): void {
+  const { store } = deps;
   if (message.type === "CONTENT_STATE") {
     if (typeof message.running === "boolean") store.setRunning(message.running);
     if (typeof message.paused === "boolean") store.setPaused(message.paused);
@@ -52,13 +41,46 @@ export function handleContentEvent(
     }
     store.broadcast();
   }
+  if (message.type === "CONTENT_QUOTA") {
+    const parsed = {
+      status: 402,
+      code: "quota_exhausted" as const,
+      user: "",
+      isQuotaOrTier: true,
+      mode: message.mode,
+      usedMinutes: message.used_minutes,
+      capMinutes: message.cap_minutes,
+      resetsAt: message.resets_at,
+    };
+    const patch = usagePatchFromServerError(parsed);
+    if (patch) store.applyUsagePatch(patch);
+    store.setRunning(false);
+    store.setConnecting(false);
+    store.setPaused(false);
+    store.setTabId(null);
+    store.setSessionStartedAt(null);
+    store.setStatus("Quota exhausted");
+    store.broadcast();
+    return;
+  }
+  if (message.type === "CONTENT_STOP_REQUEST") {
+    void deps.session.stop();
+    return;
+  }
   if (message.type === "CONTENT_ENDED") {
     store.setRunning(false);
     store.setConnecting(false);
     store.setPaused(false);
     store.setTabId(null);
+    store.setSessionStartedAt(null);
     store.setStatus(message.reason || "Stopped");
     store.broadcast();
+    if (deps.settings && store.state.signedInUser) {
+      scheduleHydrateSignedIn(store, deps.settings);
+    }
+  }
+  if (message.type === "UPDATE_SETTINGS" && message.settings) {
+    void deps.session.updateSettings(message.settings);
   }
 }
 
@@ -68,22 +90,17 @@ export function handleContentEvent(
 async function handlePopupMessage(
   deps: RouterDeps,
   message: PopupToBgMessage,
-): Promise<unknown> {
+): Promise<object> {
   const { store, auth, session } = deps;
   switch (message.type) {
     case "GET_STATE":
       await store.loadSettings();
-      // Refresh auth + the guest language policy opportunistically so the popup
-      // renders the signed-in banner AND can immediately gate the language
-      // picker (in guest/BYOK mode) without an extra round trip.
-      await Promise.all([store.refreshAuth(), store.refreshGuestPolicy()]);
-      return { ok: true, state: store.snapshot() };
-    case "GET_AUTH":
-      await store.refreshAuth();
+      await hydrateSignedIn(store, deps.settings);
+      await session.refreshActiveSite();
       return { ok: true, state: store.snapshot() };
     case "SIGN_OUT_ECHOLY":
       await auth.signOut();
-      store.clearAuth();
+      await store.refreshAuth();
       store.broadcast();
       return { ok: true, state: store.snapshot() };
     case "OPEN_SIGNIN": {
@@ -93,7 +110,7 @@ async function handlePopupMessage(
       // fall back to instructing the user to open the URL manually.
       try {
         const tab = await chrome.tabs.create({
-          url: `${ECHOLY_WEB_ORIGIN}/signin`,
+          url: ECHOLY_WEB_URLS.signin(),
           active: true,
         });
         setSigninTabId(tab.id ?? null);
@@ -124,8 +141,8 @@ async function handlePopupMessage(
     case "LIST_AUDIO_OUTPUT_DEVICES":
       return listAudioOutputDevices();
     default: {
-      const unknown = message as { type?: string };
-      return { ok: false, error: "Unknown message: " + unknown.type };
+      const unsupported = message as { type?: string };
+      return { ok: false, error: "Unknown message: " + unsupported.type };
     }
   }
 }
@@ -167,22 +184,11 @@ export function routeMessage(
   deps: RouterDeps,
   message: ToBackgroundMessage,
   sender: chrome.runtime.MessageSender,
-  sendResponse: (response?: unknown) => void,
+  sendResponse: (response?: object) => void,
 ): boolean {
-  // Cache lookup from content — needs a real response (not fire-and-forget).
-  // Handled before the generic content-event branch so we don't fall through.
-  if (isFromContent(sender) && message?.type === "GET_YT_CC_URL") {
-    const videoId = (message as { videoId?: string }).videoId;
-    const entry = videoId ? deps.captions.get(videoId) : undefined;
-    const response: YtCcUrlResponse = entry
-      ? { ok: true, ...entry }
-      : { ok: false };
-    sendResponse(response);
-    return false;
-  }
   // Content-originated messages (have sender.tab).
   if (isFromContent(sender)) {
-    handleContentEvent(deps.store, message as ContentToBgMessage);
+    handleContentEvent(deps, message as ContentToBgMessage);
     sendResponse?.({ ok: true });
     return false;
   }

@@ -22,7 +22,7 @@
 
   /* Brand accents */
   --accent:        #8B5BFF;
-  --accent-deep:   #5A3DB8;
+  --accent-deep:   #6A40B2;
   --accent-pink:   #FF6FB1;
   --accent-orange: #FF9764;
 
@@ -88,7 +88,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Live mode narrows */
+/* Live / connecting — compact popup (same as legacy GlassLive) */
 body[data-state="connecting"],
 body[data-state="active"],
 body[data-state="paused"] { width: 360px; }
@@ -104,8 +104,8 @@ body[data-state="paused"] { width: 360px; }
   filter: saturate(1.05);
 }
 body[data-state="connecting"] .bg,
-body[data-state="active"]     .bg,
-body[data-state="paused"]     .bg {
+body[data-state="active"] .bg,
+body[data-state="paused"] .bg {
   background:
     radial-gradient(80% 60% at 100% 100%, var(--bg-orange) 0%, transparent 55%),
     radial-gradient(80% 60% at 0% 0%,     var(--bg-purple) 0%, transparent 55%),
@@ -135,11 +135,29 @@ body[data-account="locked"]  .main-only,
 body[data-account="in"]      .main-only { display: flex !important; }
 body[data-account="locked"]  .locked-only { display: flex !important; }
 body[data-account="in"]      .signedin-only { display: flex !important; }
-/* Loading default = behave like welcome (no flash of broken UI) */
-body[data-account="loading"] .welcome-only { display: flex !important; }
+/* Loading: show the shell we expect after GET_STATE (no wrong welcome flash) */
+body[data-account="loading"][data-loading-shell="welcome"] .welcome-only {
+  display: flex !important;
+}
+body[data-account="loading"][data-loading-shell="main"] .main-only {
+  display: flex !important;
+  opacity: 0.72;
+  pointer-events: none;
+}
+body[data-account="loading"][data-loading-shell="main"] .shell--main {
+  animation: shell-pulse 1.2s ease-in-out infinite;
+}
+@keyframes shell-pulse {
+  0%, 100% { opacity: 0.72; }
+  50%      { opacity: 0.92; }
+}
+body.account-transition .shell {
+  transition: opacity 200ms ease;
+}
 
 /* Inline pieces inside the header that should use inline-flex when visible */
-body[data-account="locked"] .signin-pill.locked-only { display: inline-flex !important; }
+/* Locked: one sign-in CTA in the card — no duplicate header pill */
+body[data-account="locked"] .signin-pill.locked-only { display: none !important; }
 body[data-account="in"]     .plan-badge.signedin-only { display: inline-flex !important; }
 body[data-account="in"]     .account-avatar.signedin-only { display: inline-flex !important; }
 
@@ -407,6 +425,7 @@ body[data-state="paused"]     .brand-sub { display: none; }
 
 /* ── Locked CTA card (sign-in to start translating) ────────────────────── */
 .locked-cta {
+  margin-top: 4px;
   flex-direction: column;
   gap: 12px;
   padding: 14px;
@@ -605,9 +624,13 @@ body[data-state="paused"]     .action { order: 9; }
   color: #fff;
 }
 .row-icon svg { width: 10px; height: 10px; }
-.row-icon--tier {
-  background: linear-gradient(135deg, var(--accent), var(--accent-pink));
-  box-shadow: 0 4px 8px -2px rgba(139, 91, 255, 0.5);
+.row-icon--tier-realtime {
+  background: linear-gradient(145deg, #9b5cff 0%, #ec4899 100%);
+  box-shadow: 0 3px 10px -3px rgba(155, 92, 255, 0.55);
+}
+.row-icon--tier-standard {
+  background: linear-gradient(145deg, #22b8cf 0%, #3b82f6 100%);
+  box-shadow: 0 3px 10px -3px rgba(34, 184, 207, 0.45);
 }
 .row-primary { flex-shrink: 0; color: var(--text); }
 .row-secondary {
@@ -1192,10 +1215,10 @@ body[data-state="active"]     .toggle-row,
 body[data-state="paused"]     .toggle-row { display: none; }
 body[data-state="connecting"] .session-card.idle-only,
 body[data-state="active"]     .session-card.idle-only,
-body[data-state="paused"]     .session-card.idle-only { display: none; }
+body[data-state="paused"]     .session-card.idle-only { display: none !important; }
 body[data-state="connecting"] .advanced.idle-only,
 body[data-state="active"]     .advanced.idle-only,
-body[data-state="paused"]     .advanced.idle-only { display: none; }
+body[data-state="paused"]     .advanced.idle-only { display: none !important; }
 body[data-state="connecting"] .usage-hint-row,
 body[data-state="active"]     .usage-hint-row,
 body[data-state="paused"]     .usage-hint-row { display: none; }
@@ -1426,9 +1449,13 @@ body[data-state="paused"]     .usage-hint-row { display: none; }
   border-radius: 7px;
 }
 .dropdown-option-icon > svg { width: 11px; height: 11px; color: #fff; }
-.dropdown-panel--tier .dropdown-option-icon {
-  background: linear-gradient(135deg, var(--accent), var(--accent-pink));
-  box-shadow: 0 4px 8px -2px rgba(139, 91, 255, 0.5);
+.dropdown-panel--tier .dropdown-option[data-value="realtime"] .dropdown-option-icon {
+  background: linear-gradient(145deg, #9b5cff 0%, #ec4899 100%);
+  box-shadow: 0 3px 8px -3px rgba(155, 92, 255, 0.45);
+}
+.dropdown-panel--tier .dropdown-option[data-value="standard"] .dropdown-option-icon {
+  background: linear-gradient(145deg, #22b8cf 0%, #3b82f6 100%);
+  box-shadow: 0 3px 8px -3px rgba(34, 184, 207, 0.4);
 }
 .dropdown-voice-avatar {
   display: inline-flex;

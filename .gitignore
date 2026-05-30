@@ -15,3 +15,10 @@ store-assets/_*
 .env
 .env.local
 .env.*.local
+
+# Test artifacts (không commit)
+test-results/
+playwright-report/
+
+# Understand-Anything knowledge graph (giữ local, không commit)
+.understand-anything/

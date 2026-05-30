@@ -1,33 +1,29 @@
 // ────────────────────────────────────────────────────────────────────────────
-// Overlay DOM template + layout math — byte-identical to legacy/content.js
-// (buildOverlay innerHTML at content.js:193-227 + clampLayout/applyLayout at
-// content.js:152-186). Kept render-only and pure where possible: the template
-// is the exact static literal; the layout helpers compute the inline styles
-// that applyLayout writes (left/top/width/height + classes + --ec-target-lines).
-//
-// The .ec-* classes, data-ec-* hooks, and data-ec-resize values are LOAD-BEARING
-// (CSS targets classes; JS queries data-ec-*; drag/resize keys off data-ec-resize)
-// — reproduce verbatim.
-//
-// Caption-position presets (Advanced setting) are re-exported from the shared
-// contract; the helper here maps a preset → Layout delta. Width/height are
-// preserved (the user's drag size still wins); only left/top change.
+// Overlay DOM template + layout math — V5 glassmorphic in-page overlay.
 // ────────────────────────────────────────────────────────────────────────────
 
 import {
-  CAPTION_PRESETS as SHARED_CAPTION_PRESETS,
+  captionStripPlacement,
   type CaptionPosition,
-  type OverlayPreset,
+  type CaptionStripPlacement,
 } from "@/shared/advanced";
 
-/** Persisted overlay layout (localStorage[LAYOUT_KEY]). Verbatim shape from
- *  legacy loadLayout (content.js:139-148). */
+/** Persisted overlay layout (dock drag offset + drawer + caption strip). */
 export interface Layout {
   left: number | null;
   top: number | null;
   width: number | null;
   height: number | null;
   sideCollapsed: boolean;
+  /** @deprecated Use panelExpanded — migrated on load. */
+  drawerOpen?: boolean;
+  /** Expanded control card (design GlassOverlayExpanded). */
+  panelExpanded?: boolean;
+  captionPlacement: CaptionStripPlacement;
+  /** When false, hide the on-video caption strip (translation still in panel). */
+  captionOnVideo?: boolean;
+  /** Set after user drags the dock/panel; when false, position tracks the video stage. */
+  dockUserPlaced?: boolean;
 }
 
 export const DEFAULT_LAYOUT: Layout = {
@@ -35,120 +31,145 @@ export const DEFAULT_LAYOUT: Layout = {
   top: null,
   width: null,
   height: null,
-  sideCollapsed: false,
+  sideCollapsed: true,
+  panelExpanded: false,
+  captionPlacement: "bottom",
+  captionOnVideo: true,
 };
 
-/** The exact overlay innerHTML the pipeline expects. Byte-identical to
- *  legacy/content.js:193-227. Static literal (no interpolation) — safe to
- *  assign via innerHTML; never interpolate user/provider text here. */
+export const PANEL_W = 280;
+export const PANEL_H = 320;
+
 export const OVERLAY_TEMPLATE = `
-      <div class="ec-toolbar" data-ec-drag>
-        <span class="ec-brand">
-          <span class="ec-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+      <div class="ec-dock" data-ec-drag>
+        <span class="ec-dock-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M7 9v6M11 6v12M15 8v8M19 11v2"/>
+          </svg>
+        </span>
+        <span class="ec-live-dot" aria-hidden="true"></span>
+        <span class="ec-dock-live">Live</span>
+        <span class="ec-state" data-ec-status>Ready</span>
+        <span class="ec-dock-sync" data-ec-sync-hint hidden aria-live="polite"></span>
+        <button class="ec-dock-caption" type="button" data-ec-caption-toggle aria-pressed="true" aria-label="Subtitles on video" title="Subtitles on/off">CC</button>
+        <button class="ec-dock-expand" type="button" data-ec-expand aria-label="Expand controls" title="Expand">⋯</button>
+        <button class="ec-dock-stop" type="button" data-ec-stop aria-label="Stop translation" title="Stop"></button>
+      </div>
+      <div class="ec-panel" data-ec-panel hidden>
+        <div class="ec-panel-head" data-ec-panel-drag>
+          <span class="ec-panel-drag-ico" aria-hidden="true">
+            <svg viewBox="0 0 10 14" width="10" height="14" fill="currentColor">
+              <circle cx="3" cy="2" r="1"/><circle cx="7" cy="2" r="1"/>
+              <circle cx="3" cy="7" r="1"/><circle cx="7" cy="7" r="1"/>
+              <circle cx="3" cy="12" r="1"/><circle cx="7" cy="12" r="1"/>
+            </svg>
+          </span>
+          <span class="ec-panel-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
               <path d="M7 9v6M11 6v12M15 8v8M19 11v2"/>
             </svg>
           </span>
-          <span class="ec-wordmark">Echoly</span>
-          <span class="ec-state" data-ec-status>Ready</span>
-        </span>
-        <span class="ec-spacer"></span>
-        <select class="ec-select" data-ec-language aria-label="Target language"></select>
-        <select class="ec-select" data-ec-voice aria-label="Voice"></select>
-        <button class="ec-btn" type="button" data-ec-hide>Hide</button>
-        <button class="ec-btn ec-btn-primary" type="button" data-ec-stop>Stop</button>
-      </div>
-      <div class="ec-body">
-        <div class="ec-main">
-          <div class="ec-target" data-ec-target></div>
+          <span class="ec-panel-brand">echoly</span>
+          <span class="ec-panel-live"><span class="ec-live-dot" aria-hidden="true"></span>Live</span>
+          <div class="ec-panel-head-actions">
+            <button type="button" class="ec-panel-collapse" data-ec-collapse aria-label="Collapse" title="Collapse">
+              <svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+                <path d="M5 1V4H2M11 4H8V1M8 11V8H11M2 8H5V11"/>
+              </svg>
+            </button>
+          </div>
         </div>
-        <div class="ec-side" data-ec-side>
-          <div class="ec-source" data-ec-source hidden></div>
-          <div class="ec-history" data-ec-history hidden></div>
+        <div class="ec-panel-body">
+          <div class="ec-panel-voice">
+            <span class="ec-panel-voice-avatar" data-ec-voice-avatar aria-hidden="true">M</span>
+            <div class="ec-panel-voice-meta">
+              <div class="ec-panel-voice-name"><span data-ec-voice-name>Voice</span> <span class="ec-speaking">speaking</span></div>
+              <span class="ec-panel-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+            </div>
+            <div class="ec-panel-lag ec-lag-empty" data-ec-lag-wrap>
+              <span class="ec-lag-line" data-ec-latency>—</span>
+              <span class="ec-lag-label">lag</span>
+            </div>
+          </div>
+          <div class="ec-panel-pickers">
+            <div class="ec-picker-row">
+              <label class="ec-picker-label">Language</label>
+              <select class="ec-select" data-ec-language aria-label="Target language"></select>
+            </div>
+            <div class="ec-picker-row">
+              <label class="ec-picker-label">Voice</label>
+              <select class="ec-select" data-ec-voice aria-label="Voice"></select>
+            </div>
+          </div>
+          <div class="ec-panel-preview" data-ec-panel-preview aria-live="polite"></div>
+          <div class="ec-panel-source" data-ec-source hidden></div>
+          <label class="ec-panel-toggle">
+            <span>Subtitles on video</span>
+            <input type="checkbox" data-ec-caption-visible checked />
+          </label>
+          <div class="ec-panel-mix">
+            <div class="ec-mix-row">
+              <label for="ec-original-vol">Original</label>
+              <input id="ec-original-vol" type="range" data-ec-original-vol min="0" max="100" value="18" />
+              <output data-ec-original-out>18</output>
+            </div>
+            <div class="ec-mix-row">
+              <label for="ec-voice-vol">Voice</label>
+              <input id="ec-voice-vol" type="range" data-ec-voice-vol min="0" max="100" value="100" />
+              <output data-ec-voice-out>100</output>
+            </div>
+          </div>
+          <div class="ec-panel-foot">
+            <span class="ec-panel-elapsed" data-ec-elapsed>00:00</span>
+            <button type="button" class="ec-panel-stop" data-ec-stop-panel aria-label="Stop translation">
+              <span class="ec-panel-stop-ico" aria-hidden="true"></span> Stop
+            </button>
+          </div>
         </div>
       </div>
-      <span class="ec-resize-edge ec-resize-edge-n" data-ec-resize="n"></span>
-      <span class="ec-resize-edge ec-resize-edge-e" data-ec-resize="e"></span>
-      <span class="ec-resize-edge ec-resize-edge-s" data-ec-resize="s"></span>
-      <span class="ec-resize-edge ec-resize-edge-w" data-ec-resize="w"></span>
-      <span class="ec-resize-corner ec-resize-corner-nw" data-ec-resize="nw"></span>
-      <span class="ec-resize-corner ec-resize-corner-ne" data-ec-resize="ne"></span>
-      <span class="ec-resize-corner ec-resize-corner-sw" data-ec-resize="sw"></span>
-      <span class="ec-resize-corner ec-resize-corner-se" data-ec-resize="se"></span>
+      <div class="ec-caption" data-ec-target></div>
     `;
 
-/** Clamp a (possibly partial) layout into the viewport. Verbatim from legacy
- *  clampLayout (content.js:152-166): min 300×130, defaults 560×200, bottom-right
- *  with 24px margin, ≥12px from edges. Returns a fully-resolved layout. */
-export function clampLayout(
-  layout: Layout,
-  innerWidth: number,
-  innerHeight: number,
-): Layout {
-  const maxW = Math.max(300, innerWidth - 24);
-  const maxH = Math.max(130, innerHeight - 24);
-  const w = Math.min(Math.max(layout.width || 560, 300), maxW);
-  const h = Math.min(Math.max(layout.height || 200, 130), maxH);
-  const left = Math.min(
-    Math.max(layout.left ?? innerWidth - w - 24, 12),
-    Math.max(12, innerWidth - w - 12),
-  );
-  const top = Math.min(
-    Math.max(layout.top ?? innerHeight - h - 96, 12),
-    Math.max(12, innerHeight - h - 12),
-  );
-  return { ...layout, left, top, width: w, height: h };
+export function isCompact(_w: number, _h: number): boolean {
+  return false;
 }
 
-/** --ec-target-lines value: clamp(2, floor((height-74)/38), 8). Verbatim from
- *  legacy applyLayout (content.js:179-182). */
-export function targetLines(height: number): number {
-  return Math.max(2, Math.min(8, Math.floor((height - 74) / 38)));
+export function isRoomy(_w: number, _h: number): boolean {
+  return false;
 }
 
-/** is-compact threshold (width < 560 || height < 210) — legacy content.js:177. */
-export function isCompact(width: number, height: number): boolean {
-  return width < 560 || height < 210;
+export function targetLines(_height: number): number {
+  return 3;
 }
 
-/** is-roomy threshold (width > 760 && height > 235) — legacy content.js:178. */
-export function isRoomy(width: number, height: number): boolean {
-  return width > 760 && height > 235;
-}
-
-/** Re-export of the shared CAPTION_PRESETS map so overlay-side code has one
- *  import path. Source of truth lives in `@/shared/advanced`. */
-export const CAPTION_PRESETS: Record<CaptionPosition, OverlayPreset> =
-  SHARED_CAPTION_PRESETS;
-
-/** Parse a preset percentage string ("50%" / "8%") into a viewport-pixel value.
- *  Layout.left/top are NUMBERS (pixels) — clampLayout works in pixel space — so
- *  we resolve the preset's %-string against the current viewport. Falls back to
- *  the integer parse of the raw value when the string isn't a "%" form. */
-function resolvePreset(value: string, axis: number): number {
-  const trimmed = value.trim();
-  if (trimmed.endsWith("%")) {
-    const pct = parseFloat(trimmed.slice(0, -1));
-    if (Number.isFinite(pct)) return (pct / 100) * axis;
-  }
-  const n = parseFloat(trimmed);
-  return Number.isFinite(n) ? n : 0;
-}
-
-/** Apply a caption-position preset to a Layout, returning a new Layout. The
- *  user's width/height (and sideCollapsed) are preserved — only left/top move.
- *  When viewport dims are unknown (SSR/test edge), falls back to 1024×768 so
- *  the helper is pure. clampLayout will re-snap on next applyLayout(). */
 export function applyCaptionPositionPreset(
   layout: Layout,
-  pos: CaptionPosition,
-  innerWidth: number = typeof window !== "undefined" ? window.innerWidth : 1024,
-  innerHeight: number = typeof window !== "undefined" ? window.innerHeight : 768,
+  preset: CaptionPosition,
 ): Layout {
-  const preset = CAPTION_PRESETS[pos];
   return {
     ...layout,
-    left: resolvePreset(preset.left, innerWidth),
-    top: resolvePreset(preset.top, innerHeight),
+    captionPlacement: captionStripPlacement(preset),
+  };
+}
+
+export function clampLayout(
+  layout: Layout,
+  vw: number,
+  vh: number,
+): Layout & { width: number; height: number } {
+  const dockW = 248;
+  const dockH = 46;
+  const left =
+    layout.left == null
+      ? null
+      : Math.min(Math.max(8, layout.left), vw - dockW - 8);
+  const top =
+    layout.top == null ? null : Math.min(Math.max(8, layout.top), vh - dockH - 8);
+  return {
+    ...layout,
+    left,
+    top,
+    width: dockW,
+    height: dockH,
   };
 }

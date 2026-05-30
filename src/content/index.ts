@@ -1,20 +1,15 @@
-// ────────────────────────────────────────────────────────────────────────────
-// Content-script logic root. `initContent()` runs the F9 version guard FIRST,
-// bootstraps the module instances (SessionManager, AudioCapture, OverlayView,
-// the three pipelines, the controller), wires the orphaned-script teardown, and
-// registers the chrome.runtime.onMessage listener. We keep our OWN lifecycle
-// (module-global pageToken in SessionManager + per-session AbortController + raw
-// timers) and do NOT use WXT's ctx. (legacy/content.js: F9 guard 9-15,
-// startSession 2087, stopSession 2239, applySettingsLive 2316, caption poll
-// 477-506, history 431-445, SPA watcher 2358, unload 2369, router 2378.)
-// ────────────────────────────────────────────────────────────────────────────
+// Content-script root: version guard, SessionManager, capture, overlay, WebRtcPipeline.
 
 import {
   CAPTION_POLL_MS,
   CONTENT_GLOBAL_KEY,
+  DEFAULT_TRANSLATION_TIER,
   ECHOLY_VERSION,
   HISTORY_MAX,
-  KYMA_BASE,
+  ECHOLY_PROXY_BASE,
+  RTC_LIVE_DURATION_HINT_SEC,
+  TIER_REALTIME,
+  TIER_STANDARD,
 } from "@/shared/constants";
 import type { BgToContentMessage, BgToContentResponse } from "@/shared/protocol";
 import type { HistoryTurn, StartSettings } from "@/shared/types";
@@ -22,20 +17,25 @@ import type { OverlayCallbacks, OverlayView } from "@/shared/ports";
 // Agent C's concrete factory. May be unresolved during Agent D's solo run; the
 // LOCKED CreateOverlay/OverlayView/OverlayCallbacks types let us build against
 // it now. The orchestrator resolves this at the integration gate.
-import { createOverlay } from "@/content/overlay/overlay";
+import { createOverlay, purgeEcholyOverlayRoots } from "@/content/overlay/overlay";
 import { SessionManager } from "./session-manager";
-import type {
-  Session,
-  StandardSession,
-  SubtitleFirstSession,
-} from "./session-manager";
+import type { Session } from "./session-manager";
 import { AudioCapture } from "./capture";
-import { RealtimePipeline } from "./pipelines/realtime";
-import { StandardChunkedPipeline } from "./pipelines/standard-chunked";
-import { SubtitleFirstPipeline } from "./pipelines/subtitle-first";
+import { WebRtcPipeline } from "./pipelines/webrtc-pipeline";
+import { suppressYouTubeNativeCaptions } from "./youtube-native-captions";
 import { createController } from "./controller";
+import {
+  bindSourceVideoPlayback,
+  syncSourcePauseState,
+} from "@/lib/rtc-media-sync";
+import { shouldIgnoreSourcePlaybackEvent } from "./source-playback-guards";
+import {
+  bindStandardDubPlaybackSync,
+  type StandardDubPlaybackSyncHandle,
+} from "@/lib/dub-playback-sync";
+import { alignRealtimeVodBeforePlay } from "@/lib/standard-vod-start";
 
-/** Extra video listeners a pipeline can opt into (subtitle-first uses both). */
+/** Extra video listeners a pipeline can opt into. */
 interface ExtraVideoListeners {
   onPlayExtra?: () => void;
   onSeeked?: () => void;
@@ -51,32 +51,31 @@ export class ContentApp {
   readonly sm = new SessionManager();
   readonly overlay: OverlayView = createOverlay();
   readonly capture: AudioCapture;
-  readonly realtime: RealtimePipeline;
-  readonly standard: StandardChunkedPipeline;
-  readonly subtitleFirst: SubtitleFirstPipeline;
+  readonly webrtc: WebRtcPipeline;
   readonly callbacks: OverlayCallbacks;
 
   // F3 — source caption polling state.
   private lastSeenCaption = "";
   private lastSpaUrl = location.href;
 
-  // Bound video listeners (so stopSession can detach them).
-  private onYTPause: (() => void) | null = null;
-  private onYTPlay: (() => void) | null = null;
+  /** Detach source <video> pause/play/ended listeners (any platform). */
+  private unbindSourcePlayback: (() => void) | null = null;
+  /** Restores YT player CC if we turned it off at session start. */
+  private restoreYtCaptions: (() => void) | null = null;
+  /** Standard VOD adaptive dub/video sync only. */
+  private standardDubSync: StandardDubPlaybackSyncHandle | null = null;
 
   constructor() {
     this.capture = new AudioCapture(this.sm, this.overlay);
-    this.realtime = new RealtimePipeline(this);
-    this.standard = new StandardChunkedPipeline(this);
-    this.subtitleFirst = new SubtitleFirstPipeline(this);
+    this.webrtc = new WebRtcPipeline(this);
     this.callbacks = createController(this);
   }
 
   // ───── History (logic side — overlay owns rendering + the marker chip) ────
 
   /**
-   * Commit the in-flight turn (the no-arg legacy pushHistoryTurn() — realtime
-   * done-event + standard-chunk). Skips when there's no target text, mirrors the
+   * Commit the in-flight caption turn (WebRTC done / partial finalize).
+   * Skips when there's no target text, mirrors the
    * logic-side history buffer, resets currentTargetText, and hands the turn to
    * the overlay (which flushes it + renders). Handover marker chips go straight
    * through overlay.pushHistoryMarker(), so this no longer takes a marker.
@@ -101,12 +100,8 @@ export class ContentApp {
     this.lastSeenCaption = "";
     this.sm.captionPollTimer = setInterval(() => {
       if (!this.sm.settings?.showSource) return;
-      // Bug H1: subtitle-first owns the source pane — it writes its own
-      // per-sentence source text (subtitle-first.ts ~531). Letting the YT-CC
-      // poll ALSO write here causes a ~350ms flicker as the two writers alternate.
-      // Realtime + chunked Standard don't write source text themselves, so the
-      // poll remains the source-of-truth there.
-      if (this.sm.session?.type === "subtitle-first") return;
+      // Source text from WebRTC data channel only (never scraped YT captions).
+      if (this.sm.session) return;
       const text = this.readYTCaptions();
       if (!text || text === this.lastSeenCaption) return;
       this.lastSeenCaption = text;
@@ -135,6 +130,79 @@ export class ContentApp {
     this.overlay.applySourceVisibility(!!this.sm.settings?.showSource);
   }
 
+  applyTargetCaptionVisibility(): void {
+    this.overlay.applyCaptionOnVideo(
+      this.sm.settings?.showTargetCaptions !== false,
+    );
+  }
+
+  private stopStandardDubSync(): void {
+    this.standardDubSync?.stop();
+    this.standardDubSync = null;
+    this.overlay.setDubSyncReadout(null);
+  }
+
+  /** Tear down VOD sync before Standard lang/voice handover rebuilds the peer. */
+  prepareStandardHandover(): void {
+    this.stopStandardDubSync();
+  }
+
+  private beginStandardDubSync(video: HTMLVideoElement): void {
+    this.stopStandardDubSync();
+    if (this.capture.isLive(video)) return;
+    this.standardDubSync = bindStandardDubPlaybackSync({
+      video,
+      getDubAudio: () => this.sm.session?.remoteAudio ?? null,
+      isUserPaused: () => this.sm.videoPaused,
+      onReadout: (r) => this.overlay.setDubSyncReadout(r),
+    });
+  }
+
+  /**
+   * After Standard lang/voice handover: wait for ICE + first dub, then re-sync to
+   * the current playhead (video keeps playing — no SF6 pause).
+   */
+  async completeStandardHandover(wasPaused: boolean): Promise<void> {
+    const video = this.capture.videoEl;
+    const session = this.sm.session;
+    if (
+      !video ||
+      !session?.pc ||
+      session.pipeline !== TIER_STANDARD ||
+      this.capture.isLive(video)
+    ) {
+      return;
+    }
+
+    this.overlay.setStatusText("Preparing dub");
+    const connected = await this.capture.waitForPCConnected(session.pc, 8000);
+    if (!connected) {
+      this.overlay.showToast("Reconnecting after switch…", 5000);
+    }
+
+    this.beginStandardDubSync(video);
+    const sync = this.standardDubSync;
+    if (!sync) return;
+
+    const gotDub = await sync.waitForFirstDub();
+    if (!gotDub) {
+      this.overlay.showToast("Dub is slow after switch — still syncing", 6000);
+    }
+
+    sync.snapPlaybackStart();
+    sync.start();
+
+    const dub = session.remoteAudio;
+    if (dub && !wasPaused) {
+      void dub.play().catch(() => {});
+    }
+
+    const status = wasPaused ? "Paused" : "Translating";
+    this.overlay.setStatusText(status);
+    this.overlay.setOverlayState(wasPaused ? "paused" : "live");
+    this.sm.emitState({ paused: wasPaused, status });
+  }
+
   // ───── Shared session timer (wires the toast + auto-stop callbacks) ───────
 
   startSessionTimer(): void {
@@ -149,35 +217,39 @@ export class ContentApp {
 
   // ───── Shared video listeners (pause/play/ended + optional seeked) ────────
 
-  /** Bind the common pause/play/ended listeners (all tiers) plus any extras.
-   *  Stores the pause/play refs on the app + the ended ref on the session so
-   *  stopSession can detach them. (legacy per-tier onYTPause/onYTPlay/onYTEnded
-   *  + subtitle-first onYTSeeked.) */
+  /** Bind source <video> pause/play/ended — platform-agnostic HTMLMediaElement events. */
   bindCommonVideoListeners(
     video: HTMLVideoElement,
-    session: Session,
+    _session: Session,
     extra: ExtraVideoListeners = {},
   ): void {
-    this.onYTPause = () => {
-      this.overlay.setStatusText("Paused");
-      this.overlay.setOverlayState("paused");
-      this.sm.emitState({ paused: true, status: "Paused" });
-    };
-    this.onYTPlay = () => {
-      extra.onPlayExtra?.();
-      this.overlay.setStatusText("Translating");
-      this.overlay.setOverlayState("live");
-      this.sm.emitState({ paused: false, status: "Translating" });
-    };
-    const onYTEnded = (): void => {
-      this.stopSession("video-ended");
-      this.sm.emitEnded("Video ended.");
-    };
-    video.addEventListener("pause", this.onYTPause);
-    video.addEventListener("play", this.onYTPlay);
-    video.addEventListener("ended", onYTEnded);
-    if (extra.onSeeked) video.addEventListener("seeked", extra.onSeeked);
-    session._onEnded = onYTEnded;
+    this.unbindSourcePlayback?.();
+    this.unbindSourcePlayback = bindSourceVideoPlayback(video, {
+      onPause: () => {
+        if (shouldIgnoreSourcePlaybackEvent()) return;
+        const sess = this.sm.session;
+        if (!sess) return;
+        syncSourcePauseState(this.sm, sess, true);
+        this.overlay.setStatusText("Paused");
+        this.overlay.setOverlayState("paused");
+        this.sm.emitState({ paused: true, status: "Paused" });
+      },
+      onPlay: () => {
+        extra.onPlayExtra?.();
+        if (shouldIgnoreSourcePlaybackEvent()) return;
+        const sess = this.sm.session;
+        if (!sess) return;
+        syncSourcePauseState(this.sm, sess, false);
+        this.overlay.setStatusText("Translating");
+        this.overlay.setOverlayState("live");
+        this.sm.emitState({ paused: false, status: "Translating" });
+      },
+      onEnded: () => {
+        this.stopSession("video-ended");
+        this.sm.emitEnded("Video ended.");
+      },
+      onSeeked: extra.onSeeked,
+    });
   }
 
   // ───── Start router (token-bumped inside each pipeline) ───────────────────
@@ -189,33 +261,30 @@ export class ContentApp {
     const { sm, capture, overlay } = this;
     if (sm.session) return { ok: false, error: "Session already running." };
     sm.settings = { ...incomingSettings };
-    // Background may override the Kyma base with the Echoly proxy; fall back to
-    // the BYOK constant. content stays mode-agnostic.
-    sm.apiBase = sm.settings.apiBase || KYMA_BASE;
+    sm.apiBase = sm.settings.apiBase || ECHOLY_PROXY_BASE;
     sm.history = [];
     sm.currentTargetText = "";
     sm.currentSourceText = "";
+    sm.translationUtteranceOpen = false;
+    sm.translationSegmentId = null;
 
-    if (sm.settings.tier === "standard") {
-      // Subtitle-first is the default Standard path (YouTube + non-live);
-      // chunked is the live-stream / no-caption fallback. Live skips
-      // subtitle-first because it pauses the video to render wave 1 (SF6/TC-6).
-      const probeVideo = capture.findVideo();
-      if (
-        location.hostname.includes("youtube.com") &&
-        !capture.isLive(probeVideo)
-      ) {
-        return this.subtitleFirst.startSubtitleFirstSession();
-      }
-      return this.standard.startStandardSession();
-    }
-    if (sm.settings.tier !== "realtime") {
-      return { ok: false, error: "Unknown tier: " + sm.settings.tier };
+    if (location.hostname.includes("youtube.com")) {
+      this.restoreYtCaptions?.();
+      this.restoreYtCaptions = suppressYouTubeNativeCaptions();
     }
 
-    // ── Realtime tier ──
+    const tier = sm.settings.tier;
+    if (tier !== TIER_REALTIME && tier !== TIER_STANDARD) {
+      return { ok: false, error: "Unknown tier: " + tier };
+    }
+    const pipeline = tier === TIER_STANDARD ? "standard" : "realtime";
+    const voice =
+      pipeline === "standard"
+        ? sm.settings.standardVoice
+        : sm.settings.realtimeVoice || "";
+
     const video = capture.findVideo();
-    if (!video) return { ok: false, error: "No YouTube video on this page." };
+    if (!video) return { ok: false, error: "No playable video on this page." };
     capture.videoEl = video;
     capture.bindVolumeDriftGuard(video);
     const live = capture.isLive(video);
@@ -226,8 +295,14 @@ export class ContentApp {
       overlay.buildOverlay(
         this.callbacks,
         sm.settings.advanced?.captionPosition ?? null,
+        sm.settings.languagePicker ?? undefined,
+        sm.settings.apiMode === "proxy",
+        sm.settings.standardVoices?.map((v) => [v.id, v.label]),
+        tier,
       );
-      capture.bindRateChangeWarn(video);
+      overlay.syncFromSettings(sm.settings);
+      // SF8 only for Realtime — Standard adjusts rate via dub sync (dock hint).
+      if (tier === TIER_REALTIME) capture.bindRateChangeWarn(video);
       overlay.setStatusText("Acquiring audio");
       stream = await capture.captureWithRetry(video);
     } catch (err) {
@@ -249,10 +324,22 @@ export class ContentApp {
     const token = sm.nextToken();
     let newSession;
     try {
-      newSession = await this.realtime.buildRealtimeSession(token, stream, {
-        kymaKey: sm.settings.kymaKey,
+      const durationHintSec =
+        pipeline === TIER_REALTIME
+          ? live
+            ? RTC_LIVE_DURATION_HINT_SEC
+            : isFinite(video.duration) && video.duration > 0
+              ? Math.ceil(video.duration)
+              : undefined
+          : isFinite(video.duration) && video.duration > 0
+            ? Math.ceil(video.duration)
+            : undefined;
+      newSession = await this.webrtc.buildSession(token, stream, {
+        apiBearer: sm.settings.apiBearer,
         targetLanguage: sm.settings.targetLanguage,
-        realtimeVoice: sm.settings.realtimeVoice,
+        pipeline,
+        voice,
+        durationHintSec,
       });
     } catch (err) {
       stream.getTracks().forEach((t) => t.stop());
@@ -289,23 +376,56 @@ export class ContentApp {
     sm.session = newSession;
     overlay.setOverlayState("live");
     overlay.setStatusText(live ? "Translating" : "Almost ready");
-    sm.startHeartbeat(newSession.kymaSessionId, newSession.kymaKey);
+    if (pipeline === TIER_REALTIME) {
+      sm.startHeartbeat(newSession.rtcSessionId, newSession.apiBearer);
+    }
     this.startSessionTimer();
     capture.applyVolumes(sm.settings.originalVolume, sm.settings.voiceVolume);
     this.applySourceVisibility();
+    overlay.syncFromSettings(sm.settings);
     if (sm.settings.showSource) this.startCaptionPoll();
 
     this.bindCommonVideoListeners(video, newSession);
 
-    // Non-live: wait for ICE before resuming playback so the first captured
-    // audio has a live channel. Timeout falls through to play() anyway.
+    // VOD: SF6 already paused the video. Realtime → ICE + ms align; Standard →
+    // TTFA gate + adaptive sync loop.
     if (!live) {
       await capture.waitForPCConnected(newSession.pc!, 3000);
       if (token !== sm.pageToken) {
         return { ok: false, error: "Cancelled before play." };
       }
+      if (pipeline === TIER_STANDARD) {
+        this.beginStandardDubSync(video);
+        overlay.setStatusText("Preparing dub");
+        await this.standardDubSync!.waitForFirstDub();
+        if (token !== sm.pageToken) {
+          return { ok: false, error: "Cancelled before play." };
+        }
+        const dub = sm.session?.remoteAudio;
+        if (dub) {
+          try {
+            dub.pause();
+          } catch {
+            /* ignore */
+          }
+        }
+      } else {
+        overlay.setStatusText("Almost ready");
+        await alignRealtimeVodBeforePlay(
+          () => sm.session?.remoteAudio ?? null,
+        );
+        if (token !== sm.pageToken) {
+          return { ok: false, error: "Cancelled before play." };
+        }
+      }
       try {
         await video.play();
+        if (pipeline === TIER_STANDARD && this.standardDubSync) {
+          this.standardDubSync.snapPlaybackStart();
+          this.standardDubSync.start();
+          const dub = sm.session?.remoteAudio;
+          if (dub) void dub.play().catch(() => {});
+        }
         overlay.setStatusText("Translating");
       } catch {
         overlay.setStatusText("Press YouTube play to start dub");
@@ -321,30 +441,15 @@ export class ContentApp {
 
   stopSession(_reason = "stop"): void {
     const { sm, capture } = this;
+    this.stopStandardDubSync();
+    sm.videoPaused = false;
     sm.pageToken += 1;
     sm.clearSessionTimer();
     sm.stopHeartbeat();
     this.stopCaptionPoll();
+    this.unbindSourcePlayback?.();
+    this.unbindSourcePlayback = null;
     if (capture.videoEl) {
-      if (this.onYTPause)
-        capture.videoEl.removeEventListener("pause", this.onYTPause);
-      if (this.onYTPlay)
-        capture.videoEl.removeEventListener("play", this.onYTPlay);
-      const cur = sm.session;
-      if (cur?.type === "subtitle-first" && cur._onSeeked) {
-        try {
-          capture.videoEl.removeEventListener("seeked", cur._onSeeked);
-        } catch {
-          /* ignore */
-        }
-      }
-      if (cur?._onEnded) {
-        try {
-          capture.videoEl.removeEventListener("ended", cur._onEnded);
-        } catch {
-          /* ignore */
-        }
-      }
       // SF3/SF8 — drop guards before resetting volume so our restore writes
       // don't re-trigger them.
       capture.unbindVolumeDriftGuard();
@@ -353,37 +458,15 @@ export class ContentApp {
       capture.videoEl.volume = 1.0;
       capture.videoEl = null;
     }
-    this.onYTPause = null;
-    this.onYTPlay = null;
     const session = sm.session;
+    const rtcEnd =
+      session?.rtcSessionId &&
+      session.apiBearer &&
+      session.pipeline === TIER_REALTIME
+        ? { rtcSessionId: session.rtcSessionId, apiBearer: session.apiBearer }
+        : null;
     if (session) {
       try {
-        if (session.type === "standard") {
-          const std = session as StandardSession;
-          std.stopFlag = true;
-          try {
-            std.abortController.abort();
-          } catch {
-            /* ignore */
-          }
-          if (std.activeRecorder && std.activeRecorder.state !== "inactive") {
-            try {
-              std.activeRecorder.stop();
-            } catch {
-              /* ignore */
-            }
-          }
-        }
-        if (session.type === "subtitle-first") {
-          const sf = session as SubtitleFirstSession;
-          sf.stopFlag = true;
-          try {
-            sf.abortController.abort();
-          } catch {
-            /* ignore */
-          }
-          this.subtitleFirst.cancelPendingSources(sf);
-        }
         if (session.remoteAudio) {
           session.remoteAudio.pause();
           session.remoteAudio.srcObject = null;
@@ -397,27 +480,45 @@ export class ContentApp {
       } catch {
         /* best-effort teardown */
       }
-      // Realtime tier holds Kyma session collateral; the local tiers don't.
-      if (session.kymaSessionId) {
-        void sm.endKymaSession(session.kymaSessionId, session.kymaKey);
-      }
       sm.session = null;
     }
+    // Release server live-session slot (MAX_CONCURRENT_LIVE_SESSIONS). Bridge
+    // #closeOnce is a second path; /end must run on normal Stop too (mock peer
+    // and some teardown paths never signal remote close).
+    if (rtcEnd) {
+      void sm.endRtcSession(rtcEnd.rtcSessionId, rtcEnd.apiBearer);
+    }
     if (sm.prevSession) {
+      const prev = sm.prevSession;
       try {
-        sm.prevSession.pc?.close();
+        if (prev.remoteAudio) {
+          prev.remoteAudio.pause();
+          prev.remoteAudio.srcObject = null;
+          prev.remoteAudio.remove();
+        }
+        if (prev.outputGain) prev.outputGain.disconnect();
+        if (prev.audioCtx) prev.audioCtx.close();
+        if (prev.dc) prev.dc.close();
+        if (prev.pc) prev.pc.close();
+        if (prev.stream) prev.stream.getTracks().forEach((tr) => tr.stop());
       } catch {
-        /* ignore */
+        /* best-effort teardown */
       }
-      void sm.endKymaSession(
-        sm.prevSession.kymaSessionId,
-        sm.prevSession.kymaKey,
-      );
       sm.prevSession = null;
     }
     sm.history = [];
     sm.currentTargetText = "";
+    sm.translationUtteranceOpen = false;
+    sm.translationSegmentId = null;
+    if (this.restoreYtCaptions) {
+      this.restoreYtCaptions();
+      this.restoreYtCaptions = null;
+    }
     this.overlay.removeOverlay();
+    sm.emitState({ running: false, paused: false, status: "Stopped" });
+    if (_reason !== "backend-stop") {
+      sm.emitEnded(_reason === "user-stop" ? "Stopped" : _reason);
+    }
   }
 
   // ───── Live settings update ───────────────────────────────────────────────
@@ -434,36 +535,11 @@ export class ContentApp {
     ) {
       overlay.showToast("Stop and Start to switch tiers", 5000);
     }
-    // Sync the language <select> to the pushed target (legacy content.js:2325-2326).
-    if (newSettings.targetLanguage) {
-      overlay.setLanguageSelection(newSettings.targetLanguage);
-    }
-    // Voice <select> shape depends on tier — repopulate before assigning value
-    // so the new id exists. We surface the active values through
-    // populateVoicePicker so the dropdown shape matches the tier.
-    if (
-      newSettings.realtimeVoice !== undefined ||
-      newSettings.standardVoice !== undefined
-    ) {
-      const tier = sm.settings.tier || "realtime";
-      const selected =
-        tier === "standard"
-          ? sm.settings.standardVoice
-          : sm.settings.realtimeVoice || "";
-      overlay.populateVoicePicker(tier, selected);
-    }
     if ("showSource" in newSettings) {
       this.applySourceVisibility();
       if (sm.settings.showSource && sm.session) this.startCaptionPoll();
       else this.stopCaptionPoll();
     }
-    // Only REALTIME needs the zero-gap handover (PeerConnection tear-down +
-    // rebuild). Standard chunked picks up new lang/voice on the next chunk —
-    // settings already mutated above. Subtitle-first must additionally cancel
-    // its in-flight TTS queue so already-rendered sentences in the OLD lang
-    // don't keep playing; the rolling renderer then picks up the new lang on
-    // its next batch. (Bug C1: legacy fell into the realtime handover path
-    // for subtitle-first sessions and silently no-op'd.)
     const langOrVoiceChanged =
       ("targetLanguage" in newSettings &&
         newSettings.targetLanguage !== prev.targetLanguage) ||
@@ -472,22 +548,7 @@ export class ContentApp {
       ("standardVoice" in newSettings &&
         newSettings.standardVoice !== prev.standardVoice);
     if (langOrVoiceChanged && sm.session) {
-      // RealtimeSession is the only branch without a `type` tag (legacy shape).
-      if (sm.session.type === undefined) {
-        void this.realtime.requestHandover(newSettings);
-      } else if (sm.session.type === "subtitle-first") {
-        // Drop already-scheduled TTS (old lang/voice). The rolling renderer
-        // will re-translate + re-render from the next batch with new settings.
-        this.subtitleFirst.cancelPendingSources(
-          sm.session as SubtitleFirstSession,
-        );
-        sm.currentTargetText = "";
-        overlay.setTargetText("");
-        overlay.setStatusText("Switching language…");
-        overlay.setOverlayState("live");
-      }
-      // Standard chunked: settings mutation alone is enough — next chunk uses
-      // them. No further action.
+      void this.webrtc.requestHandover(newSettings);
     }
     if ("originalVolume" in newSettings || "voiceVolume" in newSettings) {
       this.capture.applyVolumes(
@@ -496,12 +557,15 @@ export class ContentApp {
       );
     }
 
+    if (overlay.isMounted()) {
+      overlay.syncFromSettings(sm.settings);
+    }
+
     // Advanced settings — apply the side-effectful subset live.
     //  • outputDeviceId  → hot-swap setSinkId on the active <audio> element.
     //  • captionPosition → re-position the overlay (user's drag still wins on
     //                       subsequent persistence — no LAYOUT_KEY write).
-    //  • translationStyle / latencyPreset / noiseGate → no live action needed;
-    //    the Standard pipeline reads them fresh per chunk from sm.settings.
+    //  • captionPosition / outputDeviceId → overlay layout + setSinkId on handover.
     if ("advanced" in newSettings && newSettings.advanced) {
       const nextAdv = newSettings.advanced;
       const prevAdv = (prev as Partial<StartSettings>).advanced;
@@ -545,12 +609,7 @@ export class ContentApp {
   }
 
   handleUnload(): void {
-    if (this.sm.session) {
-      void this.sm.endKymaSession(
-        this.sm.session.kymaSessionId,
-        this.sm.session.kymaKey,
-      );
-    }
+    this.stopSession("unload");
   }
 }
 
@@ -560,16 +619,17 @@ export class ContentApp {
 
 export function initContent(): void {
   // ───── F9 — Idempotent version guard (MUST be first) ─────────────────────
-  const w = window as unknown as Record<string, unknown>;
-  if (w[CONTENT_GLOBAL_KEY] === ECHOLY_VERSION) return;
+  if (Reflect.get(window, CONTENT_GLOBAL_KEY) === ECHOLY_VERSION) return;
   // Older copy may have left UI behind; clean up before re-installing.
   document.querySelectorAll(".ec-root").forEach((el) => el.remove());
-  w[CONTENT_GLOBAL_KEY] = ECHOLY_VERSION;
+  Reflect.set(window, CONTENT_GLOBAL_KEY, ECHOLY_VERSION);
+
+  purgeEcholyOverlayRoots();
 
   const app = new ContentApp();
 
   // Orphaned-script teardown: when the runtime handle dies, stop emitting +
-  // fire the Kyma /end keepalive (legacy notifyBackground catch → handleUnload).
+  // fire the realtime /end keepalive on unload.
   app.sm.setUnloadHandler(() => app.handleUnload());
 
   // SPA navigation watcher + tab-unload keepalive.
@@ -583,7 +643,7 @@ export function initContent(): void {
     (
       msg: BgToContentMessage,
       _sender: chrome.runtime.MessageSender,
-      sendResponse: (response?: unknown) => void,
+      sendResponse: (response?: object) => void,
     ): boolean => {
       void (async () => {
         switch (msg?.type) {

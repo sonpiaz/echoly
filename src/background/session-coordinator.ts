@@ -1,18 +1,9 @@
 // ────────────────────────────────────────────────────────────────────────────
-// Session coordinator — glues popup intents to the content script. Ported from
-// legacy/background.js handleStart/handleStop/handleUpdateSettings/
-// handleUpdateVolume + the helpers ensureContentScript/relayToContent/
-// activeYouTubeTab/isYouTubeUrl (209-404).
-//
-// ensureContentScript(tabId) is what makes Start work without a refresh: PING
-// first, inject on no-reply. Injection uses CONTENT_SCRIPT_PATH / CONTENT_CSS_PATH
-// (the WXT-stable bundle path) — NOT the legacy literal "content.js"/"content.css".
-//
-// CONTENT_START relays a full snapshot with apiBase added and kymaKey OVERRIDDEN
-// to the resolved bearer (StartSettings) — content stays mode-agnostic.
+// Session coordinator — popup START/STOP/settings → content script relay.
 // ────────────────────────────────────────────────────────────────────────────
 
 import { CONTENT_SCRIPT_PATH, CONTENT_CSS_PATH } from "@/shared/constants";
+import { signInToStartMessage } from "@/shared/echoly-config";
 import { relayToContent } from "@/shared/protocol";
 import type { Ack, StateResult } from "@/shared/protocol";
 import type { Settings, StartSettings } from "@/shared/types";
@@ -27,12 +18,19 @@ import type { Store } from "./store";
 import type { EcholyAuth } from "./auth";
 import type { SettingsClient } from "./settings-client";
 import { SettingsHttpError } from "./settings-client";
+import { recordLanguagePairRecent } from "./language-catalog";
+import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
+import {
+  domainFromTabUrl,
+  findYouTubeWatchTab,
+  resolveSiteDomainFromTabs,
+} from "@/shared/active-site";
 
 function isYouTubeUrl(url: string | undefined): url is string {
   return typeof url === "string" && /^https?:\/\/[^/]*youtube\.com\//.test(url);
 }
 
-function errMessage(err: unknown): string {
+function errMessage(err: Error | string | object | null): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
@@ -44,12 +42,27 @@ export class SessionCoordinator {
     private readonly settingsClient?: SettingsClient,
   ) {}
 
-  /** Extract a normalized hostname from a tab URL. Returns null on chrome://,
-   *  malformed URLs, or hosts that don't pass normalizeDomain. */
   private domainFromTab(tab: chrome.tabs.Tab): string | null {
-    if (!tab.url) return null;
+    return domainFromTabUrl(tab.url);
+  }
+
+  /**
+   * Refresh `state.currentDomain` from the focused window (popup open, tab switch).
+   * Does not require an active translation session.
+   */
+  async refreshActiveSite(): Promise<string | null> {
+    const domain = await this.resolveFocusedWindowDomain();
+    this.store.setCurrentDomain(domain);
+    return domain;
+  }
+
+  private async resolveFocusedWindowDomain(): Promise<string | null> {
     try {
-      return normalizeDomain(new URL(tab.url).hostname);
+      const windowTabs = await chrome.tabs.query({ currentWindow: true });
+      const fromWindow = resolveSiteDomainFromTabs(windowTabs);
+      if (fromWindow) return fromWindow;
+      const allTabs = await chrome.tabs.query({});
+      return resolveSiteDomainFromTabs(allTabs);
     } catch {
       return null;
     }
@@ -100,15 +113,19 @@ export class SessionCoordinator {
     await this.store.persistAdvanced();
   }
 
-  /** Resolve the active+currentWindow tab and assert it's a YouTube page
-   *  (legacy activeYouTubeTab 218-223). Throws on no tab / non-YT. */
-  private async activeYouTubeTab(): Promise<chrome.tabs.Tab> {
-    const [tab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-    if (!tab) throw new Error("No active tab.");
-    if (!isYouTubeUrl(tab.url)) throw new Error("Open a YouTube video first.");
+  /** YouTube watch tab for START — same window as popup site label (popup tab OK). */
+  private async youtubeTabForSession(): Promise<chrome.tabs.Tab> {
+    let tabs = await chrome.tabs.query({ currentWindow: true });
+    let pick = findYouTubeWatchTab(tabs);
+    if (!pick) {
+      tabs = await chrome.tabs.query({});
+      pick = findYouTubeWatchTab(tabs);
+    }
+    if (!pick?.id) throw new Error("Open a YouTube video first.");
+    const tab = tabs.find((t) => t.id === pick.id);
+    if (!tab || !isYouTubeUrl(tab.url)) {
+      throw new Error("Open a YouTube video first.");
+    }
     return tab;
   }
 
@@ -146,10 +163,14 @@ export class SessionCoordinator {
     }
     await this.store.persistSettings(settings ?? {});
 
-    // Resolve subscription mode before starting: BYOK key OR Echoly cookie.
-    const mode = await resolveApiMode(state, this.auth);
+    const token = await this.auth.getSessionToken();
+    if (token && !state.signedInUser && this.settingsClient) {
+      await hydrateSignedIn(this.store, this.settingsClient);
+    }
+
+    const mode = await resolveApiMode(this.auth, this.store.state.signedInUser);
     if (!mode) {
-      const msg = "Sign in at echolyhq.com or paste a Kyma key.";
+      const msg = signInToStartMessage();
       this.store.setError(msg);
       this.store.setStatus(msg);
       this.store.setConnecting(false);
@@ -161,9 +182,9 @@ export class SessionCoordinator {
 
     let tab: chrome.tabs.Tab;
     try {
-      tab = await this.activeYouTubeTab();
+      tab = await this.youtubeTabForSession();
     } catch (err) {
-      return { ok: false, error: errMessage(err) };
+      return { ok: false, error: errMessage(err instanceof Error ? err : String(err)) };
     }
     this.store.setTabId(tab.id ?? null);
     // Resolve and stash the active domain so per-site overrides apply on this
@@ -190,12 +211,12 @@ export class SessionCoordinator {
         snapshot.siteOverrides,
         snapshot.currentDomain,
       );
-      // Full snapshot + apiBase + kymaKey overridden with the resolved bearer.
+      // Full snapshot + apiBase + apiBearer overridden with the resolved bearer.
       // content stays mode-agnostic — same fetch shape, different URL + bearer.
       const startSettings: StartSettings = {
         ...snapshot,
         apiBase: mode.apiBase,
-        kymaKey: mode.apiKey,
+        apiBearer: mode.apiKey,
       };
       const reply = await relayToContent(tabId, {
         type: "CONTENT_START",
@@ -209,12 +230,16 @@ export class SessionCoordinator {
       this.store.setRunning(true);
       this.store.setSessionStartedAt(Date.now());
       this.store.setStatus("Translating");
+      const token = await this.auth.getSessionToken();
+      if (token) {
+        void recordLanguagePairRecent(token, this.store.state.targetLanguage, "en");
+      }
       this.store.broadcast();
       return { ok: true, state: this.store.snapshot() };
     } catch (err) {
       this.store.setConnecting(false);
       this.store.setRunning(false);
-      const msg = errMessage(err);
+      const msg = errMessage(err instanceof Error ? err : String(err));
       this.store.setError(msg);
       this.store.setStatus(msg);
       this.store.broadcast();
@@ -225,22 +250,55 @@ export class SessionCoordinator {
   /** Stop a session cleanly so the provider sees the /end (legacy handleStop
    *  331-347). Tolerates a gone tab. */
   async stop(): Promise<StateResult> {
-    const tabId = this.store.state.tabId;
+    const wasActive =
+      this.store.state.running || this.store.state.connecting;
+    let targetTabId = this.store.state.tabId;
+
+    if (targetTabId == null) {
+      try {
+        const [tab] = await chrome.tabs.query({
+          active: true,
+          currentWindow: true,
+        });
+        if (tab && isYouTubeUrl(tab.url) && tab.id != null) {
+          targetTabId = tab.id;
+        }
+      } catch {
+        /* no active tab */
+      }
+    }
+
+    // Tear down the page overlay BEFORE updating popup state so Stop feels synced.
+    let relayOk = !wasActive;
+    if (targetTabId != null) {
+      try {
+        await this.ensureContentScript(targetTabId);
+        await relayToContent(targetTabId, { type: "CONTENT_STOP" });
+        relayOk = true;
+      } catch {
+        relayOk = false;
+      }
+    } else if (wasActive) {
+      relayOk = false;
+    }
+
     this.store.setRunning(false);
     this.store.setConnecting(false);
     this.store.setPaused(false);
     this.store.setSessionStartedAt(null);
-    this.store.setCurrentDomain(null);
+    await this.refreshActiveSite();
     this.store.setStatus("Stopped");
-    this.store.broadcast();
-    if (tabId != null) {
-      try {
-        await relayToContent(tabId, { type: "CONTENT_STOP" });
-      } catch {
-        // Tab may be gone; that's fine.
-      }
-    }
     this.store.setTabId(null);
+    this.store.broadcast();
+    if (this.settingsClient && this.store.state.signedInUser) {
+      scheduleHydrateSignedIn(this.store, this.settingsClient);
+    }
+    if (wasActive && !relayOk) {
+      return {
+        ok: false,
+        error: "Could not reach the YouTube tab to stop translation.",
+      };
+    }
     return { ok: true, state: this.store.snapshot() };
   }
 
@@ -259,7 +317,7 @@ export class SessionCoordinator {
         });
         if (reply?.state) this.store.mergeFromContent(reply.state);
       } catch (err) {
-        this.store.setError(errMessage(err));
+        this.store.setError(errMessage(err instanceof Error ? err : String(err)));
         this.store.broadcast();
       }
     }
@@ -426,7 +484,7 @@ export class SessionCoordinator {
       }
     } catch (err) {
       // Network/5xx: keep current state; surface error message on state.
-      const msg = errMessage(err);
+      const msg = errMessage(err instanceof Error ? err : String(err));
       this.store.setError(msg);
     }
     this.store.broadcast();

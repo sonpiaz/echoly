@@ -1,8 +1,5 @@
 // ────────────────────────────────────────────────────────────────────────────
-// LOCKED CONTRACT — cross-surface message protocol (hand-rolled, chrome.* only,
-// NO browser.* polyfill). Every message type + payload + response is modeled
-// here as a discriminated union, verbatim from legacy 0.6.3
-// (legacy/background.js onMessage + legacy/content.js onMessage + popup sends).
+// Cross-surface message protocol (popup ↔ background ↔ content).
 //
 // PRESERVED QUIRKS (do NOT "fix" — they are behavior):
 //  • Background routes on `sender.tab` truthiness: content-origin (has tab) vs
@@ -14,11 +11,11 @@
 //    — no awaiting, errors swallowed.
 //  • CONTENT_UPDATE_SETTINGS: background reads `reply.state` but content does
 //    NOT send it → response.state is OPTIONAL.
-//  • Content's outbound UPDATE_SETTINGS is a no-op by routing (handleContentEvent
-//    ignores it) — it is still a valid ContentToBg message and acked {ok:true}.
+//  • UPDATE_SETTINGS from content persists via SessionCoordinator.
 // ────────────────────────────────────────────────────────────────────────────
 
-import type { State, StartSettings, YtCaptionEntry, Settings } from "./types";
+import type { TranslationTier } from "./constants";
+import type { State, StartSettings, Settings } from "./types";
 import type { AdvancedPatch } from "./advanced";
 
 // ───── Generic response shapes ─────
@@ -32,7 +29,6 @@ export type StateResult = { ok: true; state: State } | Err;
 // ════════════════════════════════════════════════════════════════════════════
 export type PopupToBgMessage =
   | { type: "GET_STATE" }
-  | { type: "GET_AUTH" } // defined in legacy but never sent by popup — keep
   | { type: "SIGN_OUT_ECHOLY" }
   | { type: "OPEN_SIGNIN" } // Wave: popup asks bg to open signin tab + track its id
   | { type: "START"; settings?: Partial<Settings> }
@@ -55,7 +51,6 @@ export type AudioDeviceList = {
 
 export interface PopupToBgResponse {
   GET_STATE: StateResult;
-  GET_AUTH: StateResult;
   SIGN_OUT_ECHOLY: StateResult;
   OPEN_SIGNIN: Ack;
   START: StateResult;
@@ -105,16 +100,23 @@ export type ContentToBgMessage =
       errorMessage?: string;
     }
   | { type: "CONTENT_ENDED"; reason?: string }
-  | { type: "GET_YT_CC_URL"; videoId: string }
-  // content also emits this; bg's content-branch ignores it (no-op) but acks.
+  /** Overlay Stop — ask background to run the same STOP path as the popup. */
+  | { type: "CONTENT_STOP_REQUEST" }
+  | {
+      type: "CONTENT_QUOTA";
+      mode?: TranslationTier;
+      used_minutes?: number;
+      cap_minutes?: number;
+      resets_at?: string;
+    }
   | { type: "UPDATE_SETTINGS"; settings: Partial<Settings> };
 
-export type YtCcUrlResponse = ({ ok: true } & YtCaptionEntry) | { ok: false };
 export interface ContentToBgResponse {
   CONTENT_STATE: Ok;
   CONTENT_ENDED: Ok;
-  GET_YT_CC_URL: YtCcUrlResponse;
-  UPDATE_SETTINGS: Ok; // no-op ack
+  CONTENT_STOP_REQUEST: Ok;
+  CONTENT_QUOTA: Ok;
+  UPDATE_SETTINGS: Ok;
 }
 
 // ───── Convenience: everything the background onMessage listener can receive ─
@@ -150,20 +152,13 @@ export function relayToContent<T extends BgToContentMessage["type"]>(
   >;
 }
 
-/** Request/response send from content → bg (e.g. GET_YT_CC_URL). */
-export function sendFromContent<T extends ContentToBgMessage["type"]>(
-  message: Extract<ContentToBgMessage, { type: T }>,
-): Promise<ContentToBgResponse[T]> {
-  return chrome.runtime.sendMessage(message) as Promise<ContentToBgResponse[T]>;
-}
-
 /** Fire-and-forget send over chrome.runtime (broadcast to popup, or content's
- *  notifyBackground). Errors are swallowed — matches legacy `.catch(()=>{})`.
+ *  notifyBackground). Errors are swallowed.
  *  Returns false if the runtime handle is already gone (SW/page torn down). */
 export function post(message: BgToPopupMessage | ContentToBgMessage): boolean {
   try {
     if (!chrome.runtime?.id) return false;
-    void (chrome.runtime.sendMessage(message) as Promise<unknown>)?.catch?.(
+    void (chrome.runtime.sendMessage(message) as Promise<void>)?.catch?.(
       () => {},
     );
     return true;

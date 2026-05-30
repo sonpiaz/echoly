@@ -1,60 +1,48 @@
-// ────────────────────────────────────────────────────────────────────────────
-// Controller — constructs the OverlayCallbacks (the UI↔logic seam). The overlay
-// binds the <select>/Stop DOM events and only INVOKES these callbacks; the EXACT
-// realtime-vs-standard branch lives here. This branch is load-bearing — it
-// preserves BUGS C1/H3 behavior (characterization-tested), so the branch is NOT
-// "fixed" here. (legacy/content.js: langSelect change 253-265, voiceSelect
-// change 266-274, stopBtn click 280-284.)
-//
-// Branch (locked in @/shared/ports):
-//   • realtime tier  ⇒ requestHandover(newValue)
-//   • standard tier  ⇒ mutate settings in place + notifyBackground(UPDATE_SETTINGS)
-//                       [+ for language: setStatusText("Switching to …") +
-//                          setOverlayState("live")]
-//   • onStop         ⇒ stopSession("user-stop") + emit Stopped state + ended
-// ────────────────────────────────────────────────────────────────────────────
+// OverlayCallbacks — lang/voice changes trigger WebRTC handover on both tiers.
 
-import { LANG_NAME } from "@/shared/constants";
 import type { OverlayCallbacks } from "@/shared/ports";
+import { post } from "@/shared/protocol";
 import type { ContentApp } from "./index";
 
 export function createController(app: ContentApp): OverlayCallbacks {
   const { sm, overlay } = app;
   return {
     onLanguageChange(lang: string): void {
-      if (sm.settings?.tier === "standard") {
-        // Standard pipeline picks up the new prompt on the next chunk; no
-        // tear-down. Push to background so the popup stays in sync.
-        sm.settings.targetLanguage = lang;
-        sm.notifyBackground({
-          type: "UPDATE_SETTINGS",
-          settings: { targetLanguage: lang },
-        });
-        overlay.setStatusText("Switching to " + (LANG_NAME[lang] || lang));
-        overlay.setOverlayState("live");
-      } else {
-        void app.realtime.requestHandover({ targetLanguage: lang });
-      }
+      void app.webrtc.requestHandover({ targetLanguage: lang });
     },
     onVoiceChange(voiceId: string): void {
-      if (sm.settings?.tier === "standard") {
-        sm.settings.standardVoice = voiceId;
-        sm.notifyBackground({
-          type: "UPDATE_SETTINGS",
-          settings: { standardVoice: voiceId },
-        });
-      } else {
-        void app.realtime.requestHandover({ realtimeVoice: voiceId });
-      }
+      const patch =
+        sm.settings?.tier === "standard"
+          ? { standardVoice: voiceId }
+          : { realtimeVoice: voiceId };
+      void app.webrtc.requestHandover(patch);
+    },
+    onTargetCaptionVisibilityChange(show: boolean): void {
+      sm.settings = {
+        ...(sm.settings || {}),
+        showTargetCaptions: show,
+      } as typeof sm.settings;
+      sm.notifyBackground({
+        type: "UPDATE_SETTINGS",
+        settings: { showTargetCaptions: show },
+      });
+      overlay.applyCaptionOnVideo(show);
+    },
+    onMixChange(originalVolume: number, voiceVolume: number): void {
+      sm.settings = {
+        ...(sm.settings || {}),
+        originalVolume,
+        voiceVolume,
+      } as typeof sm.settings;
+      sm.notifyBackground({
+        type: "UPDATE_SETTINGS",
+        settings: { originalVolume, voiceVolume },
+      });
+      app.capture.applyVolumes(originalVolume, voiceVolume);
     },
     onStop(): void {
       app.stopSession("user-stop");
-      sm.notifyBackground({
-        type: "CONTENT_STATE",
-        running: false,
-        status: "Stopped",
-      });
-      sm.emitEnded("Stopped");
+      post({ type: "CONTENT_STOP_REQUEST" });
     },
   };
 }

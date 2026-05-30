@@ -57,16 +57,14 @@ export function attachPopover(cfg: PopoverConfig): PopoverHandle {
   function show() {
     if (open) return;
     open = true;
+    cfg.onOpen?.();
     panel.hidden = false;
     if (dim) dim.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     trigger.classList.add("is-open");
     document.addEventListener("mousedown", onDocMousedown, true);
     document.addEventListener("keydown", onDocKeydown, true);
-    // Focus the first menuitem on open (better accessibility than focusing
-    // the panel itself).
     setTimeout(() => focusItem(0), 0);
-    cfg.onOpen?.();
   }
 
   function hide(returnFocus = true) {

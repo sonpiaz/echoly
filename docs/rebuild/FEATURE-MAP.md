@@ -51,7 +51,7 @@ all listeners registered synchronously in initBackground (M-a: no dynamic import
 parts of `legacy/content.js` (buildOverlay/applyLayout/showToast/history/voice picker),
 `docs/rebuild/research/03-ui-surfaces.md`.
 **Imports from contracts:** `@/shared/ports` (OverlayView/OverlayCallbacks/OverlayState),
-`@/shared/types`, `@/shared/constants` (LANGUAGES/voices/HISTORY_MAX/RTL_LANGS/LAYOUT_KEY/TIER_CAPS),
+`@/shared/types`, `@/shared/constants` (voices/HISTORY_MAX/RTL_LANGS/LAYOUT_KEY), `@/lib/offline-tier-caps`,
 `@/shared/protocol` (popup → bg sends; popup ← BACKGROUND_STATE_UPDATE).
 **Hard invariants:** byte-identical DOM + CSS; NO Shadow DOM; NO CSS-module hashing
 (`overlay.css` plain); toast built via DOM APIs (never innerHTML); preserve the

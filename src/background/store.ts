@@ -11,6 +11,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import { BROADCAST_DEBOUNCE_MS } from "@/shared/constants";
+import { markHasEverSignedIn } from "@/shared/storage-keys";
 import { post } from "@/shared/protocol";
 import type {
   State,
@@ -33,8 +34,17 @@ import {
 } from "@/shared/advanced";
 import { deriveApiModeLabel } from "@/lib/api-mode";
 import type { EcholyAuth } from "./auth";
-import { loadByokKey, saveByokKey } from "./byok-storage";
-import { fetchGuestPolicy } from "./guest-policy";
+import {
+  resolvePublicLanguageCatalog,
+  type LanguageCatalogSnapshot,
+} from "./language-catalog";
+import { fetchSessionBootstrap } from "./session-bootstrap";
+import {
+  resolveStandardVoices,
+  standardVoiceStateFields,
+  type StandardVoiceSnapshot,
+} from "./voice-catalog";
+import type { Usage } from "@/shared/types";
 
 /** chrome.storage.local key holding the persisted Advanced bundle (offline
  *  mirror of the server's authoritative copy). Versioned so a future
@@ -80,18 +90,11 @@ export class Store {
     post({ type: "BACKGROUND_STATE_UPDATE", state: this.snapshot() });
   }
 
-  /** Hydrate the 8 persisted keys from storage into state (legacy loadSettings
-   *  251-255). The BYOK key (`kymaKey`) is decrypted at rest via byok-storage;
-   *  state.kymaKey holds the plaintext bearer in memory. Also hydrates the
-   *  Advanced bundle (server-authoritative mirror) so the popup can render
-   *  user-customized values immediately even on a cold SW start. */
+  /** Hydrate persisted settings + Advanced bundle into state. */
   async loadSettings(): Promise<Settings> {
-    const [stored, kymaPlain] = await Promise.all([
-      loadStoredSettings(),
-      loadByokKey(),
-      this.loadAdvanced(),
-    ]);
-    stored.kymaKey = kymaPlain;
+    const stored = await loadStoredSettings();
+    stored.apiBearer = "";
+    await this.loadAdvanced();
     Object.assign(this.state, stored);
     return stored;
   }
@@ -102,7 +105,7 @@ export class Store {
    *  rather than throwing — the next sign-in fetch will replace it anyway. */
   async loadAdvanced(): Promise<void> {
     const raw = await chrome.storage.local.get(ADVANCED_STORAGE_KEY);
-    const entry = (raw as Record<string, unknown> | undefined)?.[
+    const entry = (raw as Record<string, object | string | number | boolean | null> | undefined)?.[
       ADVANCED_STORAGE_KEY
     ];
     if (entry && typeof entry === "object") {
@@ -189,22 +192,11 @@ export class Store {
     this.state.advancedDirty = dirty;
   }
 
-  /** Merge a partial into state and persist ONLY the DEFAULT_SETTINGS keys
-   *  present in it (legacy persistSettings 257-266). The BYOK key is routed
-   *  through byok-storage (light-encrypted at rest) — the generic settings
-   *  writer never sees it. */
   async persistSettings(partial: Partial<Settings>): Promise<void> {
-    Object.assign(this.state, partial);
-    if (partial.kymaKey !== undefined) {
-      await saveByokKey(partial.kymaKey);
-      // Strip kymaKey from the rest before handing to the plaintext writer so
-      // no plaintext copy is ever written to chrome.storage.local.
-      const { kymaKey: _omit, ...rest } = partial;
-      void _omit;
-      if (Object.keys(rest).length) await saveSettings(rest);
-    } else {
-      await saveSettings(partial);
-    }
+    const { apiBearer: _omit, ...rest } = partial;
+    void _omit;
+    Object.assign(this.state, rest);
+    if (Object.keys(rest).length) await saveSettings(rest);
   }
 
   /** Apply a partial settings update to state without persisting (used when
@@ -213,37 +205,83 @@ export class Store {
     Object.assign(this.state, partial);
   }
 
-  /** Refresh the popup-visible auth snapshot (signedInUser + usage + apiMode)
-   *  from the cookie (legacy refreshAuth 129-146). BYOK still wins for apiMode
-   *  even when signed in. */
   async refreshAuth(): Promise<void> {
     const token = await this.auth.getSessionToken();
+
     if (!token) {
-      this.state.signedInUser = null;
-      this.state.usage = null;
-      this.state.apiMode = deriveApiModeLabel(this.state.kymaKey, null);
+      this.clearSignedInSnapshot();
+      const [catalog, voices] = await Promise.all([
+        resolvePublicLanguageCatalog(),
+        resolveStandardVoices(),
+      ]);
+      this.applyLanguageCatalog(catalog);
+      this.applyStandardVoices(voices);
       return;
     }
-    const [user, usage] = await Promise.all([
-      this.auth.fetchUser(token),
-      this.auth.fetchUsage(token),
-    ]);
-    this.state.signedInUser = user;
-    this.state.usage = usage;
-    this.state.apiMode = deriveApiModeLabel(this.state.kymaKey, user);
+
+    const bootstrap = await fetchSessionBootstrap(token);
+    if (!bootstrap) {
+      this.clearSignedInSnapshot();
+      const [catalog, voices] = await Promise.all([
+        resolvePublicLanguageCatalog(),
+        resolveStandardVoices(),
+      ]);
+      this.applyLanguageCatalog(catalog);
+      this.applyStandardVoices(voices);
+      return;
+    }
+
+    this.state.signedInUser = bootstrap.user;
+    this.state.usage = bootstrap.usage;
+    this.applyLanguageCatalog(bootstrap.catalog);
+    this.applyStandardVoices(bootstrap.voices);
+    this.state.apiMode = deriveApiModeLabel(bootstrap.user);
+    this.state.apiBearer = "";
+    await markHasEverSignedIn();
   }
 
-  /** Clear the signed-in auth snapshot after sign-out (legacy SIGN_OUT 472-473). */
-  clearAuth(): void {
+  /** Clear user-specific snapshot fields (signed-out or bootstrap failure). */
+  private clearSignedInSnapshot(): void {
     this.state.signedInUser = null;
+    this.state.usage = null;
+    this.state.languagePicker = null;
+    this.state.languageNames = null;
     this.state.apiMode = null;
+    this.state.apiBearer = "";
   }
 
-  /** Refresh state.guestPolicy from the public server endpoint. Always resolves
-   *  (fetcher itself falls back to default on any failure). Wave 2 — the popup
-   *  uses this to gate the language picker when apiMode === "byok". */
-  async refreshGuestPolicy(): Promise<void> {
-    this.state.guestPolicy = await fetchGuestPolicy();
+  private applyLanguageCatalog(catalog: LanguageCatalogSnapshot): void {
+    this.state.languagePicker = catalog.picker;
+    this.state.languageNames = catalog.languageNames;
+  }
+
+  private applyStandardVoices(voices: StandardVoiceSnapshot): void {
+    Object.assign(this.state, standardVoiceStateFields(voices));
+  }
+
+  /** Patch usage from a 402 envelope without a second bootstrap fetch. */
+  applyUsagePatch(patch: Partial<Usage>): void {
+    if (!this.state.usage) return;
+    this.state.usage = { ...this.state.usage, ...patch };
+  }
+
+  /** Clear signed-in fields; optionally reload public catalog (sign-out). */
+  resetSignedInState(reloadPublicCatalog = false): void {
+    this.clearSignedInSnapshot();
+    if (!reloadPublicCatalog) return;
+    void (async () => {
+      const [catalog, voices] = await Promise.all([
+        resolvePublicLanguageCatalog(),
+        resolveStandardVoices(),
+      ]);
+      this.applyLanguageCatalog(catalog);
+      this.applyStandardVoices(voices);
+    })();
+  }
+
+  /** @deprecated Use resetSignedInState — kept for call sites migrating. */
+  clearAuth(): void {
+    this.resetSignedInState(true);
   }
 
   // ── Field setters used by the session coordinator + content events. Kept on

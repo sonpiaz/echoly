@@ -19,6 +19,8 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import type { ToastOptions } from "@/shared/ports";
+import { TIER_REALTIME, TIER_STANDARD, type TranslationTier } from "@/shared/constants";
+import type { Usage } from "@/shared/types";
 
 export type ServerErrorCode =
   | "tier_locked"
@@ -46,7 +48,18 @@ export interface ParsedServerError {
   ctaLabel?: string;
   /** True if the status was 402 — used to drive the upgrade-toast UX. */
   isQuotaOrTier: boolean;
+  /** Present on 402 reserve-rejection envelopes. */
+  mode?: TranslationTier;
+  usedMinutes?: number;
+  capMinutes?: number;
+  resetsAt?: string;
 }
+
+type JsonValue = string | number | boolean | null | JsonObject | JsonArray;
+interface JsonObject {
+  [key: string]: JsonValue;
+}
+type JsonArray = JsonValue[];
 
 /**
  * Parse a non-OK Response into the typed shape above. Best-effort on bodies
@@ -55,7 +68,7 @@ export interface ParsedServerError {
  */
 export async function parseServerError(res: Response): Promise<ParsedServerError> {
   const status = res.status;
-  let body: unknown = null;
+  let body: JsonObject | JsonArray | string | null = null;
   try {
     body = await res.json();
   } catch {
@@ -87,25 +100,61 @@ export async function parseServerError(res: Response): Promise<ParsedServerError
     cta: isQuota ? err?.upgrade_url : undefined,
     ctaLabel: isQuota && err?.upgrade_url ? "Upgrade" : undefined,
     isQuotaOrTier: isQuota,
+    mode: err?.mode,
+    usedMinutes: err?.used_minutes,
+    capMinutes: err?.cap_minutes,
+    resetsAt: err?.resets_at,
   };
+}
+
+/** Map a parsed 402 into store.usage fields (O(1), no bootstrap). */
+export function usagePatchFromServerError(parsed: ParsedServerError): Partial<Usage> | null {
+  if (!parsed.isQuotaOrTier) return null;
+  const patch: Partial<Usage> = {};
+  if (parsed.resetsAt) patch.resetsAt = parsed.resetsAt;
+  if (parsed.mode === TIER_REALTIME) {
+    if (parsed.usedMinutes != null) patch.realtime = parsed.usedMinutes;
+    if (parsed.capMinutes != null) patch.realtimeCap = parsed.capMinutes;
+    if (parsed.usedMinutes != null && parsed.capMinutes != null) {
+      patch.realtimeRemaining = Math.max(0, parsed.capMinutes - parsed.usedMinutes);
+    }
+  } else {
+    if (parsed.usedMinutes != null) patch.standard = parsed.usedMinutes;
+    if (parsed.capMinutes != null) patch.standardCap = parsed.capMinutes;
+    if (parsed.usedMinutes != null && parsed.capMinutes != null) {
+      patch.standardRemaining = Math.max(0, parsed.capMinutes - parsed.usedMinutes);
+    }
+  }
+  return Object.keys(patch).length ? patch : null;
 }
 
 interface ErrorFields {
   code?: string;
   message?: string;
   upgrade_url?: string;
+  mode?: TranslationTier;
+  used_minutes?: number;
+  cap_minutes?: number;
+  resets_at?: string;
 }
 
-function readError(body: unknown): ErrorFields | null {
+function readError(body: JsonObject | JsonArray | string | null): ErrorFields | null {
   if (!body || typeof body !== "object") return null;
-  const e = (body as { error?: unknown }).error;
+  const e = (body as { error?: JsonObject | JsonArray | string | null }).error;
   if (!e || typeof e !== "object") return null;
-  const o = e as Record<string, unknown>;
+  const o = e as JsonObject;
   return {
     code: typeof o["code"] === "string" ? (o["code"] as string) : undefined,
     message: typeof o["message"] === "string" ? (o["message"] as string) : undefined,
     upgrade_url:
       typeof o["upgrade_url"] === "string" ? (o["upgrade_url"] as string) : undefined,
+    mode:
+      o["mode"] === TIER_STANDARD || o["mode"] === TIER_REALTIME
+        ? (o["mode"] as TranslationTier)
+        : undefined,
+    used_minutes: typeof o["used_minutes"] === "number" ? o["used_minutes"] : undefined,
+    cap_minutes: typeof o["cap_minutes"] === "number" ? o["cap_minutes"] : undefined,
+    resets_at: typeof o["resets_at"] === "string" ? o["resets_at"] : undefined,
   };
 }
 

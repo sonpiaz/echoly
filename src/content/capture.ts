@@ -12,6 +12,7 @@
 
 import { computeGain } from "@/lib/audio";
 import type { OverlayView } from "@/shared/ports";
+import { findPrimaryVideo } from "./media-stage";
 import type { SessionManager } from "./session-manager";
 
 export class AudioCapture {
@@ -38,11 +39,9 @@ export class AudioCapture {
 
   // ───── Video element acquisition ──────────────────────────────────────────
 
+  /** Primary page <video> (YouTube selector or largest visible — see media-stage). */
   findVideo(): HTMLVideoElement | null {
-    return (
-      document.querySelector<HTMLVideoElement>("video.html5-main-video") ||
-      document.querySelector<HTMLVideoElement>("video")
-    );
+    return findPrimaryVideo();
   }
 
   /** Live streams report duration === Infinity/NaN. Pausing a live stream
@@ -51,13 +50,13 @@ export class AudioCapture {
     return !video || !isFinite(video.duration);
   }
 
-  private nudgePlay(video: HTMLVideoElement): Promise<unknown> {
+  private nudgePlay(video: HTMLVideoElement): Promise<void> {
     if (!video.paused) return Promise.resolve();
     const p = video.play();
     if (!p?.then) return Promise.resolve();
     return Promise.race([
-      p.catch(() => {}),
-      new Promise((r) => setTimeout(r, 250)),
+      p.then(() => {}).catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 250)),
     ]);
   }
 
@@ -256,7 +255,7 @@ export class AudioCapture {
       .then(() => {
         this.lastAppliedSinkId = deviceId;
       })
-      .catch((err: unknown) => {
+      .catch((err: Error) => {
         console.warn(
           "[echoly] setSinkId hot-swap failed; keeping previous output device",
           err,

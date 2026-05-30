@@ -4,7 +4,7 @@
 //
 // Covers:
 //   • GET 200 → returns the parsed bundle
-//   • GET 401 → returns null (the SW treats this as "guest")
+//   • GET 401 → returns null (signed-out / invalid session)
 //   • GET signed-out (no token) → returns null without ever calling fetch
 //   • PUT 200 → returns the new bundle
 //   • PUT 409 → throws SettingsHttpError with the conflict bundle attached
@@ -27,10 +27,10 @@ const API_BASE = "https://api.test.local/v1";
 
 const SAMPLE_SETTINGS: AdvancedSettings = {
   ...DEFAULT_ADVANCED,
-  translationStyle: "casual",
+  captionPosition: "float",
 };
 const SAMPLE_OVERRIDES: SiteOverrideMap = {
-  "youtube.com": { latencyPreset: "snappy" },
+  "youtube.com": { captionPosition: "top" },
 };
 const SAMPLE_BUNDLE = {
   settings: SAMPLE_SETTINGS,
@@ -111,14 +111,14 @@ describe("SettingsClient — HTTP boundary", () => {
   describe("putGlobal", () => {
     it("200 → returns new bundle; body carries patch + expectedVersion", async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse(200, SAMPLE_BUNDLE));
-      const r = await client.putGlobal({ translationStyle: "literal" }, 6);
+      const r = await client.putGlobal({ captionPosition: "top" }, 6);
       expect(r).toEqual(SAMPLE_BUNDLE);
 
       const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(init.method).toBe("PUT");
       expect(init.body).toBe(
         JSON.stringify({
-          patch: { translationStyle: "literal" },
+          patch: { captionPosition: "top" },
           expectedVersion: 6,
         }),
       );
@@ -131,7 +131,7 @@ describe("SettingsClient — HTTP boundary", () => {
     it("409 → throws SettingsHttpError with the current bundle attached", async () => {
       const currentBundle = { ...SAMPLE_BUNDLE, version: 9 };
       fetchSpy.mockResolvedValueOnce(jsonResponse(409, currentBundle));
-      const promise = client.putGlobal({ translationStyle: "literal" }, 6);
+      const promise = client.putGlobal({ captionPosition: "top" }, 6);
       await expect(promise).rejects.toBeInstanceOf(SettingsHttpError);
       try {
         await promise;
@@ -146,7 +146,7 @@ describe("SettingsClient — HTTP boundary", () => {
     it("signed-out → throws 401 SettingsHttpError before reaching the wire", async () => {
       getToken.mockResolvedValueOnce(null);
       await expect(
-        client.putGlobal({ translationStyle: "literal" }),
+        client.putGlobal({ captionPosition: "top" }),
       ).rejects.toMatchObject({
         name: "SettingsHttpError",
         status: 401,

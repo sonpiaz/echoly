@@ -17,7 +17,7 @@ export type OverlayState = "ready" | "connecting" | "live" | "paused" | "error";
 
 /** Toast options. A bare number is shorthand for `{ durationMs }` (legacy
  *  showToast accepted either a number or an opts object). `cta`/`ctaLabel`
- *  render a clickable `<a>` (e.g. the "Top up" billing link from parseKymaError
+ *  render a clickable `<a>` (e.g. upgrade link from server error envelope
  *  on insufficient balance) — built via DOM APIs, never innerHTML. */
 export interface ToastOptions {
   durationMs?: number;
@@ -38,6 +38,10 @@ export interface OverlayCallbacks {
   onLanguageChange(lang: string): void;
   /** Voice `<select>` change (legacy content.js:270). */
   onVoiceChange(voiceId: string): void;
+  /** Mix sliders in the expanded panel. */
+  onMixChange?(originalVolume: number, voiceVolume: number): void;
+  /** Translated subtitles on/off on the video strip (persisted via Settings). */
+  onTargetCaptionVisibilityChange?(show: boolean): void;
   /** Overlay Stop control (legacy content.js:282). */
   onStop(): void;
 }
@@ -56,6 +60,10 @@ export interface OverlayView {
   buildOverlay(
     callbacks: OverlayCallbacks,
     captionPosition?: CaptionPosition | null,
+    pickerLanguages?: readonly import("./constants").LangPair[],
+    signedInProxy?: boolean,
+    standardVoices?: readonly import("./constants").LangPair[],
+    initialTier?: import("./types").TranslationTier,
   ): void;
   /** Remove the overlay DOM (nulls internal root — ordering is load-bearing). */
   removeOverlay(): void;
@@ -80,13 +88,24 @@ export interface OverlayView {
   /** Sync the target-language `<select>` value to `lang` (legacy
    *  applySettingsLive / post-handover langSelect.value sync). */
   setLanguageSelection(lang: string): void;
+  /** Refresh lang/voice pickers, mix sliders, and caption toggle from the
+   *  extension settings snapshot (popup / background → content). */
+  syncFromSettings(settings: import("./types").StartSettings): void;
   /** Apply a caption-position preset live (Advanced setting hot-swap). Updates
    *  the in-memory Layout.left/top to the preset's percentage targets, snaps via
    *  clampLayout + applyLayout. Does NOT write LAYOUT_KEY — the user's
    *  subsequent drag still persists and wins on the next session. */
   setCaptionPosition(pos: CaptionPosition): void;
+  /** Sync Original/Voice mix sliders (popup → overlay live update). */
+  setMixVolumes(originalVolume: number, voiceVolume: number): void;
+  /** Show or hide the on-video caption strip (panel toggle + layout persistence). */
+  applyCaptionOnVideo(show: boolean): void;
   /** Is the overlay currently mounted? (legacy `root != null`). */
   isMounted(): boolean;
+  /** Standard sync readout (lag + matching state); null clears. */
+  setDubSyncReadout(
+    readout: import("@/lib/dub-playback-sync").DubSyncReadout | null,
+  ): void;
 }
 
 /** Factory exported by `@/content/overlay`. The content-logic agent imports the

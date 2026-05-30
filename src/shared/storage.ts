@@ -1,5 +1,5 @@
 // ────────────────────────────────────────────────────────────────────────────
-// LOCKED CONTRACT — chrome.storage.local schema + typed accessors. ONLY the 8
+// LOCKED CONTRACT — chrome.storage.local schema + typed accessors. ONLY the
 // DEFAULT_SETTINGS keys are persisted (legacy/background.js:251-266). Access is
 // restricted to TRUSTED_CONTEXTS so a rogue youtube.com page script cannot read
 // the user's key (legacy/background.js:187-189). No browser.* polyfill.
@@ -33,7 +33,7 @@ export async function saveSettings(
   for (const k of SETTINGS_KEYS) {
     if (k in partial) {
       // narrow per-key copy preserving value types
-      (persistable as Record<string, unknown>)[k] = partial[k];
+      (persistable as Record<string, Settings[keyof Settings] | undefined>)[k] = partial[k];
     }
   }
   if (Object.keys(persistable).length) {

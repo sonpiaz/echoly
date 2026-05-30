@@ -1,15 +1,17 @@
 // Layer A — pure-fn golden tests for the popup reducers (chrome-free, node env).
 // Values are the real ones from legacy/popup.js (fmtMin/meterLevel/tier-gating).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { capsForTier } from "@/lib/tier-cap";
 import {
   allowRealtime,
-  capsForTier,
+  daysLeftLabel,
+  daysUntilReset,
   fillPercent,
   fmtElapsed,
   fmtMin,
-  keyBadge,
   meterLevel,
   nextResetLabel,
+  resetsAtLabel,
   shade,
   tierBadge,
 } from "@/lib/popup-format";
@@ -56,8 +58,8 @@ describe("fmtMin", () => {
     expect(fmtMin(30)).toBe("30");
     expect(fmtMin(600)).toBe("600");
     expect(fmtMin(3000)).toBe("3,000");
-    expect(fmtMin(12.4)).toBe("12");
-    expect(fmtMin(12.5)).toBe("13");
+    expect(fmtMin(12.4)).toBe("12.4");
+    expect(fmtMin(12.5)).toBe("12.5");
   });
   it("treats falsy as 0 (legacy `n || 0`)", () => {
     expect(fmtMin(NaN)).toBe("0");
@@ -84,14 +86,14 @@ describe("meterLevel", () => {
   });
 });
 
-describe("capsForTier (TIER_CAPS)", () => {
+describe("capsForTier (offline bootstrap)", () => {
   it("matches legacy caps exactly", () => {
     expect(capsForTier("free")).toEqual({ std: 30, rt: 0 });
     expect(capsForTier("pro")).toEqual({ std: 600, rt: 0 });
     expect(capsForTier("max")).toEqual({ std: 3000, rt: 120 });
   });
   it("unknown / nullish tier falls back to free", () => {
-    expect(capsForTier("byok")).toEqual({ std: 30, rt: 0 });
+    expect(capsForTier("unknown")).toEqual({ std: 30, rt: 0 });
     expect(capsForTier(undefined)).toEqual({ std: 30, rt: 0 });
     expect(capsForTier(null)).toEqual({ std: 30, rt: 0 });
   });
@@ -108,56 +110,20 @@ describe("fillPercent", () => {
 });
 
 describe("allowRealtime (tier gating)", () => {
-  it("BYOK key always allows realtime", () => {
-    expect(allowRealtime("free", "ky-abc")).toBe(true);
-    expect(allowRealtime(undefined, "kyma-xyz")).toBe(true);
-    expect(allowRealtime("pro", "  ky-spaces  ")).toBe(true);
-  });
-  it("no key: only max tier allows realtime", () => {
-    expect(allowRealtime("max", "")).toBe(true);
-    expect(allowRealtime("pro", "")).toBe(false);
-    expect(allowRealtime("free", "")).toBe(false);
-    expect(allowRealtime(undefined, "")).toBe(false);
-  });
-  it("whitespace-only key counts as no key", () => {
-    expect(allowRealtime("free", "   ")).toBe(false);
+  it("only max tier allows realtime", () => {
+    expect(allowRealtime("max")).toBe(true);
+    expect(allowRealtime("pro")).toBe(false);
+    expect(allowRealtime("free")).toBe(false);
+    expect(allowRealtime(undefined)).toBe(false);
   });
 });
 
 describe("tierBadge", () => {
-  it("BYOK wins when a key is present", () => {
-    expect(tierBadge("max", true)).toEqual({ label: "BYOK", dataTier: "byok" });
-    expect(tierBadge(undefined, true)).toEqual({
-      label: "BYOK",
-      dataTier: "byok",
-    });
-  });
-  it("maps tiers to labels when no key", () => {
-    expect(tierBadge("max", false)).toEqual({ label: "Max", dataTier: "max" });
-    expect(tierBadge("pro", false)).toEqual({ label: "Pro", dataTier: "pro" });
-    expect(tierBadge("free", false)).toEqual({
-      label: "Free",
-      dataTier: "free",
-    });
-    expect(tierBadge(undefined, false)).toEqual({
-      label: "Free",
-      dataTier: "free",
-    });
-  });
-});
-
-describe("keyBadge", () => {
-  it("empty → missing (no class)", () => {
-    expect(keyBadge("")).toEqual({ label: "missing", cls: "" });
-  });
-  it("ky / kyma- prefix → saved (ok)", () => {
-    expect(keyBadge("ky-123")).toEqual({ label: "saved", cls: "ok" });
-    expect(keyBadge("kyma-xyz")).toEqual({ label: "saved", cls: "ok" });
-    expect(keyBadge("ky")).toEqual({ label: "saved", cls: "ok" });
-  });
-  it("other → check (warn)", () => {
-    expect(keyBadge("sk-openai")).toEqual({ label: "check", cls: "warn" });
-    expect(keyBadge("random")).toEqual({ label: "check", cls: "warn" });
+  it("maps account tiers to labels", () => {
+    expect(tierBadge("max")).toEqual({ label: "Max", dataTier: "max" });
+    expect(tierBadge("pro")).toEqual({ label: "Pro", dataTier: "pro" });
+    expect(tierBadge("free")).toEqual({ label: "Free", dataTier: "free" });
+    expect(tierBadge(undefined)).toEqual({ label: "Free", dataTier: "free" });
   });
 });
 
@@ -166,5 +132,40 @@ describe("nextResetLabel", () => {
     expect(nextResetLabel(new Date(Date.UTC(2026, 4, 27)))).toBe("June 1");
     expect(nextResetLabel(new Date(Date.UTC(2026, 11, 15)))).toBe("January 1");
     expect(nextResetLabel(new Date(Date.UTC(2026, 0, 1)))).toBe("February 1");
+  });
+});
+
+describe("resetsAtLabel", () => {
+  it("formats server anchor ISO in UTC", () => {
+    expect(resetsAtLabel("2026-06-15T10:00:00.000Z")).toBe("June 15");
+  });
+
+  it("falls back to next calendar month when ISO missing", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.UTC(2026, 4, 27)));
+    expect(resetsAtLabel(undefined)).toBe("June 1");
+    vi.useRealTimers();
+  });
+});
+
+describe("daysUntilReset / daysLeftLabel", () => {
+  const now = new Date(Date.UTC(2026, 4, 14, 12, 0, 0));
+
+  it("counts whole days until resets_at (ceil)", () => {
+    expect(daysUntilReset("2026-06-01T00:00:00.000Z", now)).toBe(18);
+  });
+
+  it("returns 0 when the period already ended", () => {
+    expect(daysUntilReset("2026-05-01T00:00:00.000Z", now)).toBe(0);
+  });
+
+  it("returns null for missing or invalid ISO", () => {
+    expect(daysUntilReset(undefined, now)).toBeNull();
+    expect(daysUntilReset("not-a-date", now)).toBeNull();
+  });
+
+  it("formats the account-menu suffix", () => {
+    expect(daysLeftLabel("2026-06-01T00:00:00.000Z", now)).toBe("· 18 days left");
+    expect(daysLeftLabel("2026-05-15T00:00:00.000Z", now)).toBe("· 1 day left");
   });
 });

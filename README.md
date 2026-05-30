@@ -2,13 +2,10 @@
 
 Hear any YouTube video in your language. Live AI dubbing with a draggable in-page
 overlay. Two tiers: **Realtime** (low-latency WebRTC) and **Standard** (chunked
-STT→translate→TTS / subtitle-first). Free tier or bring-your-own **Kyma** key.
+STT→translate→TTS / subtitle-first). Sign in for subscription minutes.
 
-> **Rebuild in progress (branch `rebuild/ts-wxt`).** The extension was ported
-> from plain-JS single files to a modular **TypeScript + [WXT](https://wxt.dev)**
-> (Vite) codebase, **preserving 100% of 0.6.3 behavior and UI**. Wiring to the
-> new Echoly server (and removing BYOK/Kyma) is a separate, later wave. The
-> original 0.6.3 sources are archived verbatim in [`legacy/`](./legacy/).
+TypeScript + [WXT](https://wxt.dev). All provider traffic goes through the Echoly
+server (`ec_session`); no BYOK.
 
 ## Develop
 
@@ -26,6 +23,19 @@ npm run test:watch     # vitest watch
 → **Load unpacked** → select `.output/chrome-mv3/`. Reload after rebuilds.
 `minimum_chrome_version: 116`.
 
+### Dev vs production origins
+
+All Echoly API/web URLs are **build-time** config — no hardcoded `echolyhq.com` in
+popup links. Single module: `src/shared/echoly-config.ts`.
+
+| Build | Command | Env file | API | Web |
+|-------|---------|----------|-----|-----|
+| Dev | `npm run dev` | `.env.development` | `http://localhost:8787` | `http://localhost:4321` |
+| Prod | `npm run build` / `npm run zip` | `.env.production` | `https://api.echolyhq.com` | `https://echolyhq.com` |
+
+Override locally with `.env.development.local` (gitignored). `wxt.config.ts` mirrors
+the same origins in `host_permissions`.
+
 ## Architecture
 
 Three surfaces (service worker / content script / popup), one locked contract
@@ -35,8 +45,7 @@ layer, pure logic split out for testing.
 src/
   shared/        # LOCKED contracts: protocol (typed chrome.* message DU),
                  #   types, ports (UI↔logic seam), storage schema, constants
-  lib/           # pure, chrome-free, fully unit-tested (audio, caption, kyma,
-                 #   api-mode, popup-format)
+  lib/           # pure, chrome-free, unit-tested (audio, caption, api-mode, …)
   background/    # SW: Store (single source of truth) · router (sender.tab) ·
                  #   auth · session-coordinator · caption-cache
   content/       # session-manager (module-global pageToken + AbortController) ·
@@ -46,8 +55,7 @@ src/
   entrypoints/   # WXT entrypoints (background.ts, content/index.ts, popup/)
   public/icons/  # extension icons (copied to the build root)
 test/            # vitest: Layer A pure-fn goldens + Layer B state-machine/interaction
-legacy/          # verbatim 0.6.3 originals (a complete, loadable old build) — kept for reference
-docs/rebuild/    # the rebuild's research, SOLUTION, FEATURE-MAP, audit artifacts
+docs/rebuild/    # design artifacts from the TS/WXT migration
 ```
 
 ### Load-bearing invariants (do not break without re-reading `docs/rebuild/SOLUTION.md`)
@@ -66,8 +74,9 @@ docs/rebuild/    # the rebuild's research, SOLUTION, FEATURE-MAP, audit artifact
 `vitest` covers the automatable surface: pure-function golden/characterization
 tests (Layer A) and state-machine/interaction tests with a hand-rolled `chrome.*`
 mock (Layer B). The realtime WebRTC / MediaRecorder / live-YouTube paths are
-**manual-only** (provider/browser-gated) — see the smoke checklist in
-`legacy/TEST-MATRIX.md` (TC-1…TC-6).
+**manual-only** (provider/browser-gated) — smoke on a real YouTube tab: sign in,
+start Realtime and Standard, lang/voice swap mid-session, Stop aborts in-flight
+work, session timer warning.
 
 ## License
 
