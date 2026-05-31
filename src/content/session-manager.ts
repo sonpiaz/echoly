@@ -49,6 +49,17 @@ export interface SubtitleFirstSession extends BaseSession {
   rollingInFlight: boolean;
   stopFlag: boolean;
   _onSeeked?: () => void;
+  /**
+   * True while the driver has issued its own video.pause() to wait for a cue's
+   * _buffer to become ready. Set synchronously BEFORE video.pause() so the
+   * "pause" DOM event arrives with the flag already set (guards onPause).
+   */
+  _systemPaused?: boolean;
+  /**
+   * Timestamp (performance.now()) when the current system-pause micro-wait began.
+   * Used to enforce SUBFIRST_BUFFER_WAIT_MAX_MS so we never freeze forever.
+   */
+  _bufferWaitStartedAt?: number;
 }
 
 export type Session = WebRtcSession | SubtitleFirstSession;

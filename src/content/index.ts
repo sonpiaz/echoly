@@ -32,6 +32,7 @@ import {
   bindSourceVideoPlayback,
   syncSourcePauseState,
 } from "@/lib/rtc-media-sync";
+import { drainRemoteAudio, RTC_DRAIN_TIMEOUT_MS } from "@/lib/rtc-handover";
 import { shouldIgnoreSourcePlaybackEvent } from "./source-playback-guards";
 import {
   bindStandardDubPlaybackSync,
@@ -237,6 +238,10 @@ export class ContentApp {
         if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
         const sess = this.sm.session;
         if (!sess) return;
+        // Guard: if the subtitle-first driver issued this pause itself (to wait
+        // for a cue's buffer), do NOT tear down the session. _systemPaused is
+        // set synchronously BEFORE video.pause() so it is already true here.
+        if (isSubtitleFirstSession(sess) && sess._systemPaused) return;
         // Pausing the source video STOPS the dub session entirely (user spec):
         // the overlay returns to the Stopped state so it never lingers as "LIVE"
         // while the video is paused. Resuming does NOT auto-restart — the user
@@ -248,6 +253,10 @@ export class ContentApp {
         if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
         const sess = this.sm.session;
         if (!sess) return;
+        // Guard: subtitle-first resumes via #resumeSystemPause (video.play());
+        // syncSourcePauseState is WebRTC-only and must not run here, or the
+        // WebRTC-only media-gate path fires on every system-pause resume.
+        if (isSubtitleFirstSession(sess)) return;
         syncSourcePauseState(this.sm, sess, false);
         this.overlay.setStatusText("Translating");
         this.overlay.setOverlayState("live");
@@ -592,9 +601,21 @@ export class ContentApp {
       }
       try {
         if (session.remoteAudio) {
-          session.remoteAudio.pause();
-          session.remoteAudio.srcObject = null;
-          session.remoteAudio.remove();
+          if (isWebRtcSession(session) && reason === STOP_REASON.VIDEO_ENDED) {
+            // Realtime drain: keep the remote audio playing for up to
+            // RTC_DRAIN_TIMEOUT_MS so the in-flight utterance tail is not cut.
+            // A live MediaStream never fires "ended" on the <audio> element, so
+            // a fixed timeout is the only reliable drain signal (SOLUTION §3.2a).
+            // All other stop reasons (user Stop, error, tab close) cut immediately
+            // so the dub does not keep speaking after an explicit stop.
+            // Note: this branch is mutually exclusive with the subtitle-first
+            // deferred ring-out above (which guards on isSubtitleFirstSession).
+            void drainRemoteAudio(session.remoteAudio, RTC_DRAIN_TIMEOUT_MS);
+          } else {
+            session.remoteAudio.pause();
+            session.remoteAudio.srcObject = null;
+            session.remoteAudio.remove();
+          }
         }
         if (session.outputGain) session.outputGain.disconnect();
         if (session.audioCtx) session.audioCtx.close();

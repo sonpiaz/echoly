@@ -28,6 +28,13 @@ const SUBFIRST_DUE_AHEAD_SEC = 0.15;
 // If the video is already this far past a cue's end, skip it (re-sync) instead of
 // playing it late. Bounds how far the dub can drift behind on dense captions.
 const SUBFIRST_DRIFT_SKIP_SEC = 3;
+// How many sentences to decode before the initial video.play() at startup
+// (larger = less starvation risk; +1 extra TTS round-trip vs the old cap of 2).
+const SUBFIRST_PREBUFFER_COUNT = 3;
+// Maximum ms the driver will keep the video paused waiting for a cue's _buffer.
+// Once exceeded the micro-pause is released and the normal drift-skip logic takes
+// over so we never freeze forever.
+const SUBFIRST_BUFFER_WAIT_MAX_MS = 8000;
 
 export class SubtitleFirstPipeline {
   constructor(private readonly app: ContentApp) {}
@@ -172,7 +179,7 @@ export class SubtitleFirstPipeline {
     if (firstWaveStart === -1) firstWaveStart = sentences.length;
     let lookaheadEnd = sentences.findIndex((s) => s.start > currentTime + lookaheadSec);
     if (lookaheadEnd === -1) lookaheadEnd = sentences.length;
-    let firstWaveEnd = Math.min(lookaheadEnd, firstWaveStart + 2);
+    let firstWaveEnd = Math.min(lookaheadEnd, firstWaveStart + SUBFIRST_PREBUFFER_COUNT);
     if (firstWaveEnd <= firstWaveStart && firstWaveStart < sentences.length) {
       firstWaveEnd = firstWaveStart + 1;
     }
@@ -291,11 +298,64 @@ export class SubtitleFirstPipeline {
   }
 
   /**
+   * Return the earliest unplayed sentence whose playback window contains or is
+   * about to contain `t`, or null if nothing is due.
+   *
+   * "Due" = cue start ≤ t + SUBFIRST_DUE_AHEAD_SEC  AND  cue not yet _played.
+   * Walking forward stops at the first unplayed cue that hasn't started yet,
+   * returning null (nothing to do this tick).
+   *
+   * Used identically in the system-pause resume check (step 1) and the main
+   * advance/start block (step 3) so "what should play now" is computed once and
+   * consistently — no risk of double-advance between the two sites.
+   */
+  #sentenceDueAt(s: SubtitleFirstSession, t: number): (typeof s.sentences)[number] | null {
+    for (let i = 0; i < s.sentences.length; i++) {
+      const sent = s.sentences[i]!;
+      if (sent._played) continue;
+      // Earliest unplayed cue hasn't started yet → nothing due.
+      if (sent.start > t + SUBFIRST_DUE_AHEAD_SEC) return null;
+      return sent;
+    }
+    return null;
+  }
+
+  /** System-pause: flag set SYNCHRONOUSLY before video.pause() so the DOM "pause"
+   *  event arrives with _systemPaused already true (guards onPause in index.ts). */
+  #enterSystemPause(s: SubtitleFirstSession): void {
+    s._systemPaused = true;
+    s._bufferWaitStartedAt = performance.now();
+    this.app.overlay.setStatusText("Buffering…");
+    try {
+      this.app.capture.videoEl?.pause();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Resume from system-pause: clear flags, restore status, play video. */
+  #resumeSystemPause(s: SubtitleFirstSession): void {
+    s._systemPaused = false;
+    s._bufferWaitStartedAt = undefined;
+    this.app.overlay.setStatusText("Translating");
+    try {
+      this.app.capture.videoEl?.play().catch(() => {});
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /**
    * Play the next due cue's dub IN FULL, one at a time. Never interrupts a clip
    * that is already playing (completeness over tight sync — no truncation, so no
-   * swallowed words). Cues the video has run > SUBFIRST_DRIFT_SKIP_SEC past are
-   * skipped so the dub re-syncs at the next gap. Driven by the 250ms interval and
-   * by each clip's onended (back-to-back, no wait).
+   * swallowed words). Driven by the 250ms interval and by each clip's onended
+   * (back-to-back, no wait).
+   *
+   * Control flow (locked per SOLUTION §3.1(b)):
+   *   1. SYSTEM-PAUSE RESUME CHECK — runs BEFORE the external-pause guard so we
+   *      can detect when the awaited buffer has arrived and resume the video.
+   *   2. EXTERNAL pause (user) — unchanged tierD behaviour.
+   *   3. Advance pointer / start the due cue (unchanged core + starvation fix).
    */
   #playbackTick(s: SubtitleFirstSession): void {
     const { sm } = this.app;
@@ -304,70 +364,125 @@ export class SubtitleFirstPipeline {
     if (!video) return;
     if (!s.audioCtx || s.audioCtx.state === "closed") return;
     if (!s.outputGain) return;
-    // Pausing the video pauses the dub: stop the in-flight clip so the voice goes
-    // silent immediately. On resume the next cue (by video time) picks up naturally.
+
+    // ── Step 1: SYSTEM-PAUSE RESUME CHECK ──────────────────────────────────
+    // Runs BEFORE the external-pause guard so the tick can resume the video
+    // the moment the buffer is ready (≤250ms latency — no separate waiter).
+    if (s._systemPaused) {
+      const due = this.#sentenceDueAt(s, video.currentTime);
+      if (!due) {
+        // Nothing to wait for any more — resume and fall through.
+        this.#resumeSystemPause(s);
+      } else if (due._buffer) {
+        // Buffer is ready — resume so the video plays; fall through to start it.
+        this.#resumeSystemPause(s);
+      } else if (s.sentences.indexOf(due) < s.renderCursor) {
+        // The renderer has already PROCESSED this cue but produced no audio
+        // (empty/failed MP3) — its _buffer will NEVER arrive. Waiting for it would
+        // hang on "Buffering…" forever. Skip it and move on (matches the old
+        // no-audio behaviour). This is the fix for the live "stuck on Buffering" hang.
+        due._played = true;
+        this.#resumeSystemPause(s);
+      } else if (
+        s._bufferWaitStartedAt !== undefined &&
+        performance.now() - s._bufferWaitStartedAt > SUBFIRST_BUFFER_WAIT_MAX_MS
+      ) {
+        // Stall cap: renderer is genuinely stuck/slow — give up on THIS cue (skip
+        // it cleanly, no stutter loop) and resume.
+        due._played = true;
+        this.#resumeSystemPause(s);
+      } else {
+        // Still rendering — keep video paused, come back next tick.
+        return;
+      }
+      // After resumeSystemPause the video is no longer paused (or will be
+      // shortly after the play() promise resolves). Fall through to step 3
+      // so the cue starts immediately without waiting for the next 250ms tick.
+    }
+
+    // ── Step 2: EXTERNAL pause (user) — unchanged tierD behaviour ──────────
+    // Pausing the video pauses the dub: stop the in-flight clip so the voice
+    // goes silent immediately. On resume the next cue picks up naturally.
     if (video.paused) {
       if (s.currentSource) this.#stopCurrent(s);
       return;
     }
-    // Chrome auto-suspends the AudioContext when the tab is backgrounded. Starting a
-    // clip on a suspended context schedules silently and would wedge the chain
-    // (cue marked played + currentSource set, but no audio). Resume and retry next tick.
+
+    // ── Step 3: AudioContext health + guard ────────────────────────────────
+    // Chrome auto-suspends the AudioContext when the tab is backgrounded.
+    // Starting a clip on a suspended context schedules silently and would wedge
+    // the chain (cue marked played + currentSource set, but no audio). Resume
+    // and retry next tick.
     if (s.audioCtx.state === "suspended") {
       s.audioCtx.resume().catch(() => {});
       return;
     }
-    // Never interrupt a playing dub — let each cue finish; its onended drives the next.
+    // Never interrupt a playing dub — let each cue finish; its onended drives
+    // the next.
     if (s.currentSource) return;
 
+    // ── Step 4: Advance pointer / start due cue ────────────────────────────
     const t = video.currentTime;
-
-    // Walk to the earliest unplayed cue and decide: wait, skip, or play.
-    for (let i = 0; i < s.sentences.length; i++) {
-      const sent = s.sentences[i]!;
-      if (sent._played) continue;
-      // Earliest unplayed cue hasn't started yet → nothing to play this tick.
-      if (sent.start > t + SUBFIRST_DUE_AHEAD_SEC) return;
-      // Video has run well past this cue → skip it (re-sync) rather than play it late.
-      if (t - sent.end > SUBFIRST_DRIFT_SKIP_SEC) {
-        sent._played = true;
+    // Skip past every due cue that has no PLAYABLE audio, then start the first one
+    // that does. A cue has no playable audio when it is either:
+    //   • genuinely stale (forward seek / very late): skip → re-sync, OR
+    //   • already PASSED by the renderer without producing audio (empty/failed
+    //     MP3, index < renderCursor): its buffer will NEVER arrive → skip. (Waiting
+    //     on these was the live "stuck on Buffering…" hang.)
+    // Only a recent, NOT-yet-rendered cue (index >= renderCursor) micro-pauses to
+    // wait for the render pump. Loop (not recursion) so a long forward seek over
+    // many stale cues can't blow the stack.
+    let due = this.#sentenceDueAt(s, t);
+    while (due && !due._buffer) {
+      const dueIdx = s.sentences.indexOf(due);
+      if (t - due.end > SUBFIRST_DRIFT_SKIP_SEC || dueIdx < s.renderCursor) {
+        due._played = true; // skip — no audio will ever come for this cue
+        due = this.#sentenceDueAt(s, t);
         continue;
       }
-      // Due and in-window but not decoded yet → wait for the render pump (don't skip).
-      if (!sent._buffer) return;
-
-      const src = s.audioCtx.createBufferSource();
-      src.buffer = sent._buffer;
-      src.connect(s.outputGain);
-      try {
-        // Full clip — no duration cap, so the tail (final characters) is never cut.
-        src.start(s.audioCtx.currentTime);
-      } catch {
-        // AudioContext may have been closed in a race — bail silently.
-        return;
-      }
-
-      sent._played = true;
-      s.currentSource = src;
-      s.currentPlayingIdx = i;
-      // Show the translated text for THIS cue at the moment its dub starts, so the
-      // subtitle and the voice stay in lock-step (no "audio leads text" lag).
-      this.#showCue(s, i);
-
-      src.onended = () => {
-        if (s.currentSource !== src) return;
-        s.currentSource = null;
-        s.currentPlayingIdx = null;
-        try {
-          src.disconnect();
-        } catch {
-          /* ignore */
-        }
-        // Chain straight into the next due cue (back-to-back, no 250ms wait).
-        this.#playbackTick(s);
-      };
+      // Not-yet-rendered cue → system-pause and wait for the render pump.
+      this.#enterSystemPause(s);
       return;
     }
+    if (!due) return; // nothing playable is due this tick
+    // The while-loop only exits with a truthy due._buffer (or due === null, handled
+    // above); the local narrows the optional type for src.buffer.
+    const buffer = due._buffer;
+    if (!buffer) return;
+
+    const src = s.audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(s.outputGain);
+    try {
+      // Full clip — no duration cap, so the tail (final characters) is never cut.
+      src.start(s.audioCtx.currentTime);
+    } catch {
+      // AudioContext may have been closed in a race — bail silently.
+      return;
+    }
+
+    // Mark played AT src.start() time (NOT deferred to onended) to preserve the
+    // play-once invariant ("dup TTS ở cuối" fix). The micro-pause removes the
+    // starvation so we don't need to defer here.
+    due._played = true;
+    s.currentSource = src;
+    s.currentPlayingIdx = s.sentences.indexOf(due);
+    // Show the translated text for THIS cue at the moment its dub starts, so the
+    // subtitle and the voice stay in lock-step (no "audio leads text" lag).
+    this.#showCue(s, s.sentences.indexOf(due));
+
+    src.onended = () => {
+      if (s.currentSource !== src) return;
+      s.currentSource = null;
+      s.currentPlayingIdx = null;
+      try {
+        src.disconnect();
+      } catch {
+        /* ignore */
+      }
+      // Chain straight into the next due cue (back-to-back, no 250ms wait).
+      this.#playbackTick(s);
+    };
   }
 
   /** Stop and disconnect the currently-playing source node (if any). */
@@ -432,10 +547,23 @@ export class SubtitleFirstPipeline {
     while (sm.session === s && !s.stopFlag) {
       await new Promise((r) => setTimeout(r, 1000));
       if (sm.session !== s || s.stopFlag) continue;
-      // While the user has paused the video, do NO translate/display work
+      // While the user has genuinely paused the video, do NO translate/display work
       // — otherwise the dub keeps being produced and the UI looks like it is still
       // translating even though playback is suspended.
-      if (sm.videoPaused || video.paused) continue;
+      //
+      // IMPORTANT: during a system-pause (the driver issued video.pause() to wait
+      // for a cue's _buffer), video.paused IS true but we MUST keep rendering so
+      // the buffer actually gets produced. `sm.videoPaused` is WebRTC-only and is
+      // never set true for subtitle-first sessions (only syncSourcePauseState sets
+      // it, which is only called from the WebRTC onPlay handler). So the only term
+      // that would mistakenly block rendering here is `video.paused` — we exempt
+      // it when the session is in a driver-issued system-pause.
+      const sfSess = sm.session;
+      const isSystemPaused =
+        sfSess != null &&
+        sfSess.kind === "subtitle-first" &&
+        (sfSess as import("../session-manager").SubtitleFirstSession)._systemPaused === true;
+      if (sm.videoPaused || (video.paused && !isSystemPaused)) continue;
 
       const t = video.currentTime;
       const lookaheadSec = SUBFIRST_LOOKAHEAD_MS / 1000;
@@ -457,6 +585,13 @@ export class SubtitleFirstPipeline {
         }
         if (sm.session !== s || s.stopFlag) return;
         s.renderCursor = end;
+      } catch {
+        // A transient render error (network blip, 5xx) must NOT kill the rolling
+        // renderer for the rest of the session. Swallow it and retry the same
+        // range on the next 1s iteration (renderCursor is left unadvanced). On a
+        // persistent outage the cue stays un-buffered and the playback driver's
+        // stall cap (SUBFIRST_BUFFER_WAIT_MAX_MS) eventually skips it — bounded,
+        // never an infinite hang.
       } finally {
         s.rollingInFlight = false;
       }
