@@ -186,7 +186,8 @@ function renderAccountBand(user, kymaKey, usage) {
 
 function renderUsageMeters(tier, usage) {
   if (!usageStdBlock) return;
-  const caps = { free: { std: 30, rt: 0 }, pro: { std: 600, rt: 0 }, max: { std: 3000, rt: 120 } };
+  // Caps mirror echoly-server/src/lib/fup.ts (re-locked 2026-05-30, Option C2).
+  const caps = { free: { std: 30, rt: 0 }, pro: { std: 240, rt: 0 }, max: { std: 720, rt: 60 } };
   const c = caps[tier] || caps.free;
   const u = usage || { standard: 0, realtime: 0 };
 
