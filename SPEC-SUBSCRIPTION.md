@@ -47,8 +47,8 @@ New user installs the extension, opens the popup, sees "paste Kyma key" → has 
 |---|---|---|---|
 | **Price monthly** | $0 | $9 | $24.90 |
 | **Price annual** | $0 | $89 (saves 18%) | $199 (saves 33%) |
-| **Standard mode** | 30 min/mo | Unlimited (FUP 10h/mo) | Unlimited (FUP 50h/mo) |
-| **Realtime mode** | BYOK only | BYOK only | 2h/mo included + BYOK |
+| **Standard mode** | 30 min/mo | Unlimited (FUP 4h/mo) | Unlimited (FUP 12h/mo) |
+| **Realtime mode** | BYOK only | BYOK only | 1h/mo included + BYOK |
 | **Target languages** | Vi + En only | All 13 | All 13 |
 | **MiniMax voices** | 2 (default) | All 5 | All 5 + experimental |
 | **Voice cloning (future)** | No | No | Yes (beta) |
@@ -102,32 +102,43 @@ Path A and Path B can coexist for the same user. If both BYOK key AND active sub
 | Tier | Standard cap | Realtime cap |
 |---|---|---|
 | Free (server) | 30 min/mo total | 0 (BYOK only) |
-| Pro | 10 hours/mo (600 min) | 0 (BYOK only) |
-| Max | 50 hours/mo (3000 min) | 2 hours/mo (120 min) |
+| Pro | 4 hours/mo (240 min) | 0 (BYOK only) |
+| Max | 12 hours/mo (720 min) | 1 hour/mo (60 min) |
 
-#### Cap design — locked 2026-05-19
+#### Cap design — re-locked 2026-05-30 (was 2026-05-19)
 
-Two goals: hold a 70% gross margin floor AND keep a clear **5× Pro→Max standard ratio** that forces the upsell. Reference: Otter.ai uses the same ratio (Pro 20h → Business 100h). Echoly's prior 2× ratio was too generous — heavy Pro users had no math reason to upgrade.
+**Why re-lock**: 2026-05-19 caps (Pro 10h / Max 50h+2h) were designed with a structurally-wrong cost model. The original SPEC defined "Standard pipeline cost" as ONLY `gemini-3-flash-audio` at $0.000648/min, which missed the **TTS step (minimax-speech-turbo at ~$0.0225/min, ~90% of per-min cost)**. Once TTS is included properly, Standard cost is ~$0.025/min (Routing A via Kyma sell rate), making Pro 10h break-even at $9 and Max 50h+2h hemorrhage at any meaningful usage. The 2026-05-30 re-lock corrects the cap to fit the true cost basis.
 
-**Margin math** (worst case = annual billing). Standard pipeline `gemini-3-flash-audio` at `$0.000648/min`; realtime `gpt-realtime-translate` at `$0.046/min` (~70× standard). Stripe fees: 2.9% + $0.30 + ~$0.05/mo Stripe Tax.
+**Three goals for new caps:**
+1. Hold healthy weighted-portfolio margin (60-79% at avg usage, post-fix Kyma rate per kyma-api PR #484).
+2. **Cap ratio > price ratio** so Max is genuinely cheaper per hour than Pro (avoids ratio inversion that broke 2026-05-19's 2× cap ratio at 2.77× price ratio):
+   - Pro $9 / 4h = $2.25/hour Std
+   - Max $24.90 / 12h = $2.08/hour Std → Max −8% per hour ✓
+   - Cap ratio: 3× (above price ratio 2.77×) ✓
+3. **Realtime cap halved (2h → 1h)** because RT at $0.0459/min is 1.84× Std cost and was the dominant margin lever at Max max-cap usage.
 
-| Tier | Annual price | Net rev/mo | Cost ceiling (30%) | Cap | Cost if maxed | Margin if maxed |
-|---|---|---|---|---|---|---|
-| Free | $0 | $0 | $0 | 30 min std | $0.019 | absorbed (CAC) |
-| Pro | $89/yr | $7.13 | $2.14 | 10 h std | $0.389 | **95% ✓** |
-| Max std | $199/yr | $16.01 | $4.80 | 50 h std | $1.944 | **88% ✓** |
-| Max realtime | (shared $16.01) | (shared $4.80) | 2 h realtime | $5.52 (+ std $1.94 = $7.46 worst) | **53% worst / ~76% avg** |
+**Margin math** (post-Kyma-fix, weighted by 60/25/10/5 power-law user distribution). Standard cost ~$0.025/min (Mode 1 + Mode 2 average including TTS); Realtime $0.0459/min. Stripe fees: 2.9% + $0.30/txn. Affiliate 25% commission when applicable.
+
+| Tier | Annual price | Gross/mo | Cap | Cost at cap | Margin at cap (gross-rev basis) |
+|---|---|---|---|---|---|
+| Free | $0 | $0 | 30 min std | $0.75 (TTS incl) | absorbed (CAC) |
+| Pro | $89/yr | $7.42 | 4 h std (240 min) | $6.00 | **16% direct** / −9% at 100% affiliate |
+| Max std | $199/yr | $16.58 | 12 h std (720 min) | $18.00 | **−10% direct at std-max alone** |
+| Max realtime | (shared $16.58) | — | 1 h realtime (60 min) | $2.75 | shared cap |
+| Max combined | $199/yr | $16.58 | 12h std + 1h RT | $20.75 | **−28% direct at full cap** |
+
+⚠️ **Max max-cap is loss-making at Routing A (Kyma sell rate)**. Acceptable because only ~5% of users max cap (power-law distribution); portfolio-weighted margin is healthy (~47% direct / 22% at 100% affiliate). Roadmap to recover: ship Routing C (Kyma at-cost transfer pricing for Echoly as internal customer of Kyma) — cost drops 36% to ~$0.016/min Std, restores Max max-cap margin to +16% direct.
 
 **Per-hour value comparison** drives the upsell signal:
 
 | Tier | Std cap | $/h std (monthly billing) |
 |---|---|---|
-| Pro $9 | 10 h | $0.90/h |
-| Max $24.90 | 50 h | $0.50/h |
+| Pro $9 | 4 h | $2.25/h |
+| Max $24.90 | 12 h | $2.08/h |
 
-Max is **44% cheaper per hour** of standard translation than Pro. Math signal: anyone watching >10h/mo upgrades to save money. Realtime stays an exclusive Max bonus, not the upsell trigger.
+Max is **8% cheaper per hour** of standard translation than Pro, and **cap ratio (3×) exceeds price ratio (2.77×)** so upsell math is consistent. Realtime (1h Max-only) is the qualitative differentiator on top.
 
-**If beta data later shows churn at Pro 10h cap** (>20% of paying Pro users hit cap monthly), ranked fallback: (a) raise to 15h (3.3× ratio, Notta pattern), (b) raise Pro monthly to $11–12, (c) keep cap and route harder to Max via in-extension upsell banner.
+**If beta data shows churn at Pro 4h cap** (>20% of paying Pro users hit cap monthly), ranked fallback: (a) ship Routing C first (recovers margin headroom to raise Pro cap to 5-6h without bleed), (b) raise Pro monthly to $11-12, (c) accept churn signal as "should have been Free user".
 
 Free tier 30 min stays — Kyma free monthly window covers most of the cost; treat as customer-acquisition spend.
 
