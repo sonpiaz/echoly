@@ -1,4 +1,6 @@
-/** Detect YouTube ad playback so we do not treat ad pauses as user pauses. */
+// Detect YouTube ad playback so we do not treat ad pauses as user pauses.
+//
+// Moved from `src/content/youtube-ad-state.ts`.
 
 export function isYouTubeAdPlaying(): boolean {
   const player = document.getElementById("movie_player");

@@ -27,10 +27,6 @@ import {
   resolveSiteDomainFromTabs,
 } from "@/shared/active-site";
 
-function isYouTubeUrl(url: string | undefined): url is string {
-  return typeof url === "string" && /^https?:\/\/[^/]*youtube\.com\//.test(url);
-}
-
 function errMessage(err: Error | string | object | null): string {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -261,7 +257,7 @@ export class SessionCoordinator {
           active: true,
           currentWindow: true,
         });
-        if (tab && isYouTubeUrl(tab.url) && tab.id != null) {
+        if (tab && tab.id != null) {
           targetTabId = tab.id;
         }
       } catch {
@@ -297,7 +293,7 @@ export class SessionCoordinator {
     if (wasActive && !relayOk) {
       return {
         ok: false,
-        error: "Could not reach the YouTube tab to stop translation.",
+        error: "Could not reach the tab to stop translation.",
       };
     }
     return { ok: true, state: this.store.snapshot() };
@@ -350,11 +346,11 @@ export class SessionCoordinator {
           active: true,
           currentWindow: true,
         });
-        if (tab && isYouTubeUrl(tab.url) && tab.id != null) {
+        if (tab && tab.id != null) {
           targetTabId = tab.id;
         }
       } catch {
-        // No active YT tab — nothing to apply against. Silent.
+        // No active tab — nothing to apply against. Silent.
       }
     }
 

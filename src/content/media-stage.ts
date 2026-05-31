@@ -1,8 +1,34 @@
 // Platform-agnostic media stage: find the primary <video>, track its rect, and
 // anchor overlay UI (caption pill, default dock) inside the player safe zone.
+//
+// Adapter-aware: ContentApp calls setActiveAdapter(adapter) at session start so
+// watchMediaStage delegates to adapter.findVideo() / adapter.stageInsets(video).
+// The legacy exports (findPrimaryVideo, detectMediaPlatform, stageInsets) are
+// kept for backwards-compatibility with tests and the no-session default path.
 
 import type { CaptionStripPlacement } from "@/shared/advanced";
+import type { PlatformAdapter } from "@/shared/platform-ports";
 
+// ── Active adapter (set by ContentApp at session init, cleared on stop) ────────
+
+let _activeAdapter: PlatformAdapter | null = null;
+
+/**
+ * Set the active platform adapter so watchMediaStage, findPrimaryVideo, and
+ * stageInsets can delegate to the adapter's implementations.
+ * Called by ContentApp at session start (after detectAdapter) and cleared to
+ * null on session stop / page unload.
+ */
+export function setActiveAdapter(adapter: PlatformAdapter | null): void {
+  _activeAdapter = adapter;
+}
+
+/** @internal — for testing only. */
+export function getActiveAdapter(): PlatformAdapter | null {
+  return _activeAdapter;
+}
+
+/** @deprecated — kept for the watchMediaStage default path; prefer adapter.findVideo(). */
 export type MediaPlatform = "youtube" | "generic";
 
 export interface MediaStageInsets {
@@ -19,24 +45,17 @@ export interface MediaStageSnapshot {
   insets: MediaStageInsets;
 }
 
+/** @deprecated — kept for legacy callers; prefer adapter.matchesHost(). */
 export function detectMediaPlatform(): MediaPlatform {
   const host = location.hostname.replace(/^www\./, "");
   if (host === "youtube.com" || host.endsWith(".youtube.com")) return "youtube";
   return "generic";
 }
 
-export function findPrimaryVideo(): HTMLVideoElement | null {
-  const platform = detectMediaPlatform();
-  if (platform === "youtube") {
-    return (
-      document.querySelector<HTMLVideoElement>("video.html5-main-video") ||
-      document.querySelector<HTMLVideoElement>(".html5-video-player video") ||
-      document.querySelector<HTMLVideoElement>("video")
-    );
-  }
-  return pickLargestVisibleVideo();
-}
-
+/**
+ * Pick the largest visible <video> on the page.
+ * Used as the generic / fallback video-selection strategy.
+ */
 function pickLargestVisibleVideo(): HTMLVideoElement | null {
   let best: HTMLVideoElement | null = null;
   let bestArea = 0;
@@ -52,6 +71,16 @@ function pickLargestVisibleVideo(): HTMLVideoElement | null {
   return best;
 }
 
+/**
+ * Find the primary <video> using the generic / legacy fallback strategy.
+ * Exported for use by AudioCapture.findVideo() (no adapter in scope) and tests.
+ * When a PlatformAdapter is available, prefer adapter.findVideo() instead.
+ */
+export function findPrimaryVideo(): HTMLVideoElement | null {
+  return pickLargestVisibleVideo();
+}
+
+/** @deprecated — kept for legacy callers; prefer adapter.stageInsets(video). */
 export function stageInsets(platform: MediaPlatform): MediaStageInsets {
   switch (platform) {
     case "youtube":
@@ -157,7 +186,9 @@ export function watchMediaStage(onUpdate: MediaStageListener): () => void {
   const mo = new MutationObserver(() => schedule());
 
   const emit = () => {
-    const video = findPrimaryVideo();
+    // Delegate to the active adapter when available; fall back to the generic strategy.
+    const adapter = _activeAdapter;
+    const video = adapter ? adapter.findVideo() : findPrimaryVideo();
     if (video !== observed) {
       if (observed && ro) ro.unobserve(observed);
       observed = video;
@@ -167,9 +198,12 @@ export function watchMediaStage(onUpdate: MediaStageListener): () => void {
       onUpdate(null);
       return;
     }
+    const insets: MediaStageInsets = adapter
+      ? adapter.stageInsets(video)
+      : stageInsets(detectMediaPlatform());
     onUpdate({
       rect: video.getBoundingClientRect(),
-      insets: stageInsets(detectMediaPlatform()),
+      insets,
     });
   };
 

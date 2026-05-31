@@ -36,7 +36,7 @@ export interface WebRtcSession extends BaseSession {
 export interface SubtitleFirstSession extends BaseSession {
   kind: "subtitle-first";
   abortController: AbortController;
-  sentences: import("@/lib/youtube-captions").CaptionSentence[];
+  sentences: import("@/lib/caption-utils").CaptionSentence[];
   translations: string[];
   /** The currently-playing (or last-started) AudioBufferSourceNode. */
   currentSource: AudioBufferSourceNode | null;

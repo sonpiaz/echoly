@@ -14,6 +14,7 @@ import {
 import type { BgToContentMessage, BgToContentResponse } from "@/shared/protocol";
 import type { HistoryTurn, StartSettings } from "@/shared/types";
 import type { OverlayCallbacks, OverlayView } from "@/shared/ports";
+import type { PlatformAdapter } from "@/shared/platform-ports";
 // Agent C's concrete factory. May be unresolved during Agent D's solo run; the
 // LOCKED CreateOverlay/OverlayView/OverlayCallbacks types let us build against
 // it now. The orchestrator resolves this at the integration gate.
@@ -23,9 +24,7 @@ import type { Session } from "./session-manager";
 import { AudioCapture } from "./capture";
 import { WebRtcPipeline } from "./pipelines/webrtc-pipeline";
 import { SubtitleFirstPipeline } from "./pipelines/subtitle-first-pipeline";
-import { isYouTubeWatchPage } from "./pipelines/youtube-captions-fetch";
 import { isSubtitleFirstSession, isWebRtcSession } from "./session-manager";
-import { suppressYouTubeNativeCaptions } from "./youtube-native-captions";
 import { TOAST_PRESS_PLAY } from "@/shared/product-copy";
 import { createController } from "./controller";
 import { STOP_REASON, STOP_REASON_MESSAGE, type StopReason } from "./stop-reasons";
@@ -39,6 +38,8 @@ import {
   type StandardDubPlaybackSyncHandle,
 } from "@/lib/dub-playback-sync";
 import { alignRealtimeVodBeforePlay } from "@/lib/standard-vod-start";
+import { detectAdapter } from "@/platforms/registry";
+import { setActiveAdapter } from "./media-stage";
 
 /** Extra video listeners a pipeline can opt into. */
 interface ExtraVideoListeners {
@@ -63,14 +64,17 @@ export class ContentApp {
   readonly subtitleFirst: SubtitleFirstPipeline;
   readonly callbacks: OverlayCallbacks;
 
+  /** Active platform adapter — set at session start, read throughout the session. */
+  adapter: PlatformAdapter = detectAdapter(location.hostname);
+
   // F3 — source caption polling state.
   private lastSeenCaption = "";
   private lastSpaUrl = location.href;
 
   /** Detach source <video> pause/play/ended listeners (any platform). */
   private unbindSourcePlayback: (() => void) | null = null;
-  /** Restores YT player CC if we turned it off at session start. */
-  private restoreYtCaptions: (() => void) | null = null;
+  /** Restores native captions if we suppressed them at session start. */
+  private restoreNativeCaptions: (() => void) | null = null;
   /** Standard VOD adaptive dub/video sync only. */
   private standardDubSync: StandardDubPlaybackSyncHandle | null = null;
 
@@ -110,9 +114,9 @@ export class ContentApp {
     this.lastSeenCaption = "";
     this.sm.captionPollTimer = setInterval(() => {
       if (!this.sm.settings?.showSource) return;
-      // Source text from WebRTC data channel only (never scraped YT captions).
+      // Source text from WebRTC data channel only (never scraped live captions).
       if (this.sm.session) return;
-      const text = this.readYTCaptions();
+      const text = this.adapter.readLiveCaptionText();
       if (!text || text === this.lastSeenCaption) return;
       this.lastSeenCaption = text;
       this.sm.currentSourceText = text;
@@ -125,15 +129,6 @@ export class ContentApp {
       clearInterval(this.sm.captionPollTimer);
       this.sm.captionPollTimer = null;
     }
-  }
-
-  private readYTCaptions(): string {
-    const segs = document.querySelectorAll(".ytp-caption-segment");
-    return Array.from(segs)
-      .map((s) => s.textContent)
-      .join(" ")
-      .trim()
-      .replace(/\s+/g, " ");
   }
 
   applySourceVisibility(): void {
@@ -236,9 +231,10 @@ export class ContentApp {
     extra: ExtraVideoListeners = {},
   ): void {
     this.unbindSourcePlayback?.();
+    const adapter = this.adapter;
     this.unbindSourcePlayback = bindSourceVideoPlayback(video, {
       onPause: () => {
-        if (shouldIgnoreSourcePlaybackEvent()) return;
+        if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
         const sess = this.sm.session;
         if (!sess) return;
         // Pausing the source video STOPS the dub session entirely (user spec):
@@ -249,7 +245,7 @@ export class ContentApp {
       },
       onPlay: () => {
         extra.onPlayExtra?.();
-        if (shouldIgnoreSourcePlaybackEvent()) return;
+        if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
         const sess = this.sm.session;
         if (!sess) return;
         syncSourcePauseState(this.sm, sess, false);
@@ -285,22 +281,26 @@ export class ContentApp {
     sm.translationUtteranceOpen = false;
     sm.translationSegmentId = null;
 
-    if (location.hostname.includes("youtube.com")) {
-      this.restoreYtCaptions?.();
-      this.restoreYtCaptions = suppressYouTubeNativeCaptions();
-    }
+    // Detect the active platform adapter for this page.
+    this.adapter = detectAdapter(location.hostname);
+    setActiveAdapter(this.adapter);
+
+    // Suppress native captions if the platform has them.
+    this.restoreNativeCaptions?.();
+    this.restoreNativeCaptions = this.adapter.suppressNativeCaptions?.() ?? null;
 
     const tier = sm.settings.tier;
     if (tier !== TIER_REALTIME && tier !== TIER_STANDARD) {
       return { ok: false, error: "Unknown tier: " + tier };
     }
 
-    const videoProbe = capture.findVideo();
+    const videoProbe = this.adapter.findVideo() ?? capture.findVideo();
     const liveProbe = videoProbe ? capture.isLive(videoProbe) : false;
     if (
       tier === TIER_STANDARD &&
       !opts?.forceWebRtcStandard &&
-      isYouTubeWatchPage() &&
+      this.adapter.capabilities.subtitleFirst &&
+      this.adapter.getVideoId(location.href) &&
       videoProbe &&
       !liveProbe
     ) {
@@ -338,7 +338,7 @@ export class ContentApp {
         ? settings.standardVoice
         : settings.realtimeVoice || "";
 
-    const video = capture.findVideo();
+    const video = this.adapter.findVideo() ?? capture.findVideo();
     if (!video) return { ok: false, error: "No playable video on this page." };
     capture.videoEl = video;
     capture.bindVolumeDriftGuard(video);
@@ -578,7 +578,7 @@ export class ContentApp {
             try {
               currentSrc.stop();
             } catch {
-              /* ignore */
+              /* ignore — may already be stopped */
             }
             try {
               currentSrc.disconnect();
@@ -634,10 +634,12 @@ export class ContentApp {
     sm.currentTargetText = "";
     sm.translationUtteranceOpen = false;
     sm.translationSegmentId = null;
-    if (this.restoreYtCaptions) {
-      this.restoreYtCaptions();
-      this.restoreYtCaptions = null;
+    if (this.restoreNativeCaptions) {
+      this.restoreNativeCaptions();
+      this.restoreNativeCaptions = null;
     }
+    // Clear the active adapter from the media-stage module.
+    setActiveAdapter(null);
     this.overlay.removeOverlay();
     sm.emitState({ running: false, paused: false, status: "Stopped" });
     if (reason !== STOP_REASON.BACKEND_STOP) {
@@ -732,8 +734,8 @@ export class ContentApp {
       if (location.href !== this.lastSpaUrl) {
         this.lastSpaUrl = location.href;
         if (this.sm.session) {
-          // stopSession emits STOP_REASON_MESSAGE[YT_NAVIGATION].
-          this.stopSession(STOP_REASON.YT_NAVIGATION);
+          // stopSession emits STOP_REASON_MESSAGE[SPA_NAVIGATION].
+          this.stopSession(STOP_REASON.SPA_NAVIGATION);
         }
       }
     }, 500);

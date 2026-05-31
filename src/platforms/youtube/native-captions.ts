@@ -1,5 +1,7 @@
 // Hide YouTube's own CC track while Echoly is translating — the overlay shows
 // the translated line; leaving YT CC on stacks two subtitle layers over dub audio.
+//
+// Moved from `src/content/youtube-native-captions.ts`.
 
 function findSubtitlesButton(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>(

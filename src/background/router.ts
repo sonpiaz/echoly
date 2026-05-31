@@ -16,7 +16,7 @@ import type { EcholyAuth } from "./auth";
 import type { SessionCoordinator } from "./session-coordinator";
 import { setSigninTabId } from "./auth-listener";
 import { usagePatchFromServerError } from "@/lib/server-errors";
-import { getYtCaptionCache } from "./youtube-caption-cache";
+import { getYtCaptionCache } from "@/platforms/youtube/caption-cache";
 import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
 import type { SettingsClient } from "./settings-client";
 

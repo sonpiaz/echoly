@@ -48,6 +48,10 @@ export default defineConfig({
     host_permissions: [
       "https://*.youtube.com/*",
       "https://youtube.com/*",
+      "https://*.coursera.org/*",
+      "https://coursera.org/*",
+      "https://*.udemy.com/*",
+      "https://udemy.com/*",
       hostPermForOrigin(ECHOLY_API_ORIGIN),
       hostPermForOrigin(ECHOLY_WEB_ORIGIN),
       // Dev convenience: always allow local stack even if .env points elsewhere.

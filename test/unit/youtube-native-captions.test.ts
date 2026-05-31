@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { suppressYouTubeNativeCaptions } from "@/content/youtube-native-captions";
+import { suppressYouTubeNativeCaptions } from "@/platforms/youtube/native-captions";
 
 describe("suppressYouTubeNativeCaptions", () => {
   let btn: HTMLButtonElement;

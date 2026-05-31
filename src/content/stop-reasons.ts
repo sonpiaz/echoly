@@ -9,11 +9,13 @@ export const STOP_REASON = {
   USER_STOP: "user-stop",
   BACKEND_STOP: "backend-stop",
   AUTO_STOP_60MIN: "auto-stop-60min",
-  YT_NAVIGATION: "yt-navigation",
+  SPA_NAVIGATION: "spa-navigation",
   UNLOAD: "unload",
   CONNECTION_LOST: "connection-lost",
   SERVER_ERROR: "server-error",
   HANDOVER_FAILED: "handover-failed",
+  /** Platform cannot capture audio (DRM) and has no captions for this video. */
+  NO_CC_UNSUPPORTED: "no-cc-unsupported",
 } as const;
 
 export type StopReason = (typeof STOP_REASON)[keyof typeof STOP_REASON];
@@ -32,9 +34,10 @@ export const STOP_REASON_MESSAGE: Record<StopReason, string> = {
   // Not emitted (backend already drove the stop) — kept for exhaustiveness.
   [STOP_REASON.BACKEND_STOP]: "Stopped",
   [STOP_REASON.AUTO_STOP_60MIN]: "Auto-stopped at 60 min — start again to continue.",
-  [STOP_REASON.YT_NAVIGATION]: "YouTube navigated.",
+  [STOP_REASON.SPA_NAVIGATION]: "Page navigated.",
   [STOP_REASON.UNLOAD]: "Stopped",
   [STOP_REASON.CONNECTION_LOST]: "Connection lost.",
   [STOP_REASON.SERVER_ERROR]: "Translation error.",
   [STOP_REASON.HANDOVER_FAILED]: "Switch failed.",
+  [STOP_REASON.NO_CC_UNSUPPORTED]: "No captions available on this video.",
 };

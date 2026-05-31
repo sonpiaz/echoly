@@ -161,7 +161,7 @@ describe("stop — clean teardown", () => {
   });
 });
 
-describe("updateVolume — active-tab fallback when tabId is null", () => {
+describe("updateVolume / stop — active-tab fallback when tabId is null", () => {
   let chromeMock: FakeChrome;
   let store: Store;
   let session: SessionCoordinator;
@@ -204,17 +204,23 @@ describe("updateVolume — active-tab fallback when tabId is null", () => {
     expect(stopCall![0]).toBe(7);
   });
 
-  it("no active YT tab → applies volume to state but relays nothing", async () => {
+  it("active non-YouTube tab → still applies volume to state and relays (platform-agnostic fallback)", async () => {
+    // After removing the isYouTubeUrl gate, the fallback picks the active tab
+    // regardless of platform — so a Coursera/Udemy/generic tab also receives the
+    // volume update when tabId is null.
     store.setTabId(null);
     chromeMock.tabs.query.mockResolvedValue([
       { id: 3, url: "https://example.com/" },
     ]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
     const r = await session.updateVolume(20, 60);
     expect(r).toEqual({ ok: true });
     expect(store.state.originalVolume).toBe(20);
     const volCall = chromeMock.tabs.sendMessage.mock.calls.find(
       (c) => (c[1] as { type?: string })?.type === "CONTENT_UPDATE_VOLUME",
     );
-    expect(volCall).toBeUndefined();
+    // The relay now reaches any active tab, not only YouTube.
+    expect(volCall).toBeDefined();
+    expect(volCall![0]).toBe(3);
   });
 });

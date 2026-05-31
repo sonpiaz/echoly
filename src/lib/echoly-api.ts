@@ -2,7 +2,7 @@
 
 import { parseServerError } from "@/lib/server-errors";
 import { pipelineToastFromServer, type PipelineToastError } from "@/lib/pipeline-error";
-import type { CaptionSentence } from "@/lib/youtube-captions";
+import type { CaptionSentence } from "@/lib/caption-utils";
 
 const HDR_REQUEST_ID = "x-echoly-request-id";
 const HDR_SESSION_ID = "x-echoly-session-id";

@@ -1,20 +1,15 @@
 // YouTube caption acquisition (3-layer: intercept → DOM → plain timedtext).
+//
+// Moved from `src/content/pipelines/youtube-captions-fetch.ts`.
+// Returns the `CaptionFetchResult` shape from `@/shared/platform-ports`
+// (field `captions`, not `cues`).
 
 import { sendFromContent } from "@/shared/protocol";
-import {
-  getYouTubeVideoId,
-  parseJson3Events,
-  pickCaptionTrack,
-  type CaptionCue,
-} from "@/lib/youtube-captions";
+import { getYouTubeVideoId, parseJson3Events, pickCaptionTrack } from "./captions";
+import type { CaptionFetchResult } from "@/shared/platform-ports";
+import type { CaptionCue } from "@/shared/platform-ports";
 
-export interface CaptionFetchResult {
-  captions: CaptionCue[];
-  sourceUrl?: string;
-  lang?: string | null;
-  kind?: string | null;
-  source?: string;
-}
+export type { CaptionFetchResult };
 
 const YT_CC_BUTTON_SELECTORS = [
   "button.ytp-subtitles-button",
@@ -159,10 +154,8 @@ export async function fetchYouTubeCaptions(
       if (captions) {
         return {
           captions,
-          sourceUrl: url,
-          lang: entry.lang,
-          kind: entry.kind,
-          source: "intercept",
+          sourceLang: entry.lang,
+          trackName: entry.kind ? `YouTube (${entry.kind})` : undefined,
         };
       }
     }
@@ -184,9 +177,8 @@ export async function fetchYouTubeCaptions(
       if (captions) {
         return {
           captions,
-          sourceUrl: url,
-          lang: picked.languageCode ?? null,
-          kind: picked.kind ?? null,
+          sourceLang: picked.languageCode ?? null,
+          trackName: picked.kind ? `YouTube (${picked.kind})` : undefined,
         };
       }
     } catch {
@@ -205,7 +197,7 @@ export async function fetchYouTubeCaptions(
   for (const url of fallbackUrls) {
     try {
       const captions = await fetchJson3Url(url, signal);
-      if (captions) return { captions, sourceUrl: url };
+      if (captions) return { captions, sourceLang: null };
     } catch {
       if (signal?.aborted) return null;
     }

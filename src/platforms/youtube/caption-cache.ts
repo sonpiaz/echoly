@@ -1,4 +1,8 @@
 // webRequest cache for signed YouTube /api/timedtext URLs (subtitle-first layer 1).
+//
+// Moved from `src/background/youtube-caption-cache.ts`.
+// Export names are preserved so `background/router.ts` and `background/index.ts`
+// can be re-pointed to this path by owner D.
 
 import { YT_CACHE_GC_MS, YT_CACHE_TTL_MS } from "@/shared/constants";
 

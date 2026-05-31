@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { isYouTubeAdPlaying } from "@/content/youtube-ad-state";
+import { isYouTubeAdPlaying } from "@/platforms/youtube/ad-state";
 
 describe("isYouTubeAdPlaying", () => {
   let player: HTMLDivElement;

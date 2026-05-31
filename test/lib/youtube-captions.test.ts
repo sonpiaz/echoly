@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   clampSentenceTimelineNoOverlap,
   mergeWithDedupe,
-  parseJson3Events,
   regroupToSentences,
-} from "@/lib/youtube-captions";
+} from "@/lib/caption-utils";
+import { parseJson3Events } from "@/platforms/youtube/captions";
 
 describe("parseJson3Events", () => {
   it("maps json3 segs to cues", () => {

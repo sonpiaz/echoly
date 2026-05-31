@@ -12,7 +12,14 @@ import "@/content/overlay/overlay.css";
 import { initContent } from "@/content";
 
 export default defineContentScript({
-  matches: ["https://*.youtube.com/*", "https://youtube.com/*"],
+  matches: [
+    "https://*.youtube.com/*",
+    "https://youtube.com/*",
+    "https://*.coursera.org/*",
+    "https://coursera.org/*",
+    "https://*.udemy.com/*",
+    "https://udemy.com/*",
+  ],
   runAt: "document_idle",
   cssInjectionMode: "manifest",
   main() {

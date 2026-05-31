@@ -11,10 +11,10 @@ import { SettingsClient } from "./settings-client";
 import { registerAutoStart } from "./auto-start";
 import { ECHOLY_PROXY_BASE } from "@/shared/constants";
 import type { ToBackgroundMessage } from "@/shared/protocol";
-import { installYoutubeCaptionCache } from "./youtube-caption-cache";
+import { installAllBackgroundServices } from "@/platforms/registry";
 
 export function initBackground(): void {
-  installYoutubeCaptionCache();
+  installAllBackgroundServices();
   const auth = new EcholyAuth();
   const store = new Store(auth);
   const settingsClient = new SettingsClient(ECHOLY_PROXY_BASE, () =>

@@ -75,7 +75,7 @@ export class AudioCapture {
       typeof cap.captureStream !== "function" &&
       typeof cap.mozCaptureStream !== "function"
     ) {
-      throw new Error("This Chrome build cannot capture YouTube audio.");
+      throw new Error("This browser build cannot capture tab audio.");
     }
     const start = Date.now();
     let lastStream: MediaStream;
@@ -89,7 +89,7 @@ export class AudioCapture {
       lastStream.getTracks().forEach((t) => t.stop());
       await new Promise((r) => setTimeout(r, 300));
     }
-    throw new Error("YouTube audio not ready. Press play, then Start again.");
+    throw new Error("Tab audio not ready. Press play, then Start again.");
   }
 
   /** Resolves true once the PeerConnection reaches "connected"; false on

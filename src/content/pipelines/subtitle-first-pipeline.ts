@@ -1,4 +1,4 @@
-// Subtitle-first Standard (YouTube VOD) — CC → POST /v1/translate/subtitles → display-anchored dub.
+// Subtitle-first Standard (VOD captions → POST /v1/translate/subtitles → display-anchored dub).
 //
 // Playback driver: a 250ms interval (+ each clip's onended) calls #playbackTick(),
 // which plays each cue's dub IN FULL, one at a time, back-to-back. It never
@@ -14,15 +14,14 @@ import { isPipelineToastError, renderSubtitleDubBatch } from "@/lib/echoly-api";
 import { STANDARD_DEFAULT_VOICE } from "@/shared/constants";
 import type { StartSettings } from "@/shared/types";
 import {
-  getYouTubeVideoId,
   regroupToSentences,
   SUBFIRST_BATCH_SIZE,
   SUBFIRST_LOOKAHEAD_MS,
-} from "@/lib/youtube-captions";
+} from "@/lib/caption-utils";
 import type { SubtitleFirstSession } from "../session-manager";
 import type { ContentApp } from "../index";
-import { fetchYouTubeCaptions } from "./youtube-captions-fetch";
 import { TOAST_NO_CC_FALLBACK, TOAST_PRESS_PLAY } from "@/shared/product-copy";
+import { STOP_REASON, STOP_REASON_MESSAGE } from "../stop-reasons";
 
 // Start a cue's dub up to this many seconds before its caption start.
 const SUBFIRST_DUE_AHEAD_SEC = 0.15;
@@ -35,11 +34,12 @@ export class SubtitleFirstPipeline {
 
   async start(incomingSettings: StartSettings): Promise<{ ok: boolean; error?: string }> {
     const { sm, capture, overlay } = this.app;
-    const video = capture.findVideo();
+    const adapter = this.app.adapter;
+    const video = adapter.findVideo() ?? capture.findVideo();
     if (!video) return { ok: false, error: "No playable video on this page." };
 
-    const videoId = getYouTubeVideoId();
-    if (!videoId) return { ok: false, error: "Could not detect YouTube video id." };
+    const videoId = adapter.getVideoId(location.href);
+    if (!videoId) return { ok: false, error: "Could not detect video id for this page." };
 
     capture.videoEl = video;
     capture.bindVolumeDriftGuard(video);
@@ -119,11 +119,11 @@ export class SubtitleFirstPipeline {
 
     let captionResult;
     try {
-      captionResult = await fetchYouTubeCaptions(
+      captionResult = await adapter.fetchCaptions({
         videoId,
-        sm.settings.targetLanguage,
-        abortController.signal,
-      );
+        preferLang: sm.settings.targetLanguage,
+        signal: abortController.signal,
+      });
     } catch {
       captionResult = null;
     }
@@ -139,13 +139,26 @@ export class SubtitleFirstPipeline {
       sm.session = null;
       sm.pageToken += 1;
       overlay.removeOverlay();
-      const result = await this.app.startWebRtcStandard(incomingSettings);
-      if (result.ok) {
-        overlay.showToast(TOAST_NO_CC_FALLBACK, 5000);
+
+      // Branch on audioCapture capability:
+      // - true  (YouTube, Coursera): fall back to WebRTC Standard audio capture.
+      // - false (Udemy DRM): cannot capture audio — show explicit "unsupported" toast.
+      if (adapter.capabilities.audioCapture) {
+        const result = await this.app.startWebRtcStandard(incomingSettings);
+        if (result.ok) {
+          overlay.showToast(TOAST_NO_CC_FALLBACK, 5000);
+        } else {
+          restorePlay();
+        }
+        return result;
       } else {
+        // Udemy (or any DRM platform): no captions + no audio capture = unsupported.
         restorePlay();
+        const msg = STOP_REASON_MESSAGE[STOP_REASON.NO_CC_UNSUPPORTED];
+        overlay.showToast(msg, 6000);
+        this.app.stopSession(STOP_REASON.NO_CC_UNSUPPORTED);
+        return { ok: false, error: msg };
       }
-      return result;
     }
 
     const sentences = regroupToSentences(captionResult.captions);

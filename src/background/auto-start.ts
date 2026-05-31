@@ -18,6 +18,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import { normalizeDomain } from "@/shared/advanced";
+import { isSupportedWatchUrl } from "@/platforms/registry";
 import type { Store } from "./store";
 import type { SessionCoordinator } from "./session-coordinator";
 
@@ -30,14 +31,6 @@ const lastFireAt = new Map<number, number>();
 /** Test-only: reset module state between specs. */
 export function resetAutoStartState(): void {
   lastFireAt.clear();
-}
-
-function isYouTubeWatchUrl(url: string | undefined): url is string {
-  if (typeof url !== "string") return false;
-  // /watch path on any youtube.com subdomain. The legacy isYouTubeUrl matches
-  // any path under youtube.com; for auto-start we restrict to /watch so a YT
-  // homepage tab doesn't auto-fire on every reload.
-  return /^https?:\/\/[^/]*youtube\.com\/watch\b/.test(url);
 }
 
 /** Register the tabs.onUpdated listener. Returns the listener fn so tests can
@@ -57,9 +50,9 @@ export function registerAutoStart(
   ): void => {
     // Gate 1 — only fire on full load. (status="loading" fires many times.)
     if (changeInfo.status !== "complete") return;
-    // Gate 2 — must be a YT /watch URL.
+    // Gate 2 — must be a supported watch URL on any platform.
     const url = tab.url;
-    if (!isYouTubeWatchUrl(url)) return;
+    if (typeof url !== "string" || !isSupportedWatchUrl(url)) return;
     let host: string | null;
     try {
       host = normalizeDomain(new URL(url).hostname);
