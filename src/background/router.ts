@@ -16,6 +16,7 @@ import type { EcholyAuth } from "./auth";
 import type { SessionCoordinator } from "./session-coordinator";
 import { setSigninTabId } from "./auth-listener";
 import { usagePatchFromServerError } from "@/lib/server-errors";
+import { getYtCaptionCache } from "./youtube-caption-cache";
 import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
 import type { SettingsClient } from "./settings-client";
 
@@ -186,6 +187,16 @@ export function routeMessage(
   sender: chrome.runtime.MessageSender,
   sendResponse: (response?: object) => void,
 ): boolean {
+  if (isFromContent(sender) && message.type === "GET_YT_CC_URL") {
+    const videoId =
+      "videoId" in message && typeof message.videoId === "string"
+        ? message.videoId
+        : "";
+    const entry = videoId ? getYtCaptionCache(videoId) : undefined;
+    sendResponse(entry ? { ok: true, ...entry } : { ok: false });
+    return false;
+  }
+
   // Content-originated messages (have sender.tab).
   if (isFromContent(sender)) {
     handleContentEvent(deps, message as ContentToBgMessage);

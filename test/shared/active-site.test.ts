@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   domainFromTabUrl,
+  findSessionStartTab,
   findYouTubeWatchTab,
   resolveSiteDomainFromTabs,
   siteDisplayLabel,
 } from "@/shared/active-site";
+import { ERR_NO_VIDEO_TAB } from "@/shared/product-copy";
 
 describe("active-site", () => {
   it("domainFromTabUrl ignores internal pages", () => {
@@ -45,5 +47,28 @@ describe("active-site", () => {
       { url: "https://www.youtube.com/watch?v=abc", index: 1 },
     ];
     expect(findYouTubeWatchTab(tabs)?.url).toContain("watch?v=abc");
+  });
+
+  it("findSessionStartTab prefers active web tab over YouTube", () => {
+    const tabs = [
+      { active: true, url: "https://www.coursera.org/learn/x/lecture/1", index: 3 },
+      { url: "https://www.youtube.com/watch?v=abc", index: 1 },
+    ];
+    expect(findSessionStartTab(tabs)?.url).toContain("coursera.org");
+  });
+
+  it("findSessionStartTab falls back to YouTube when popup is active", () => {
+    const tabs = [
+      { active: true, url: "chrome-extension://id/popup.html", index: 2 },
+      { url: "https://www.youtube.com/watch?v=abc", index: 1 },
+    ];
+    expect(findSessionStartTab(tabs)?.url).toContain("watch?v=abc");
+  });
+});
+
+describe("product-copy", () => {
+  it("ERR_NO_VIDEO_TAB is user-facing", () => {
+    expect(ERR_NO_VIDEO_TAB).toMatch(/video/i);
+    expect(ERR_NO_VIDEO_TAB).not.toMatch(/YouTube video first/i);
   });
 });

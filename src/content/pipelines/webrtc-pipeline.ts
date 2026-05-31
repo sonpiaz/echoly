@@ -1,5 +1,5 @@
-// WebRtcPipeline — shared WebRTC session for Realtime (OpenAI) and Standard
-// (STT→translate→TTS). Both POST SDP to /v1/rtc/translate with ?pipeline=.
+// WebRtcPipeline — voice dubbing via WebRTC (any site with <video>).
+// Realtime: OpenAI relay. Standard: Gemini audio-in → TTS. POST /v1/rtc/translate.
 
 import {
   TIER_REALTIME,
@@ -18,8 +18,13 @@ import {
   handoverDurationHintSec,
 } from "@/lib/rtc-handover";
 import { alignRealtimeVodBeforePlay } from "@/lib/standard-vod-start";
-import type { WebRtcSession, WebRtcSignalingPipeline } from "../session-manager";
+import {
+  isWebRtcSession,
+  type WebRtcSession,
+  type WebRtcSignalingPipeline,
+} from "../session-manager";
 import type { ContentApp } from "../index";
+import { STOP_REASON } from "../stop-reasons";
 
 interface CtaError extends Error {
   cta?: string;
@@ -260,16 +265,15 @@ export class WebRtcPipeline {
           if (sm.isSessionStale(token)) return;
           if (newSession !== sm.session) return;
           if (pc.iceConnectionState !== "disconnected") return;
-          this.app.stopSession("connection-lost");
-          sm.emitEnded("Connection lost.");
+          // stopSession emits STOP_REASON_MESSAGE[CONNECTION_LOST].
+          this.app.stopSession(STOP_REASON.CONNECTION_LOST);
         }, 8_000);
         return;
       }
       if (ice === "closed" || ice === "failed") {
         clearIceDisconnectTimer();
         if (newSession === sm.session) {
-          this.app.stopSession("connection-lost");
-          sm.emitEnded("Connection lost.");
+          this.app.stopSession(STOP_REASON.CONNECTION_LOST);
         }
       }
     });
@@ -339,7 +343,7 @@ export class WebRtcPipeline {
     if (evt.type === "error") {
       const msg = evt.message?.trim() || "Translation error";
       overlay.setStatusText(msg);
-      this.app.stopSession("server-error");
+      this.app.stopSession(STOP_REASON.SERVER_ERROR);
       return;
     }
     if (evt.type === "partial_translation") {
@@ -399,7 +403,7 @@ export class WebRtcPipeline {
   }): Promise<void> {
     const { sm, overlay, capture } = this.app;
     const session = sm.session;
-    if (!session?.stream || !session.pc) return;
+    if (!isWebRtcSession(session) || !session.stream || !session.pc) return;
 
     const baseSettings = sm.settings!;
     const newSettings = { ...baseSettings, ...partial };
@@ -474,7 +478,7 @@ export class WebRtcPipeline {
         cta: e.cta,
         ctaLabel: e.ctaLabel,
       });
-      this.app.stopSession("handover-failed");
+      this.app.stopSession(STOP_REASON.HANDOVER_FAILED);
       return;
     }
 

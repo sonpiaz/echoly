@@ -1,6 +1,6 @@
 # CLAUDE.md — echoly-extension
 
-Extension Chrome MV3 (**TypeScript + WXT**) — lồng tiếng AI trực tiếp lên video YouTube. Background service worker là nguồn trạng thái duy nhất; content script bắt audio tab và chạy pipeline dịch theo 2 tier (Realtime WebRTC / Standard chunked STT→dịch→TTS), phát lại qua overlay; popup là renderer thụ động.
+Extension Chrome MV3 (**TypeScript + WXT**) — **lồng tiếng voice-to-voice** trên mọi trang có `<video>` (YouTube, Coursera, Udemy, …). Background là nguồn trạng thái duy nhất; content bắt audio tab và chạy 2 tier: **Realtime** (WebRTC OpenAI) và **Standard** (WebRTC Gemini audio-in + TTS, hoặc YouTube VOD qua phụ đề + `/v1/translate/subtitles`); popup renderer thụ động.
 
 ## Tài liệu kiến trúc (Understand-Anything knowledge graph)
 

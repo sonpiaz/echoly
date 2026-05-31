@@ -57,7 +57,7 @@ const FIXTURE_HTML = `
       <div><span id="words">—</span></div>
     </section>
 
-    <button id="toggle"><span id="actionLabel">Start translating</span></button>
+    <button id="toggle"><span id="actionLabel">Start dubbing</span></button>
 
     <div class="usage-hint-row signedin-only idle-only" id="usage-hint-row">
       <span><b id="usage-hint-amount">0 min</b><span id="usage-hint-label">left</span></span>

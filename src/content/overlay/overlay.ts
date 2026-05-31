@@ -62,6 +62,11 @@ interface Elements {
   langSelect: HTMLSelectElement | null;
   voiceSelect: HTMLSelectElement | null;
   target: HTMLElement | null;
+  /** Positioned wrapper holding the on-video source + target rows. */
+  captionStack: HTMLElement | null;
+  /** On-video original-language row (gated by showSource). */
+  capSrcRow: HTMLElement | null;
+  capSrcText: HTMLElement | null;
   panelPreview: HTMLElement | null;
   source: HTMLElement | null;
   history: HTMLElement | null;
@@ -109,6 +114,9 @@ function emptyElements(): Elements {
     langSelect: null,
     voiceSelect: null,
     target: null,
+    captionStack: null,
+    capSrcRow: null,
+    capSrcText: null,
     panelPreview: null,
     source: null,
     history: null,
@@ -156,6 +164,8 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   let currentTargetText = "";
   let currentSourceText = "";
   let lastRenderedCaption = "";
+  // Whether the on-video original-language row may show (mirrors showSource).
+  let sourceOnVideo = false;
   // Active tier + selected voice/language — the view tracks just enough to
   // re-render the voice picker and apply RTL on target text. These mirror the
   // legacy `settings?.tier`/`settings?.targetLanguage` reads inside the overlay.
@@ -272,7 +282,9 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
 
   function applyStageAnchors(): void {
     if (!root) return;
-    const caption = elements.target;
+    // Position the whole bilingual stack; the target text element scrolls
+    // within its own row, so anchoring/sizing belongs on the wrapper.
+    const caption = elements.captionStack;
     const dock = root.querySelector<HTMLElement>(".ec-dock");
     if (!stageSnapshot) {
       root.removeAttribute("data-stage");
@@ -587,6 +599,9 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
       langSelect: root.querySelector("[data-ec-language]"),
       voiceSelect: root.querySelector("[data-ec-voice]"),
       target: root.querySelector("[data-ec-target]"),
+      captionStack: root.querySelector("[data-ec-cap-stack]"),
+      capSrcRow: root.querySelector("[data-ec-cap-src]"),
+      capSrcText: root.querySelector("[data-ec-cap-src-text]"),
       panelPreview: root.querySelector("[data-ec-panel-preview]"),
       source: root.querySelector("[data-ec-source]"),
       history: null,
@@ -772,7 +787,8 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     if (state === "live" || state === "connecting") {
       if (sessionStartedAt == null) sessionStartedAt = Date.now();
       startElapsedTimer();
-    } else if (state === "ready" || state === "error") {
+    } else if (state === "ready" || state === "error" || state === "paused") {
+      // "paused" must stop the running clock so the overlay doesn't look live.
       stopElapsedTimer();
     }
   }
@@ -804,12 +820,24 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   }
   function setSourceText(text: string): void {
     currentSourceText = text;
-    if (elements.source) elements.source.textContent = text.slice(-220);
-    applyLayout();
+    const trimmed = text.slice(-220);
+    if (elements.source) elements.source.textContent = trimmed;
+    if (elements.capSrcText) elements.capSrcText.textContent = trimmed;
+    syncSourceRow();
   }
   function applySourceVisibility(show: boolean): void {
-    if (!elements.source) return;
-    elements.source.hidden = !show;
+    sourceOnVideo = show;
+    if (elements.source) elements.source.hidden = !show;
+    syncSourceRow();
+  }
+  // The on-video original-language row shows only when the user has enabled
+  // "show original" (showSource) AND there is source text to display. Driven by
+  // the same flag as the panel source, so the CC/source controls stay in sync.
+  function syncSourceRow(): void {
+    if (elements.capSrcRow) {
+      const visible = sourceOnVideo && currentSourceText.trim().length > 0;
+      elements.capSrcRow.hidden = !visible;
+    }
     applyLayout();
   }
   // Sync the target-language <select> value (legacy applySettingsLive

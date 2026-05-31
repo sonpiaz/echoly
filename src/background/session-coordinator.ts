@@ -4,6 +4,7 @@
 
 import { CONTENT_SCRIPT_PATH, CONTENT_CSS_PATH } from "@/shared/constants";
 import { signInToStartMessage } from "@/shared/echoly-config";
+import { ERR_NO_VIDEO_TAB } from "@/shared/product-copy";
 import { relayToContent } from "@/shared/protocol";
 import type { Ack, StateResult } from "@/shared/protocol";
 import type { Settings, StartSettings } from "@/shared/types";
@@ -22,7 +23,7 @@ import { recordLanguagePairRecent } from "./language-catalog";
 import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
 import {
   domainFromTabUrl,
-  findYouTubeWatchTab,
+  findSessionStartTab,
   resolveSiteDomainFromTabs,
 } from "@/shared/active-site";
 
@@ -113,18 +114,18 @@ export class SessionCoordinator {
     await this.store.persistAdvanced();
   }
 
-  /** YouTube watch tab for START — same window as popup site label (popup tab OK). */
-  private async youtubeTabForSession(): Promise<chrome.tabs.Tab> {
+  /** Web tab with video for START (active page, else YouTube, else last web tab). */
+  private async sessionTabForStart(): Promise<chrome.tabs.Tab> {
     let tabs = await chrome.tabs.query({ currentWindow: true });
-    let pick = findYouTubeWatchTab(tabs);
+    let pick = findSessionStartTab(tabs);
     if (!pick) {
       tabs = await chrome.tabs.query({});
-      pick = findYouTubeWatchTab(tabs);
+      pick = findSessionStartTab(tabs);
     }
-    if (!pick?.id) throw new Error("Open a YouTube video first.");
+    if (!pick?.id) throw new Error(ERR_NO_VIDEO_TAB);
     const tab = tabs.find((t) => t.id === pick.id);
-    if (!tab || !isYouTubeUrl(tab.url)) {
-      throw new Error("Open a YouTube video first.");
+    if (!tab || !domainFromTabUrl(tab.url)) {
+      throw new Error(ERR_NO_VIDEO_TAB);
     }
     return tab;
   }
@@ -182,7 +183,7 @@ export class SessionCoordinator {
 
     let tab: chrome.tabs.Tab;
     try {
-      tab = await this.youtubeTabForSession();
+      tab = await this.sessionTabForStart();
     } catch (err) {
       return { ok: false, error: errMessage(err instanceof Error ? err : String(err)) };
     }

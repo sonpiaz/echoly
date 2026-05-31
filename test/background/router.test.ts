@@ -87,7 +87,7 @@ describe("handleContentEvent — UPDATE_SETTINGS", () => {
     const store = new Store(auth);
     const session = new SessionCoordinator(store, auth);
     const updateSettings = vi.fn().mockResolvedValue({ ok: true, state: store.snapshot() });
-    (session as { updateSettings: typeof updateSettings }).updateSettings = updateSettings;
+    (session as unknown as { updateSettings: typeof updateSettings }).updateSettings = updateSettings;
     handleContentEvent(
       { store, auth, session },
       { type: "UPDATE_SETTINGS", settings: { tier: TIER_STANDARD } },

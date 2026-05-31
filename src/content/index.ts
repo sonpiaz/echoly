@@ -22,8 +22,13 @@ import { SessionManager } from "./session-manager";
 import type { Session } from "./session-manager";
 import { AudioCapture } from "./capture";
 import { WebRtcPipeline } from "./pipelines/webrtc-pipeline";
+import { SubtitleFirstPipeline } from "./pipelines/subtitle-first-pipeline";
+import { isYouTubeWatchPage } from "./pipelines/youtube-captions-fetch";
+import { isSubtitleFirstSession, isWebRtcSession } from "./session-manager";
 import { suppressYouTubeNativeCaptions } from "./youtube-native-captions";
+import { TOAST_PRESS_PLAY } from "@/shared/product-copy";
 import { createController } from "./controller";
+import { STOP_REASON, STOP_REASON_MESSAGE, type StopReason } from "./stop-reasons";
 import {
   bindSourceVideoPlayback,
   syncSourcePauseState,
@@ -39,6 +44,9 @@ import { alignRealtimeVodBeforePlay } from "@/lib/standard-vod-start";
 interface ExtraVideoListeners {
   onPlayExtra?: () => void;
   onSeeked?: () => void;
+  /** Called BEFORE stopSession("video-ended") so the pipeline can start the final
+   *  cue while the session is still alive. WebRTC pipelines do not use this. */
+  onEndedBefore?: () => void;
 }
 
 /**
@@ -52,6 +60,7 @@ export class ContentApp {
   readonly overlay: OverlayView = createOverlay();
   readonly capture: AudioCapture;
   readonly webrtc: WebRtcPipeline;
+  readonly subtitleFirst: SubtitleFirstPipeline;
   readonly callbacks: OverlayCallbacks;
 
   // F3 — source caption polling state.
@@ -68,6 +77,7 @@ export class ContentApp {
   constructor() {
     this.capture = new AudioCapture(this.sm, this.overlay);
     this.webrtc = new WebRtcPipeline(this);
+    this.subtitleFirst = new SubtitleFirstPipeline(this);
     this.callbacks = createController(this);
   }
 
@@ -167,7 +177,9 @@ export class ContentApp {
     const session = this.sm.session;
     if (
       !video ||
-      !session?.pc ||
+      !session ||
+      !isWebRtcSession(session) ||
+      !session.pc ||
       session.pipeline !== TIER_STANDARD ||
       this.capture.isLive(video)
     ) {
@@ -209,8 +221,8 @@ export class ContentApp {
     this.sm.startSessionTimer(
       () => this.overlay.showToast("Session ends in 5 min", 6000),
       () => {
-        this.stopSession("auto-stop-60min");
-        this.sm.emitEnded("Auto-stopped at 60 min — start again to continue.");
+        // stopSession emits STOP_REASON_MESSAGE[AUTO_STOP_60MIN].
+        this.stopSession(STOP_REASON.AUTO_STOP_60MIN);
       },
     );
   }
@@ -229,10 +241,11 @@ export class ContentApp {
         if (shouldIgnoreSourcePlaybackEvent()) return;
         const sess = this.sm.session;
         if (!sess) return;
-        syncSourcePauseState(this.sm, sess, true);
-        this.overlay.setStatusText("Paused");
-        this.overlay.setOverlayState("paused");
-        this.sm.emitState({ paused: true, status: "Paused" });
+        // Pausing the source video STOPS the dub session entirely (user spec):
+        // the overlay returns to the Stopped state so it never lingers as "LIVE"
+        // while the video is paused. Resuming does NOT auto-restart — the user
+        // starts again from the popup. Same teardown as the Stop button.
+        this.stopSession(STOP_REASON.VIDEO_PAUSED);
       },
       onPlay: () => {
         extra.onPlayExtra?.();
@@ -242,11 +255,12 @@ export class ContentApp {
         syncSourcePauseState(this.sm, sess, false);
         this.overlay.setStatusText("Translating");
         this.overlay.setOverlayState("live");
-        this.sm.emitState({ paused: false, status: "Translating" });
+        this.sm.emitState({ running: true, paused: false, status: "Translating" });
       },
       onEnded: () => {
-        this.stopSession("video-ended");
-        this.sm.emitEnded("Video ended.");
+        extra.onEndedBefore?.();
+        // stopSession emits STOP_REASON_MESSAGE[VIDEO_ENDED].
+        this.stopSession(STOP_REASON.VIDEO_ENDED);
       },
       onSeeked: extra.onSeeked,
     });
@@ -254,7 +268,10 @@ export class ContentApp {
 
   // ───── Start router (token-bumped inside each pipeline) ───────────────────
 
-  async startSession(incomingSettings: StartSettings): Promise<{
+  async startSession(
+    incomingSettings: StartSettings,
+    opts?: { forceWebRtcStandard?: boolean },
+  ): Promise<{
     ok: boolean;
     error?: string;
   }> {
@@ -277,11 +294,49 @@ export class ContentApp {
     if (tier !== TIER_REALTIME && tier !== TIER_STANDARD) {
       return { ok: false, error: "Unknown tier: " + tier };
     }
+
+    const videoProbe = capture.findVideo();
+    const liveProbe = videoProbe ? capture.isLive(videoProbe) : false;
+    if (
+      tier === TIER_STANDARD &&
+      !opts?.forceWebRtcStandard &&
+      isYouTubeWatchPage() &&
+      videoProbe &&
+      !liveProbe
+    ) {
+      return this.subtitleFirst.start(incomingSettings);
+    }
+
+    return this.startWebRtcSession(incomingSettings);
+  }
+
+  /** Standard voice fallback + Realtime — tab audio via WebRTC. */
+  async startWebRtcStandard(
+    incomingSettings: StartSettings,
+  ): Promise<{ ok: boolean; error?: string }> {
+    return this.startWebRtcSession(incomingSettings, { forceWebRtcStandard: true });
+  }
+
+  async startWebRtcSession(
+    incomingSettings: StartSettings,
+    _opts?: { forceWebRtcStandard?: boolean },
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+  }> {
+    const { sm, capture, overlay } = this;
+    sm.settings = { ...incomingSettings };
+    sm.apiBase = sm.settings.apiBase || ECHOLY_PROXY_BASE;
+    const settings = sm.settings;
+    const tier = settings.tier;
+    if (tier !== TIER_REALTIME && tier !== TIER_STANDARD) {
+      return { ok: false, error: "Unknown tier." };
+    }
     const pipeline = tier === TIER_STANDARD ? "standard" : "realtime";
     const voice =
       pipeline === "standard"
-        ? sm.settings.standardVoice
-        : sm.settings.realtimeVoice || "";
+        ? settings.standardVoice
+        : settings.realtimeVoice || "";
 
     const video = capture.findVideo();
     if (!video) return { ok: false, error: "No playable video on this page." };
@@ -294,13 +349,13 @@ export class ContentApp {
     try {
       overlay.buildOverlay(
         this.callbacks,
-        sm.settings.advanced?.captionPosition ?? null,
-        sm.settings.languagePicker ?? undefined,
-        sm.settings.apiMode === "proxy",
-        sm.settings.standardVoices?.map((v) => [v.id, v.label]),
+        settings.advanced?.captionPosition ?? null,
+        settings.languagePicker ?? undefined,
+        settings.apiMode === "proxy",
+        settings.standardVoices?.map((v) => [v.id, v.label]),
         tier,
       );
-      overlay.syncFromSettings(sm.settings);
+      overlay.syncFromSettings(settings);
       // SF8 only for Realtime — Standard adjusts rate via dub sync (dock hint).
       if (tier === TIER_REALTIME) capture.bindRateChangeWarn(video);
       overlay.setStatusText("Acquiring audio");
@@ -335,8 +390,8 @@ export class ContentApp {
             ? Math.ceil(video.duration)
             : undefined;
       newSession = await this.webrtc.buildSession(token, stream, {
-        apiBearer: sm.settings.apiBearer,
-        targetLanguage: sm.settings.targetLanguage,
+        apiBearer: settings.apiBearer,
+        targetLanguage: settings.targetLanguage,
         pipeline,
         voice,
         durationHintSec,
@@ -380,10 +435,10 @@ export class ContentApp {
       sm.startHeartbeat(newSession.rtcSessionId, newSession.apiBearer);
     }
     this.startSessionTimer();
-    capture.applyVolumes(sm.settings.originalVolume, sm.settings.voiceVolume);
+    capture.applyVolumes(settings.originalVolume, settings.voiceVolume);
     this.applySourceVisibility();
-    overlay.syncFromSettings(sm.settings);
-    if (sm.settings.showSource) this.startCaptionPoll();
+    overlay.syncFromSettings(settings);
+    if (settings.showSource) this.startCaptionPoll();
 
     this.bindCommonVideoListeners(video, newSession);
 
@@ -428,8 +483,8 @@ export class ContentApp {
         }
         overlay.setStatusText("Translating");
       } catch {
-        overlay.setStatusText("Press YouTube play to start dub");
-        overlay.showToast("Press YouTube play to start dub", 6000);
+        overlay.setStatusText(TOAST_PRESS_PLAY);
+        overlay.showToast(TOAST_PRESS_PLAY, 6000);
       }
     }
 
@@ -439,7 +494,7 @@ export class ContentApp {
 
   // ───── Universal teardown (bumps token FIRST) ─────────────────────────────
 
-  stopSession(_reason = "stop"): void {
+  stopSession(reason: StopReason = STOP_REASON.DEFAULT): void {
     const { sm, capture } = this;
     this.stopStandardDubSync();
     sm.videoPaused = false;
@@ -460,12 +515,81 @@ export class ContentApp {
     }
     const session = sm.session;
     const rtcEnd =
-      session?.rtcSessionId &&
+      session &&
+      isWebRtcSession(session) &&
+      session.rtcSessionId &&
       session.apiBearer &&
       session.pipeline === TIER_REALTIME
         ? { rtcSessionId: session.rtcSessionId, apiBearer: session.apiBearer }
         : null;
     if (session) {
+      if (isSubtitleFirstSession(session)) {
+        // Clear interval unconditionally — before the deferred/immediate branch.
+        if (session.playbackTimer) {
+          clearInterval(session.playbackTimer);
+          session.playbackTimer = null;
+        }
+        session.stopFlag = true;
+        try {
+          session.abortController.abort();
+        } catch {
+          /* ignore */
+        }
+
+        // Deferred teardown ONLY when the video ended: let the final cue ring out,
+        // then close the AudioContext.  On an explicit user Stop (any other reason)
+        // we cut immediately — otherwise the dub keeps speaking after Stop.
+        // Only one of onended / safety-timeout may close (guard double-close).
+        const currentSrc = session.currentSource;
+        const ctx = session.audioCtx;
+        const gain = session.outputGain;
+
+        if (currentSrc && ctx && ctx.state !== "closed" && reason === STOP_REASON.VIDEO_ENDED) {
+          // Null out so the shared teardown block below skips closing.
+          session.audioCtx = null;
+          session.outputGain = null;
+
+          let safetyClosed = false;
+          const safetyTimer = setTimeout(() => {
+            safetyClosed = true;
+            try {
+              gain?.disconnect();
+            } catch {
+              /* ignore */
+            }
+            if (ctx.state !== "closed") void ctx.close().catch(() => {});
+          }, 5000);
+
+          currentSrc.onended = () => {
+            if (safetyClosed) return;
+            clearTimeout(safetyTimer);
+            try {
+              gain?.disconnect();
+            } catch {
+              /* ignore */
+            }
+            if (ctx.state !== "closed") void ctx.close().catch(() => {});
+          };
+          // Do NOT stop the source — let it ring out; onended fires naturally.
+        } else {
+          // No source ringing — stop/disconnect current source and let shared
+          // teardown close the ctx normally.
+          if (currentSrc) {
+            try {
+              currentSrc.stop();
+            } catch {
+              /* ignore */
+            }
+            try {
+              currentSrc.disconnect();
+            } catch {
+              /* ignore */
+            }
+          }
+          session.currentSource = null;
+          session.currentPlayingIdx = null;
+        }
+      }
       try {
         if (session.remoteAudio) {
           session.remoteAudio.pause();
@@ -516,8 +640,8 @@ export class ContentApp {
     }
     this.overlay.removeOverlay();
     sm.emitState({ running: false, paused: false, status: "Stopped" });
-    if (_reason !== "backend-stop") {
-      sm.emitEnded(_reason === "user-stop" ? "Stopped" : _reason);
+    if (reason !== STOP_REASON.BACKEND_STOP) {
+      sm.emitEnded(STOP_REASON_MESSAGE[reason]);
     }
   }
 
@@ -548,7 +672,14 @@ export class ContentApp {
       ("standardVoice" in newSettings &&
         newSettings.standardVoice !== prev.standardVoice);
     if (langOrVoiceChanged && sm.session) {
-      void this.webrtc.requestHandover(newSettings);
+      if (isSubtitleFirstSession(sm.session)) {
+        sm.settings = { ...sm.settings!, ...newSettings } as StartSettings;
+        sm.notifyBackground({ type: "UPDATE_SETTINGS", settings: newSettings });
+        overlay.setStatusText("Switching language/voice on next lines");
+        overlay.setOverlayState("live");
+      } else {
+        void this.webrtc.requestHandover(newSettings);
+      }
     }
     if ("originalVolume" in newSettings || "voiceVolume" in newSettings) {
       this.capture.applyVolumes(
@@ -601,15 +732,15 @@ export class ContentApp {
       if (location.href !== this.lastSpaUrl) {
         this.lastSpaUrl = location.href;
         if (this.sm.session) {
-          this.stopSession("yt-navigation");
-          this.sm.emitEnded("YouTube navigated.");
+          // stopSession emits STOP_REASON_MESSAGE[YT_NAVIGATION].
+          this.stopSession(STOP_REASON.YT_NAVIGATION);
         }
       }
     }, 500);
   }
 
   handleUnload(): void {
-    this.stopSession("unload");
+    this.stopSession(STOP_REASON.UNLOAD);
   }
 }
 
@@ -657,7 +788,7 @@ export function initContent(): void {
             sendResponse(await app.startSession(msg.settings));
             break;
           case "CONTENT_STOP":
-            app.stopSession("backend-stop");
+            app.stopSession(STOP_REASON.BACKEND_STOP);
             sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_STOP"]);
             break;
           case "CONTENT_UPDATE_SETTINGS":

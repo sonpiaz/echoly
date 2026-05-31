@@ -130,20 +130,20 @@ export async function runRealtimeVoiceOnYouTube(
 }
 
 export async function stopTranslationOnYouTube(yt: Page, popup: Page): Promise<void> {
-  await test.step("Stop: overlay Stop → nút về Start translating", async () => {
+  await test.step("Stop: overlay Stop → nút về Start dubbing", async () => {
     await yt.bringToFront();
     await yt.locator("aside.ec-root [data-ec-stop]").click({ timeout: 8_000 });
     await expect(yt.locator("aside.ec-root")).toHaveCount(0, { timeout: 25_000 });
     if (!popup.isClosed()) {
       await popup.bringToFront();
-      await expect(popup.locator("#actionLabel")).toContainText(/start translating/i, {
+      await expect(popup.locator("#actionLabel")).toContainText(/start dubbing/i, {
         timeout: 25_000,
       });
       await expect(popup.locator("#toggle")).not.toHaveClass(/is-live/, { timeout: 25_000 });
       await expect(popup.locator("body")).toHaveAttribute("data-state", "idle", {
         timeout: 25_000,
       });
-      e2eLog('✓ PASS — Stop OK: nút về "Start translating", overlay đã tắt');
+      e2eLog('✓ PASS — Stop OK: nút về "Start dubbing", overlay đã tắt');
     } else {
       e2eLog("✓ PASS — Stop OK: overlay tắt (popup bubble đã đóng)");
     }

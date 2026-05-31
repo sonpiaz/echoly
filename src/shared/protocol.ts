@@ -109,7 +109,20 @@ export type ContentToBgMessage =
       cap_minutes?: number;
       resets_at?: string;
     }
-  | { type: "UPDATE_SETTINGS"; settings: Partial<Settings> };
+  | { type: "UPDATE_SETTINGS"; settings: Partial<Settings> }
+  | { type: "GET_YT_CC_URL"; videoId: string };
+
+export type YtCcUrlResult =
+  | {
+      ok: true;
+      url: string;
+      lang: string | null;
+      kind: string | null;
+      tlang: string | null;
+      isAsr: boolean;
+      capturedAt: number;
+    }
+  | { ok: false };
 
 export interface ContentToBgResponse {
   CONTENT_STATE: Ok;
@@ -117,6 +130,7 @@ export interface ContentToBgResponse {
   CONTENT_STOP_REQUEST: Ok;
   CONTENT_QUOTA: Ok;
   UPDATE_SETTINGS: Ok;
+  GET_YT_CC_URL: YtCcUrlResult;
 }
 
 // ───── Convenience: everything the background onMessage listener can receive ─
@@ -155,6 +169,13 @@ export function relayToContent<T extends BgToContentMessage["type"]>(
 /** Fire-and-forget send over chrome.runtime (broadcast to popup, or content's
  *  notifyBackground). Errors are swallowed.
  *  Returns false if the runtime handle is already gone (SW/page torn down). */
+/** Callback-style request from content (GET_YT_CC_URL). */
+export function sendFromContent<T extends "GET_YT_CC_URL">(
+  message: Extract<ContentToBgMessage, { type: T }>,
+): Promise<ContentToBgResponse[T]> {
+  return chrome.runtime.sendMessage(message) as Promise<ContentToBgResponse[T]>;
+}
+
 export function post(message: BgToPopupMessage | ContentToBgMessage): boolean {
   try {
     if (!chrome.runtime?.id) return false;

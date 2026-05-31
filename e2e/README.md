@@ -25,7 +25,7 @@ Headed: `chrome.action.openPopup` when available; else `popup.html` tab + YouTub
 
 Every voice step:
 
-1. Assert nút idle: `#actionLabel` = **Start translating**, `body[data-state=idle]`
+1. Assert nút idle: `#actionLabel` = **Start dubbing**, `body[data-state=idle]`
 2. **DOM click** `#toggle` (via `evaluate` — YouTube tab stays active, không steal focus như Playwright `.click()`)
 3. Assert nút live: **Stop translating**, `.is-live`, `data-state` = connecting|active|paused
 4. Headed: popup được `bringToFront` ~2.5s (`PW_HOLD_POPUP_MS`) để bạn **nhìn thấy nút đổi**

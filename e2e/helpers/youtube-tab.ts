@@ -15,7 +15,7 @@ export async function expectStartButtonIdle(popup: Page): Promise<void> {
   await expect(popup.locator("body")).toHaveAttribute("data-state", "idle", {
     timeout: 20_000,
   });
-  await expect(popup.locator("#actionLabel")).toHaveText(/start translating/i);
+  await expect(popup.locator("#actionLabel")).toHaveText(/start dubbing/i);
   await expect(popup.locator("#toggle")).not.toHaveClass(/is-live/);
 }
 

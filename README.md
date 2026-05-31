@@ -1,8 +1,10 @@
-# Echoly — Live YouTube Translation (Chrome MV3 extension)
+# Echoly — AI voice dubbing for video (Chrome MV3 extension)
 
-Hear any YouTube video in your language. Live AI dubbing with a draggable in-page
-overlay. Two tiers: **Realtime** (low-latency WebRTC) and **Standard** (chunked
-STT→translate→TTS / subtitle-first). Sign in for subscription minutes.
+Voice-to-voice AI dubbing and translation on any site with a video player (YouTube,
+courses, and more). Draggable in-page overlay with dubbed audio and optional captions.
+
+Two tiers: **Realtime** (live voice-to-voice WebRTC, &lt;1s, Max) and **Standard**
+(voice dub ~5s; on YouTube VOD uses captions when available). Sign in for subscription minutes.
 
 TypeScript + [WXT](https://wxt.dev). All provider traffic goes through the Echoly
 server (`ec_session`); no BYOK.

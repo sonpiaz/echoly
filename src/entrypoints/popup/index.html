@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Echoly</title>
+<title>Echoly — Voice dubbing</title>
 <link rel="stylesheet" href="./style.css" />
 </head>
 <body data-state="idle" data-account="loading" data-loading-shell="main">
@@ -27,8 +27,8 @@
     <div class="welcome-hero-icon" aria-hidden="true">
       <img src="icons/icon-128.png" width="36" height="36" alt="" />
     </div>
-    <h2 class="welcome-title">Real-time voice<br>translation for any video</h2>
-    <p class="welcome-tag">Clone the speaker's voice into your language while they keep talking. &lt;1s latency.</p>
+    <h2 class="welcome-title">AI voice dubbing<br>for video on any site</h2>
+    <p class="welcome-tag">Hear videos dubbed in your language — voice-to-voice on any site with a player. Captions on YouTube when available. Realtime &lt;1s (Max) or Standard (~5s).</p>
   </div>
 
   <div class="welcome-cta">
@@ -68,7 +68,7 @@
       <img class="mark" src="icons/icon-48.png" width="30" height="30" alt="" />
       <div class="brand-text">
         <h1>echoly</h1>
-        <span class="brand-sub">Live translation</span>
+        <span class="brand-sub">Voice dubbing &amp; translation</span>
       </div>
     </div>
     <div class="header-actions">
@@ -94,7 +94,7 @@
         </svg>
       </div>
       <div class="locked-cta-text">
-        <div class="locked-cta-title">Sign in to start translating</div>
+        <div class="locked-cta-title">Sign in to start dubbing</div>
         <div class="locked-cta-sub">Your language and tier choices are saved on this device until you sign in.</div>
       </div>
     </div>
@@ -131,7 +131,7 @@
     <section class="session-card idle-only">
       <!-- Translating row -->
       <div class="session-row session-row--trans">
-        <span class="label">Translating</span>
+        <span class="label">Dubbing to</span>
         <div class="trans-grid">
           <div class="lang-side">
             <span class="flag-chip flag-chip--auto" id="src-flag">??</span>
@@ -164,7 +164,7 @@
               <svg viewBox="0 0 12 12"><path d="M2 8.2c1.4-2.8 3.2-4.2 4-4.2s2.6 1.4 4 4.2" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M3.2 9.4h5.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             </span>
             <span class="row-primary" id="tier-primary">Standard</span>
-            <span class="row-secondary" id="tier-secondary">· ~5s lag · cheaper</span>
+            <span class="row-secondary" id="tier-secondary">· AI voice dub · ~5s</span>
           </div>
         </div>
         <svg class="row-chev" viewBox="0 0 12 12" aria-hidden="true">
@@ -172,8 +172,8 @@
         </svg>
         <!-- option value= must match TIER_REALTIME / TIER_STANDARD (shared/constants.ts) -->
         <select id="tier" class="dropdown-mirror-select" aria-label="Tier">
-          <option value="standard" selected>Standard · ~5s lag · cheaper</option>
-          <option value="realtime">Realtime · &lt;1s · Max only</option>
+          <option value="standard" selected>Standard · voice dub · ~5s · Pro/Free</option>
+          <option value="realtime">Realtime · live dub · &lt;1s · Max</option>
         </select>
       </div>
       <div class="divider"></div>
@@ -209,7 +209,7 @@
         <i></i><i></i><i></i><i></i><i></i><i></i>
       </span>
     </section>
-    <div class="live-note live-only">Translation shows on the video →</div>
+    <div class="live-note live-only">Dub and captions show on the page →</div>
     <section class="live-stats live-only">
       <div class="stat-card">
         <div class="stat-value" id="elapsed">00:00</div>
@@ -229,7 +229,7 @@
     <button class="action signedin-only" id="toggle">
       <svg class="ico ico-play" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1.5v7l6 -3.5z" fill="currentColor"/></svg>
       <svg class="ico ico-stop" viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="2" width="6" height="6" fill="currentColor"/></svg>
-      <span class="action-label" id="actionLabel">Start translating</span>
+      <span class="action-label" id="actionLabel">Start dubbing</span>
     </button>
 
     <!-- Usage hint row (signed-in only, idle only) -->

@@ -2,12 +2,24 @@
 
 import type { OverlayCallbacks } from "@/shared/ports";
 import { post } from "@/shared/protocol";
+import { isSubtitleFirstSession } from "./session-manager";
+import { STOP_REASON } from "./stop-reasons";
 import type { ContentApp } from "./index";
 
 export function createController(app: ContentApp): OverlayCallbacks {
   const { sm, overlay } = app;
   return {
     onLanguageChange(lang: string): void {
+      if (isSubtitleFirstSession(sm.session) && sm.settings) {
+        sm.settings = { ...sm.settings, targetLanguage: lang };
+        sm.notifyBackground({
+          type: "UPDATE_SETTINGS",
+          settings: { targetLanguage: lang },
+        });
+        overlay.setStatusText("Switching to " + lang);
+        overlay.setOverlayState("live");
+        return;
+      }
       void app.webrtc.requestHandover({ targetLanguage: lang });
     },
     onVoiceChange(voiceId: string): void {
@@ -15,6 +27,13 @@ export function createController(app: ContentApp): OverlayCallbacks {
         sm.settings?.tier === "standard"
           ? { standardVoice: voiceId }
           : { realtimeVoice: voiceId };
+      if (isSubtitleFirstSession(sm.session) && sm.settings) {
+        sm.settings = { ...sm.settings, ...patch };
+        sm.notifyBackground({ type: "UPDATE_SETTINGS", settings: patch });
+        overlay.setStatusText("Switching voice");
+        overlay.setOverlayState("live");
+        return;
+      }
       void app.webrtc.requestHandover(patch);
     },
     onTargetCaptionVisibilityChange(show: boolean): void {
@@ -41,7 +60,7 @@ export function createController(app: ContentApp): OverlayCallbacks {
       app.capture.applyVolumes(originalVolume, voiceVolume);
     },
     onStop(): void {
-      app.stopSession("user-stop");
+      app.stopSession(STOP_REASON.USER_STOP);
       post({ type: "CONTENT_STOP_REQUEST" });
     },
   };

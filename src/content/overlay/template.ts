@@ -53,7 +53,7 @@ export const OVERLAY_TEMPLATE = `
         <span class="ec-dock-sync" data-ec-sync-hint hidden aria-live="polite"></span>
         <button class="ec-dock-caption" type="button" data-ec-caption-toggle aria-pressed="true" aria-label="Subtitles on video" title="Subtitles on/off">CC</button>
         <button class="ec-dock-expand" type="button" data-ec-expand aria-label="Expand controls" title="Expand">⋯</button>
-        <button class="ec-dock-stop" type="button" data-ec-stop aria-label="Stop translation" title="Stop"></button>
+        <button class="ec-dock-stop" type="button" data-ec-stop aria-label="Stop dubbing" title="Stop dubbing"></button>
       </div>
       <div class="ec-panel" data-ec-panel hidden>
         <div class="ec-panel-head" data-ec-panel-drag>
@@ -127,7 +127,10 @@ export const OVERLAY_TEMPLATE = `
           </div>
         </div>
       </div>
-      <div class="ec-caption" data-ec-target></div>
+      <div class="ec-caption-stack" data-ec-cap-stack>
+        <div class="ec-cap-src" data-ec-cap-src hidden><span data-ec-cap-src-text></span></div>
+        <div class="ec-caption ec-cap-tgt" data-ec-target></div>
+      </div>
     `;
 
 export function isCompact(_w: number, _h: number): boolean {

@@ -80,3 +80,22 @@ export function findYouTubeWatchTab<T extends TabLike>(tabs: T[]): T | null {
     (t.index ?? 0) > (best.index ?? 0) ? t : best,
   );
 }
+
+/**
+ * Tab to inject content + START on: active web page, else YouTube watch, else
+ * the most recently focused web tab (Coursera, Udemy, etc.).
+ */
+export function findSessionStartTab<T extends TabLike>(tabs: T[]): T | null {
+  if (!tabs.length) return null;
+  const active = tabs.find((t) => t.active);
+  if (active && domainFromTabUrl(active.url)) return active;
+  const yt = findYouTubeWatchTab(tabs);
+  if (yt) return yt;
+  const web = tabs
+    .map((t) => ({ tab: t, domain: domainFromTabUrl(t.url) }))
+    .filter((x): x is { tab: T; domain: string } => x.domain != null);
+  if (!web.length) return null;
+  return web.reduce((best, x) =>
+    (x.tab.index ?? 0) > (best.tab.index ?? 0) ? x : best,
+  ).tab;
+}

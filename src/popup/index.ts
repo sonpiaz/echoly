@@ -550,13 +550,13 @@ export function initPopup(): void {
     if (state.connecting) {
       setStateClass("connecting");
       statusEl.textContent = state.status || "Connecting";
-      setActionLabel("Stop translating");
+      setActionLabel("Stop dubbing");
       toggleBtn.classList.add("is-live");
       updateLiveSummary();
     } else if (state.running && state.paused) {
       setStateClass("paused");
       statusEl.textContent = "Paused.";
-      setActionLabel("Stop translating");
+      setActionLabel("Stop dubbing");
       toggleBtn.classList.add("is-live");
     } else if (state.running) {
       setStateClass("active");
@@ -564,25 +564,26 @@ export function initPopup(): void {
         state.targetLanguage ?? "",
         state.languageNames,
       );
-      statusEl.textContent = `Translating to ${langName}.`;
-      setActionLabel("Stop translating");
+      statusEl.textContent = `Dubbing to ${langName}.`;
+      setActionLabel("Stop dubbing");
       toggleBtn.classList.add("is-live");
     } else if (state.errorMessage) {
       setStateClass("error");
       statusEl.textContent = state.errorMessage;
-      setActionLabel("Start translating");
+      setActionLabel("Start dubbing");
       toggleBtn.classList.remove("is-live");
     } else {
       setStateClass("idle");
       if (acct === "in") statusEl.textContent = "Ready.";
       else if (acct === "locked") statusEl.textContent = "Signed out · settings read-only";
       else statusEl.textContent = "Sign in to start";
-      setActionLabel("Start translating");
+      setActionLabel("Start dubbing");
       toggleBtn.classList.remove("is-live");
     }
 
     updateLiveSummary();
-    if (state.running || state.connecting) startElapsedTimer();
+    // Freeze the elapsed clock while paused so the popup reflects the paused state.
+    if ((state.running || state.connecting) && !state.paused) startElapsedTimer();
     else stopElapsedTimer();
 
     toggleBtn.disabled = false;

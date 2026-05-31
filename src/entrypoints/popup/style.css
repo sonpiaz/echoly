@@ -423,7 +423,7 @@ body[data-state="paused"]     .brand-sub { display: none; }
               0 4px 12px -4px rgba(139, 91, 255, 0.5);
 }
 
-/* ── Locked CTA card (sign-in to start translating) ────────────────────── */
+/* ── Locked CTA card (sign-in to start dubbing) ────────────────────────── */
 .locked-cta {
   margin-top: 4px;
   flex-direction: column;

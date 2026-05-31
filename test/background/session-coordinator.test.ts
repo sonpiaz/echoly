@@ -110,14 +110,24 @@ describe("start — signed-in proxy", () => {
     expect(r).toEqual({ ok: false, error: "Session already running." });
   });
 
-  it("aborts when not on a YouTube tab", async () => {
+  it("starts on active non-YouTube web tab", async () => {
     chromeMock.tabs.query.mockResolvedValue([
-      { id: 9, url: "https://example.com/" },
+      { active: true, id: 9, url: "https://www.coursera.org/learn/foo" },
+    ]);
+    await store.loadSettings();
+    const r = await session.start();
+    expect(r.ok).toBe(true);
+    expect(store.state.tabId).toBe(9);
+  });
+
+  it("aborts when no web tab is available", async () => {
+    chromeMock.tabs.query.mockResolvedValue([
+      { id: 9, url: "chrome://settings/" },
     ]);
     await store.loadSettings();
     const r = await session.start();
     expect(r.ok).toBe(false);
-    expect(r).toMatchObject({ error: "Open a YouTube video first." });
+    if (!r.ok) expect(r.error).toMatch(/video/i);
   });
 });
 

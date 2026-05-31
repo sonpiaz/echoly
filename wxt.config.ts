@@ -1,4 +1,9 @@
 import { defineConfig } from "wxt";
+import {
+  PRODUCT_ACTION_TITLE,
+  PRODUCT_DESCRIPTION,
+  PRODUCT_NAME,
+} from "./src/shared/product-copy";
 
 /** Host permission for a build-time API/web origin (see .env.development / .env.production). */
 function hostPermForOrigin(origin: string): string {
@@ -35,10 +40,9 @@ export default defineConfig({
   manifest: (env) => {
     const mode = env?.mode;
     return {
-    name: "Echoly — Live YouTube Translation",
+    name: PRODUCT_NAME,
     short_name: "Echoly",
-    description:
-      "Hear any YouTube video in your language. Live AI dubbing, 40+ language pairs. Sign in for free and paid plans.",
+    description: PRODUCT_DESCRIPTION,
     minimum_chrome_version: "116",
     permissions: ["activeTab", "scripting", "storage", "webRequest", "cookies"],
     host_permissions: [
@@ -73,7 +77,7 @@ export default defineConfig({
       "128": "icons/icon-128.png",
     },
     action: {
-      default_title: "Echoly",
+      default_title: PRODUCT_ACTION_TITLE,
       default_icon: {
         "16": "icons/icon-16.png",
         "32": "icons/icon-32.png",

@@ -76,13 +76,13 @@ export interface TierUiCopy {
 export const TIER_UI: Readonly<Record<TranslationTier, TierUiCopy>> = {
   [TIER_STANDARD]: {
     primary: "Standard",
-    secondary: "· ~5s lag · cheaper",
-    optionLabel: "Standard · ~5s lag · cheaper",
+    secondary: "· AI voice dub · ~5s",
+    optionLabel: "Standard · voice dub · ~5s · Pro/Free",
   },
   [TIER_REALTIME]: {
     primary: "Realtime",
-    secondary: "· <1s · Max only",
-    optionLabel: "Realtime · <1s · Max only",
+    secondary: "· live voice-to-voice · <1s",
+    optionLabel: "Realtime · live dub · <1s · Max",
   },
 };
 

@@ -27,12 +27,39 @@ interface BaseSession {
 export type WebRtcSignalingPipeline = "realtime" | "standard";
 
 export interface WebRtcSession extends BaseSession {
+  kind?: "webrtc";
   pipeline: WebRtcSignalingPipeline;
   targetLanguage: string;
   voice: string;
 }
 
-export type Session = WebRtcSession;
+export interface SubtitleFirstSession extends BaseSession {
+  kind: "subtitle-first";
+  abortController: AbortController;
+  sentences: import("@/lib/youtube-captions").CaptionSentence[];
+  translations: string[];
+  /** The currently-playing (or last-started) AudioBufferSourceNode. */
+  currentSource: AudioBufferSourceNode | null;
+  /** Index in sentences[] that currentSource was started for. */
+  currentPlayingIdx: number | null;
+  /** Handle for the 250ms playback-tick interval — cleared on stop. */
+  playbackTimer: ReturnType<typeof setInterval> | null;
+  renderCursor: number;
+  /** Prevents overlapping rolling-tick work (duplicate renderBatch). */
+  rollingInFlight: boolean;
+  stopFlag: boolean;
+  _onSeeked?: () => void;
+}
+
+export type Session = WebRtcSession | SubtitleFirstSession;
+
+export function isSubtitleFirstSession(s: Session | null): s is SubtitleFirstSession {
+  return s != null && s.kind === "subtitle-first";
+}
+
+export function isWebRtcSession(s: Session | null): s is WebRtcSession {
+  return s != null && s.kind !== "subtitle-first";
+}
 
 export type LiveSettings = StartSettings;
 
