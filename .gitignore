@@ -22,3 +22,4 @@ playwright-report/
 
 # Understand-Anything knowledge graph (giữ local, không commit)
 .understand-anything/
+.vscode/
