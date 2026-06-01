@@ -15,7 +15,7 @@ One **serial** browser session — no per-test relaunch (was ~45s overhead × N)
 Optional (separate files):
 
 - `api-contract.spec.ts` — bootstrap vs catalog (no browser)
-- `signin-magic-link.spec.ts` — web magic-link (needs `:4321`)
+- `signin-login-code.spec.ts` — web login-code OTP (needs `:4321`; skipped unless `ECHOLY_E2E_CODE` or `ECHOLY_E2E_DEV_ENDPOINT=true` is set)
 - `youtube-voice-chunked.spec.ts` — chunked path (`PW_YOUTUBE_CHUNKED_URL`)
 
 ## Env

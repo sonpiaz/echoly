@@ -55,6 +55,27 @@ export const ECHOLY_WEB_URLS = {
   terms: () => webUrl(ECHOLY_WEB_PATHS.terms),
 } as const;
 
+/**
+ * True if `url` is the Echoly web authenticated landing page (`/account` on the
+ * configured web origin). The signin tab redirects here once a session exists —
+ * via the already-signed-in pre-check OR a fresh login-code success — so it is
+ * the universal "signed in" signal the background watches. Exact origin +
+ * pathname match (NOT startsWith) so `/accountsettings` or a look-alike origin
+ * like `echolyhq.com.evil.com` never matches.
+ */
+export function isEcholyAuthedLandingUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return (
+      u.origin === new URL(ECHOLY_WEB_ORIGIN).origin &&
+      u.pathname === ECHOLY_WEB_PATHS.account
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Hostname for user-facing copy, e.g. "Sign in at echolyhq.com …". */
 export function echolyWebHostLabel(): string {
   try {

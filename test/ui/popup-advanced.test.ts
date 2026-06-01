@@ -330,3 +330,79 @@ describe("popup Advanced section — save-for-site gating", () => {
     expect(cb!.disabled).toBe(true);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Realtime tier lock — Realtime is Max-only; Free/Pro/signed-out must NOT be
+// able to select it in the tier dropdown. (SOLUTION ext-overlay-tier-fixes AC2.)
+// ────────────────────────────────────────────────────────────────────────────
+describe("popup tier dropdown — Realtime locked for non-Max", () => {
+  let stateForReply: State;
+
+  function installChromeMock() {
+    const fakeChrome = (globalThis as { chrome?: unknown }).chrome as {
+      runtime: {
+        sendMessage: ReturnType<typeof vi.fn>;
+        getManifest?: () => { version: string };
+      };
+    };
+    fakeChrome.runtime.getManifest = () => ({ version: "0.0.0-test" });
+    fakeChrome.runtime.sendMessage = vi.fn(async (msg: SentMessage) => {
+      if (msg.type === "GET_STATE") return { ok: true, state: stateForReply };
+      if (msg.type === "LIST_AUDIO_OUTPUT_DEVICES") return { ok: true, devices: [] };
+      return { ok: true, state: stateForReply };
+    });
+  }
+
+  beforeEach(() => {
+    document.documentElement.innerHTML = FIXTURE_HTML;
+    document.body.dataset.state = "idle";
+  });
+  afterEach(() => {
+    document.documentElement.innerHTML = "";
+  });
+
+  /** Boot the popup for a given account plan + selected tier, then open the
+   *  tier dropdown and return the rendered Realtime option element. */
+  async function bootAndOpenTier(
+    plan: "free" | "pro" | "max",
+    tier = TIER_STANDARD,
+  ): Promise<{ realtimeOpt: HTMLElement | null; tierSelect: HTMLSelectElement }> {
+    stateForReply = makeState({ signedInUser: { email: "u@e.com", tier: plan }, tier });
+    installChromeMock();
+    initPopup();
+    await flush();
+    const trigger = document.querySelector<HTMLElement>("#tier-trigger");
+    // The custom dropdown opens on the trigger's mousedown (not click).
+    trigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await flush();
+    const realtimeOpt = document.querySelector<HTMLElement>(
+      `.dropdown-option[data-value="${TIER_REALTIME}"]`,
+    );
+    const tierSelect = document.querySelector<HTMLSelectElement>("#tier")!;
+    return { realtimeOpt, tierSelect };
+  }
+
+  for (const plan of ["free", "pro"] as const) {
+    it(`${plan}: Realtime option is disabled (aria-disabled + .is-disabled) and not selectable`, async () => {
+      const { realtimeOpt, tierSelect } = await bootAndOpenTier(plan);
+      expect(realtimeOpt).not.toBeNull();
+      expect(realtimeOpt!.getAttribute("aria-disabled")).toBe("true");
+      expect(realtimeOpt!.classList.contains("is-disabled")).toBe(true);
+
+      // Picking the disabled option (mousedown) must NOT switch tier to realtime.
+      realtimeOpt!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      await flush();
+      expect(tierSelect.value).toBe(TIER_STANDARD);
+    });
+  }
+
+  it("max: Realtime option is enabled (not locked)", async () => {
+    // The gating contract is plan→disabled; the disabled flag drives dropdown.ts's
+    // already-tested pick() guard. Here we assert the flag differs by plan: a Max
+    // account's Realtime option is NOT disabled (so it remains selectable).
+    const { realtimeOpt } = await bootAndOpenTier("max");
+    expect(realtimeOpt).not.toBeNull();
+    expect(realtimeOpt!.getAttribute("aria-disabled")).not.toBe("true");
+    expect(realtimeOpt!.classList.contains("is-disabled")).toBe(false);
+  });
+});

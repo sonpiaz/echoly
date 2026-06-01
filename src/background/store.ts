@@ -10,7 +10,8 @@
 // self-heals because every explicit send() reply also carries state).
 // ────────────────────────────────────────────────────────────────────────────
 
-import { BROADCAST_DEBOUNCE_MS } from "@/shared/constants";
+import { BROADCAST_DEBOUNCE_MS, TIER_REALTIME, TIER_STANDARD } from "@/shared/constants";
+import { canUseRealtime } from "@/shared/tier";
 import { markHasEverSignedIn } from "@/shared/storage-keys";
 import { post } from "@/shared/protocol";
 import type {
@@ -238,6 +239,19 @@ export class Store {
     this.state.apiMode = deriveApiModeLabel(bootstrap.user);
     this.state.apiBearer = "";
     await markHasEverSignedIn();
+    await this.normalizeRealtimeTier();
+  }
+
+  /** A non-Max account can't use the realtime tier. Coerce a stale/persisted
+   *  realtime selection (e.g. a since-downgraded Max user) back to standard AND
+   *  persist it, so it doesn't resurrect on the next cold load. Idempotent. */
+  private async normalizeRealtimeTier(): Promise<void> {
+    if (
+      this.state.tier === TIER_REALTIME &&
+      !canUseRealtime(this.state.signedInUser?.tier)
+    ) {
+      await this.persistSettings({ tier: TIER_STANDARD });
+    }
   }
 
   /** Clear user-specific snapshot fields (signed-out or bootstrap failure). */

@@ -14,7 +14,7 @@ import { ECHOLY_WEB_URLS } from "@/shared/echoly-config";
 import type { Store } from "./store";
 import type { EcholyAuth } from "./auth";
 import type { SessionCoordinator } from "./session-coordinator";
-import { setSigninTabId } from "./auth-listener";
+import { setSigninTabId, getSigninTabId } from "./auth-listener";
 import { usagePatchFromServerError } from "@/lib/server-errors";
 import { getYtCaptionCache } from "@/platforms/youtube/caption-cache";
 import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
@@ -26,6 +26,11 @@ export interface RouterDeps {
   session: SessionCoordinator;
   settings?: SettingsClient;
 }
+
+/** Serializes concurrent OPEN_SIGNIN handlers (the popup has no disabled guard,
+ *  so a rapid double-click would otherwise open two tabs during the async
+ *  pre-check window). A second call while one is in flight is a no-op ack. */
+let openSigninInFlight = false;
 
 /** Apply content push events: CONTENT_STATE, CONTENT_ENDED, CONTENT_QUOTA, UPDATE_SETTINGS. */
 export function handleContentEvent(
@@ -105,11 +110,42 @@ async function handlePopupMessage(
       store.broadcast();
       return { ok: true, state: store.snapshot() };
     case "OPEN_SIGNIN": {
-      // Background owns the signin tab's lifecycle: open it, store the id, and
-      // the cookie-listener closes it after the magic-link callback succeeds.
-      // Surface chrome.tabs.create errors (do NOT swallow) so the popup can
-      // fall back to instructing the user to open the URL manually.
+      // Background owns the signin tab's lifecycle. Before opening a tab we check
+      // whether a session already exists (the web may already be signed in — the
+      // extension shares the same ec_session cookie), so the user is never asked
+      // to sign in twice. Only when truly signed out do we open (or focus an
+      // existing) signin tab; the cookie-listener / onUpdated→/account watcher
+      // then closes it once a session lands.
+      if (openSigninInFlight) return { ok: true }; // a concurrent open is running
+      openSigninInFlight = true;
       try {
+        // 1. Store already warm with a user → nothing to do but re-broadcast.
+        if (store.state.signedInUser) {
+          store.broadcast();
+          return { ok: true };
+        }
+        // 2. Cold store but a shared session cookie may exist (signed in on web,
+        //    or SW just woke). Read it; if present, hydrate and skip the tab.
+        const token = await auth.getSessionToken();
+        if (token) {
+          await hydrateSignedIn(store, deps.settings);
+          if (store.state.signedInUser) return { ok: true };
+        }
+        // 3. Genuinely signed out. Reuse/focus an existing signin tab if one is
+        //    still open (dedup), else open a new one.
+        const existing = getSigninTabId();
+        if (existing != null) {
+          try {
+            const tab = await chrome.tabs.get(existing);
+            await chrome.tabs.update(existing, { active: true });
+            if (tab.windowId != null) {
+              await chrome.windows.update(tab.windowId, { focused: true });
+            }
+            return { ok: true };
+          } catch {
+            setSigninTabId(null); // tracked tab is gone — open a fresh one below
+          }
+        }
         const tab = await chrome.tabs.create({
           url: ECHOLY_WEB_URLS.signin(),
           active: true,
@@ -117,8 +153,12 @@ async function handlePopupMessage(
         setSigninTabId(tab.id ?? null);
         return { ok: true };
       } catch (err) {
+        // Surface tabs.create errors so the popup can fall back to instructing
+        // the user to open the URL manually.
         const error = err instanceof Error ? err.message : String(err);
         return { ok: false, error };
+      } finally {
+        openSigninInFlight = false;
       }
     }
     case "START":

@@ -1,11 +1,19 @@
 /* Echoly V5 in-page overlay — glass mini dock + bottom caption strip */
 
-/* Full-viewport host only — do NOT use contain:paint here: dock/caption are
-   position:fixed and out of flow, so the root has 0×0 in-flow size; paint
-   containment clips fixed descendants to nothing on YouTube. */
+/* ZERO-SIZE host. The host MUST NOT be a full-viewport box: every child
+   (.ec-dock / .ec-panel / .ec-caption-stack / toast) is position:fixed and
+   JS-anchored to the video rect, so the root needs no size. A full-viewport
+   `inset:0` fixed root with backdrop-filter children promotes a full-screen
+   compositor surface on YouTube → a dark scrim over the whole page on Start.
+   Collapsing to 0×0 removes that surface; fixed children are viewport-anchored
+   (root has no transform/filter/contain → it is NOT their containing block).
+   Also: do NOT use contain:paint here — it would clip the fixed descendants. */
 .ec-root {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
   z-index: 2147483600;
   margin: 0;
   padding: 0;

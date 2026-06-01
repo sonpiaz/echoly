@@ -32,6 +32,7 @@ import {
 } from "@/shared/protocol";
 import type { State } from "@/shared/types";
 import { siteDisplayLabel } from "@/shared/active-site";
+import { canUseRealtime } from "@/shared/tier";
 import {
   DEFAULT_ADVANCED,
   effectiveAdvanced,
@@ -308,7 +309,7 @@ export function initPopup(): void {
     el.style.background = `linear-gradient(135deg, ${m.swatch}, ${shade(m.swatch, -18)})`;
   }
   function accountAllowsRealtime(): boolean {
-    return state.signedInUser?.tier === "max";
+    return canUseRealtime(state.signedInUser?.tier);
   }
 
   /** Signed-in user picked Realtime but plan is Free/Pro — Start stays off. */
@@ -815,6 +816,10 @@ export function initPopup(): void {
         primary: TIER_UI[TIER_REALTIME].primary,
         secondary: allow ? TIER_UI[TIER_REALTIME].secondary : TIER_REALTIME_GATED_SECONDARY,
         iconHtml: tierIconHtml(TIER_REALTIME),
+        // Max-only: lock the option for Free/Pro (and signed-out) so it can't be
+        // selected — dropdown renders aria-disabled + .is-disabled and pick() is
+        // a no-op. The gated "· Max plan" secondary above is the upsell hint.
+        disabled: !allow,
       },
     ];
   }

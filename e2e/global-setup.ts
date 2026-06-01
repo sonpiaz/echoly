@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { assertApiHealthy } from "./helpers/dev-token.ts";
-import { assertWebHealthy } from "./helpers/magic-link.ts";
+import { assertWebHealthy } from "./helpers/login-code.ts";
 import { assertExtensionBuild, extensionRoot } from "./helpers/paths.ts";
 
 export default async function globalSetup(): Promise<void> {

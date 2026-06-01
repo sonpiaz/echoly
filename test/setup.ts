@@ -44,9 +44,14 @@ export interface FakeChrome {
     sendMessage: ReturnType<typeof vi.fn>;
     query: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
     remove: ReturnType<typeof vi.fn>;
     onRemoved: FakeEvent;
     onUpdated: FakeEvent;
+  };
+  windows: {
+    update: ReturnType<typeof vi.fn>;
   };
   storage: {
     local: {
@@ -55,6 +60,12 @@ export interface FakeChrome {
       set: ReturnType<typeof vi.fn>;
       remove: ReturnType<typeof vi.fn>;
       setAccessLevel: ReturnType<typeof vi.fn>;
+    };
+    session: {
+      _data: Record<string, unknown>;
+      get: ReturnType<typeof vi.fn>;
+      set: ReturnType<typeof vi.fn>;
+      remove: ReturnType<typeof vi.fn>;
     };
   };
   scripting: {
@@ -83,9 +94,14 @@ export function makeChrome(): FakeChrome {
       sendMessage: vi.fn().mockResolvedValue({ ok: true }),
       query: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({ id: 1 }),
+      get: vi.fn().mockResolvedValue({ id: 1, windowId: 100 }),
+      update: vi.fn().mockResolvedValue(undefined),
       remove: vi.fn().mockResolvedValue(undefined),
       onRemoved: makeEvent(),
       onUpdated: makeEvent(),
+    },
+    windows: {
+      update: vi.fn().mockResolvedValue(undefined),
     },
     storage: {
       local: {
@@ -124,6 +140,31 @@ export function makeChrome(): FakeChrome {
         }),
         setAccessLevel: vi.fn().mockResolvedValue(undefined),
       },
+      session: (() => {
+        const sess: Record<string, unknown> = {};
+        return {
+          _data: sess,
+          get: vi.fn(async (keys?: string | string[] | Record<string, unknown> | null) => {
+            if (keys == null) return { ...sess };
+            if (typeof keys === "string") return keys in sess ? { [keys]: sess[keys] } : {};
+            if (Array.isArray(keys)) {
+              const out: Record<string, unknown> = {};
+              for (const k of keys) if (k in sess) out[k] = sess[k];
+              return out;
+            }
+            const out: Record<string, unknown> = { ...keys };
+            for (const k of Object.keys(keys)) if (k in sess) out[k] = sess[k];
+            return out;
+          }),
+          set: vi.fn(async (obj: Record<string, unknown>) => {
+            Object.assign(sess, obj);
+          }),
+          remove: vi.fn(async (keys: string | string[]) => {
+            const arr = typeof keys === "string" ? [keys] : keys;
+            for (const k of arr) delete sess[k];
+          }),
+        };
+      })(),
     },
     scripting: {
       executeScript: vi.fn().mockResolvedValue([]),
@@ -154,6 +195,13 @@ if (typeof globalThis.requestAnimationFrame !== "function") {
 }
 if (typeof globalThis.cancelAnimationFrame !== "function") {
   globalThis.cancelAnimationFrame = (id: number) => clearTimeout(id);
+}
+
+// jsdom doesn't implement scrollIntoView; the custom dropdown calls it on open
+// (setActive). No-op polyfill so popup interaction tests don't throw. Guarded so
+// it's a no-op in the node-env test files (where Element is undefined).
+if (typeof Element !== "undefined" && typeof Element.prototype.scrollIntoView !== "function") {
+  Element.prototype.scrollIntoView = function scrollIntoView(): void {};
 }
 
 beforeEach(() => {

@@ -1,6 +1,7 @@
 // Pure popup reducers — chrome-free, fully unit-tested (Layer A).
 
 import type { AccountTier } from "@/shared/types";
+import { canUseRealtime } from "@/shared/tier";
 
 export { capsForTier, capsForUsage, type TierCap } from "@/lib/tier-cap";
 
@@ -25,9 +26,9 @@ export function fillPercent(used: number, cap: number): number {
   return Math.min(100, (used / cap) * 100);
 }
 
-/** Realtime tier requires Max subscription. */
+/** Realtime tier requires Max subscription. Delegates to the shared SoT. */
 export function allowRealtime(userTier: AccountTier | undefined): boolean {
-  return userTier === "max";
+  return canUseRealtime(userTier);
 }
 
 export function tierBadge(

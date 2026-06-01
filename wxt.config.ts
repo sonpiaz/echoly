@@ -44,7 +44,10 @@ export default defineConfig({
     short_name: "Echoly",
     description: PRODUCT_DESCRIPTION,
     minimum_chrome_version: "116",
-    permissions: ["activeTab", "scripting", "storage", "webRequest", "cookies"],
+    // "tabs": explicit (was auto-injected from session-coordinator tabs.query) — the
+    // signin-tab focus/dedup + onUpdated/onRemoved auth handoff rely on it. No new
+    // install warning: it was already present in the built manifest.
+    permissions: ["activeTab", "scripting", "storage", "webRequest", "cookies", "tabs"],
     host_permissions: [
       "https://*.youtube.com/*",
       "https://youtube.com/*",
