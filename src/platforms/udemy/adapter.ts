@@ -260,6 +260,10 @@ export const udemyAdapter: PlatformAdapter = {
 
   // ─── Optional hooks ─────────────────────────────────────────────────────
 
+  getVideoTitle(): string | null {
+    return document.title?.trim() || null;
+  },
+
   /**
    * Hide Udemy's native caption element for the duration of the dub session.
    *

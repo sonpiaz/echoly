@@ -343,6 +343,10 @@ export const courseraAdapter: PlatformAdapter = {
       }
     };
   },
+
+  getVideoTitle(): string | null {
+    return document.title?.trim() || null;
+  },
 };
 
 // ─── Internal helpers (not exported) ─────────────────────────────────────────

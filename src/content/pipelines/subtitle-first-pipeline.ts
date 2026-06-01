@@ -22,6 +22,7 @@ import type { SubtitleFirstSession } from "../session-manager";
 import type { ContentApp } from "../index";
 import { TOAST_NO_CC_FALLBACK, TOAST_PRESS_PLAY } from "@/shared/product-copy";
 import { STOP_REASON, STOP_REASON_MESSAGE } from "../stop-reasons";
+import { currentSiteHost } from "@/shared/site-host";
 
 // Start a cue's dub up to this many seconds before its caption start.
 const SUBFIRST_DUE_AHEAD_SEC = 0.15;
@@ -168,6 +169,13 @@ export class SubtitleFirstPipeline {
       }
     }
 
+    // Capture video title once per session (title is stable per video).
+    // Encode here so every batch request simply passes the pre-encoded value.
+    const rawTitle = adapter.getVideoTitle?.() ?? null;
+    if (rawTitle) {
+      newSession.videoTitle = encodeURIComponent(rawTitle);
+    }
+
     const sentences = regroupToSentences(captionResult.captions);
     newSession.sentences = sentences;
     newSession.translations = new Array(sentences.length);
@@ -269,6 +277,7 @@ export class SubtitleFirstPipeline {
       const priorLines = s.translations
         .slice(Math.max(0, i - 4), i)
         .filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+      const siteHost = currentSiteHost() ?? undefined;
       const dubbed = await renderSubtitleDubBatch({
         apiBase: sm.apiBase,
         bearer: s.apiBearer,
@@ -278,7 +287,8 @@ export class SubtitleFirstPipeline {
         cueDurationsMs,
         priorLines,
         sessionId: `sf_${s.token}`,
-        siteHost: location.hostname,
+        siteHost,
+        videoTitle: s.videoTitle,
         signal: s.abortController.signal,
       });
       if (sm.session !== s || s.stopFlag) return;

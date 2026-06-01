@@ -7,6 +7,7 @@ import type { CaptionSentence } from "@/lib/caption-utils";
 const HDR_REQUEST_ID = "x-echoly-request-id";
 const HDR_SESSION_ID = "x-echoly-session-id";
 const HDR_SITE_HOST = "x-echoly-site-host";
+const HDR_VIDEO_TITLE = "x-echoly-video-title";
 
 function newRequestId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID()}`;
@@ -35,6 +36,8 @@ export async function renderSubtitleDubBatch(opts: {
   sessionId?: string;
   /** Watched site hostname (e.g. "youtube.com") — stored as site_host in usage_events. */
   siteHost?: string;
+  /** Video title URL-encoded by the caller — stored as video_title in usage_events. */
+  videoTitle?: string;
   signal?: AbortSignal;
 }): Promise<SubtitleDubBatchLine[]> {
   const lines = opts.sentences.map((s) => s.text);
@@ -46,6 +49,7 @@ export async function renderSubtitleDubBatch(opts: {
       [HDR_REQUEST_ID]: newRequestId("sf_dub"),
       ...(opts.sessionId ? { [HDR_SESSION_ID]: opts.sessionId } : {}),
       ...(opts.siteHost ? { [HDR_SITE_HOST]: opts.siteHost } : {}),
+      ...(opts.videoTitle ? { [HDR_VIDEO_TITLE]: opts.videoTitle } : {}),
     },
     body: JSON.stringify({
       lines,

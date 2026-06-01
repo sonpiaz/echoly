@@ -301,6 +301,8 @@ export class WebRtcPipeline {
     };
     const siteHost = currentSiteHost();
     if (siteHost) sdpHeaders["X-Echoly-Site-Host"] = siteHost;
+    const rawTitle = this.app.adapter.getVideoTitle?.() ?? null;
+    if (rawTitle) sdpHeaders["X-Echoly-Video-Title"] = encodeURIComponent(rawTitle);
 
     const sdpResp = await fetch(`${sm.apiBase}/rtc/translate?${qs}`, {
       method: "POST",

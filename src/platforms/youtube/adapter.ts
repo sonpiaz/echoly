@@ -5,7 +5,7 @@
 
 import type { PlatformAdapter, PlatformCapabilities, CaptionFetchResult } from "@/shared/platform-ports";
 import { getYouTubeVideoId } from "./captions";
-import { fetchYouTubeCaptions } from "./captions-fetch";
+import { fetchYouTubeCaptions, readPlayerResponseFromDom } from "./captions-fetch";
 import { installYoutubeCaptionCache } from "./caption-cache";
 import { isYouTubeAdPlaying } from "./ad-state";
 import { suppressYouTubeNativeCaptions } from "./native-captions";
@@ -101,5 +101,22 @@ export const youtubeAdapter: PlatformAdapter = {
 
   installBackgroundServices(): void {
     installYoutubeCaptionCache();
+  },
+
+  getVideoTitle(): string | null {
+    // Prefer structured player response — most reliable, no page-title suffix.
+    try {
+      const pr = readPlayerResponseFromDom();
+      const details = pr?.["videoDetails"] as Record<string, unknown> | undefined;
+      const title = details?.["title"];
+      if (typeof title === "string" && title.trim()) {
+        return title.trim();
+      }
+    } catch {
+      /* fall through */
+    }
+    // Fallback: document.title strips the trailing " - YouTube" suffix.
+    const raw = document.title ?? "";
+    return raw.replace(/\s*-\s*YouTube\s*$/i, "").trim() || null;
   },
 };

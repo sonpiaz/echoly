@@ -60,6 +60,12 @@ export interface SubtitleFirstSession extends BaseSession {
    * Used to enforce SUBFIRST_BUFFER_WAIT_MAX_MS so we never freeze forever.
    */
   _bufferWaitStartedAt?: number;
+  /**
+   * URL-encoded video title (`encodeURIComponent(title)`) captured at session
+   * start. Sent as `x-echoly-video-title` on every subtitle-dub batch request.
+   * `undefined` when the adapter returned no title.
+   */
+  videoTitle?: string;
 }
 
 export type Session = WebRtcSession | SubtitleFirstSession;

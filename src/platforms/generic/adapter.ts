@@ -106,4 +106,8 @@ export const genericAdapter: PlatformAdapter = {
     // Generic pages have no known live-caption DOM.
     return null;
   },
+
+  getVideoTitle(): string | null {
+    return document.title?.trim() || null;
+  },
 };

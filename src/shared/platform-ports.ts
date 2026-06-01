@@ -220,4 +220,20 @@ export interface PlatformAdapter {
    * this.
    */
   installBackgroundServices?(): void;
+
+  /**
+   * Return the title of the current video, or `null` when unavailable.
+   *
+   * Used to populate `x-echoly-video-title` on server requests so the usage
+   * dashboard can show a human-readable title instead of the site name.
+   *
+   * Default implementation: `document.title` (trimmed). Platform adapters
+   * should override this to use a more reliable source (e.g. YouTube's
+   * `ytInitialPlayerResponse.videoDetails.title`).
+   *
+   * Call at session start (after captions are fetched / the page is settled).
+   * The returned value must be short enough to URL-encode safely; the server
+   * clamps to 200 chars after `decodeURIComponent`.
+   */
+  getVideoTitle?(): string | null;
 }
