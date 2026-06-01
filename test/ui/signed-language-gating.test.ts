@@ -28,7 +28,7 @@ describe("applySignedLanguageGate", () => {
     expect(out.renderable).toHaveLength(2);
   });
 
-  it("auto-switches to first allowed when current is locked out", () => {
+  it("auto-switches to first available when current language is not in catalog", () => {
     const out = applySignedLanguageGate({ currentLang: "es", picker });
     expect(out.effectiveLang).toBe("vi");
     expect(out.autoSwitched).toBe(true);

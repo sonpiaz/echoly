@@ -1,5 +1,5 @@
 // Language catalog — server SoT (CLIENT-CACHE.md).
-// Signed-in: tier-filtered pairs come from GET /v1/session/bootstrap (parseCatalog).
+// Signed-in: pairs come from GET /v1/session/bootstrap (full catalog; not tier-gated).
 // Signed-out: GET /v1/config/language-pairs (HTTP cache) → offline bootstrap.
 // Mutations only: POST /v1/me/language-pairs/recent (recordLanguagePairRecent).
 

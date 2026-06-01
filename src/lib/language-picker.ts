@@ -1,5 +1,5 @@
 // Language picker helpers — build option lists from the server catalog and
-// gate the target <select> for signed-in users.
+// reflect the available pairs for signed-in users.
 
 import { offlineLanguagePicker } from "@/lib/offline-language-bootstrap";
 import {
@@ -18,7 +18,7 @@ export interface LanguageGateOutput {
   autoSwitched: boolean;
 }
 
-/** Unique target codes from tier-filtered directed pairs, sorted by display name. */
+/** Unique target codes from the available catalog pairs, sorted by display name. */
 export function langPickerFromPairs(
   pairs: readonly CatalogPair[],
   languages: Record<string, string>,

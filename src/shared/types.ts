@@ -73,7 +73,7 @@ export interface State extends Settings {
   apiMode: ApiMode;
   signedInUser: SignedInUser | null;
   usage: Usage | null;
-  /** Target-language options from server catalog (tier-filtered when signed in). */
+  /** Target-language options from server catalog (full catalog; not tier-gated). */
   languagePicker: LangPair[] | null;
   /** Display names from server `languages` map (catalog SoT). */
   languageNames: Record<string, string> | null;
