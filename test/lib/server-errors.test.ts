@@ -6,20 +6,20 @@ import {
 } from "@/lib/server-errors";
 
 describe("usagePatchFromServerError", () => {
-  it("maps standard 402 fields", () => {
+  it("maps standard 402 credit fields", () => {
     const parsed: ParsedServerError = {
       status: 402,
       code: "quota_exhausted",
       user: "Quota exhausted",
       isQuotaOrTier: true,
       mode: TIER_STANDARD,
-      usedMinutes: 29.5,
-      capMinutes: 30,
+      usedCredits: 9500,
+      capCredits: 10000,
     };
     expect(usagePatchFromServerError(parsed)).toEqual({
-      standard: 29.5,
-      standardCap: 30,
-      standardRemaining: 0.5,
+      standard: 9500,
+      standardCap: 10000,
+      standardRemaining: 500,
     });
   });
 

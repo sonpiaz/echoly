@@ -49,15 +49,15 @@ export interface SignedInUser {
 }
 
 export interface Usage {
-  standard: number; // used minutes (legacy flat)
-  realtime: number;
-  /** Server caps from session bootstrap `usage` when signed in. */
+  standard: number; // used credits (standard tier)
+  realtime: number; // used credits (realtime tier)
+  /** Server credit caps from session bootstrap (UsageMeterC.capCredits). */
   standardCap?: number;
   realtimeCap?: number;
-  /** Server-computed remaining (preferred over cap - used). */
+  /** Server-computed remaining credits (preferred over cap - used). */
   standardRemaining?: number;
   realtimeRemaining?: number;
-  /** Period end from bootstrap `usage.resets_at` (anchor-based; not calendar month). */
+  /** Period end from bootstrap `usage.resetsAt` (anchor-based; not calendar month). */
   resetsAt?: string;
 }
 

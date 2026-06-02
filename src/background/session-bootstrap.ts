@@ -19,24 +19,43 @@ export interface SessionBootstrapSnapshot {
   voices: StandardVoiceSnapshot;
 }
 
+// Credit snapshot shape per CONTRACTS §D (UsageMeterC = {usedCredits, capCredits, remainingCredits}).
+// Server emits camelCase from GET /v1/session/bootstrap.
+type BootstrapUsageMeter = {
+  usedCredits?: number;
+  capCredits?: number;
+  remainingCredits?: number;
+};
 type BootstrapUsage = {
-  standard?: { used?: number; cap?: number; remaining?: number };
-  realtime?: { used?: number; cap?: number; remaining?: number };
-  resets_at?: string;
+  standard?: BootstrapUsageMeter;
+  realtime?: BootstrapUsageMeter;
+  resetsAt?: string;
 };
 
-function parseUsage(raw: BootstrapUsage | null | undefined): Usage | null {
+function parseMeter(m: BootstrapUsageMeter | undefined): { used: number; cap: number | undefined; remaining: number | undefined } {
+  if (!m) return { used: 0, cap: undefined, remaining: undefined };
+  return {
+    used: m.usedCredits ?? 0,
+    cap: m.capCredits,
+    remaining: m.remainingCredits,
+  };
+}
+
+/** @internal exported for unit tests only — not part of the public API. */
+export function parseUsage(raw: BootstrapUsage | null | undefined): Usage | null {
   if (!raw || typeof raw !== "object") return null;
   const d = raw;
   if (!d.standard && !d.realtime) return null;
+  const std = parseMeter(d.standard);
+  const rt = parseMeter(d.realtime);
   return {
-    standard: d.standard?.used ?? 0,
-    realtime: d.realtime?.used ?? 0,
-    standardCap: d.standard?.cap,
-    realtimeCap: d.realtime?.cap,
-    standardRemaining: d.standard?.remaining,
-    realtimeRemaining: d.realtime?.remaining,
-    resetsAt: d.resets_at,
+    standard: std.used,
+    realtime: rt.used,
+    standardCap: std.cap,
+    realtimeCap: rt.cap,
+    standardRemaining: std.remaining,
+    realtimeRemaining: rt.remaining,
+    resetsAt: d.resetsAt,
   };
 }
 

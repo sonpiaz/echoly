@@ -105,8 +105,8 @@ export type ContentToBgMessage =
   | {
       type: "CONTENT_QUOTA";
       mode?: TranslationTier;
-      used_minutes?: number;
-      cap_minutes?: number;
+      used_credits?: number;
+      cap_credits?: number;
       resets_at?: string;
     }
   | { type: "UPDATE_SETTINGS"; settings: Partial<Settings> }

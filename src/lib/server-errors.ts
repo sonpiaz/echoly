@@ -8,7 +8,7 @@
 //     error: {
 //       code, message,
 //       tier, mode,
-//       used_minutes?, cap_minutes?,    // present on 402 paths
+//       used_credits?, cap_credits?,    // present on 402 paths (CONTRACTS §D)
 //       resets_at?,                     // ISO string
 //       upgrade_url?,
 //     }
@@ -50,8 +50,8 @@ export interface ParsedServerError {
   isQuotaOrTier: boolean;
   /** Present on 402 reserve-rejection envelopes. */
   mode?: TranslationTier;
-  usedMinutes?: number;
-  capMinutes?: number;
+  usedCredits?: number;
+  capCredits?: number;
   resetsAt?: string;
 }
 
@@ -101,8 +101,8 @@ export async function parseServerError(res: Response): Promise<ParsedServerError
     ctaLabel: isQuota && err?.upgrade_url ? "Upgrade" : undefined,
     isQuotaOrTier: isQuota,
     mode: err?.mode,
-    usedMinutes: err?.used_minutes,
-    capMinutes: err?.cap_minutes,
+    usedCredits: err?.used_credits,
+    capCredits: err?.cap_credits,
     resetsAt: err?.resets_at,
   };
 }
@@ -113,16 +113,16 @@ export function usagePatchFromServerError(parsed: ParsedServerError): Partial<Us
   const patch: Partial<Usage> = {};
   if (parsed.resetsAt) patch.resetsAt = parsed.resetsAt;
   if (parsed.mode === TIER_REALTIME) {
-    if (parsed.usedMinutes != null) patch.realtime = parsed.usedMinutes;
-    if (parsed.capMinutes != null) patch.realtimeCap = parsed.capMinutes;
-    if (parsed.usedMinutes != null && parsed.capMinutes != null) {
-      patch.realtimeRemaining = Math.max(0, parsed.capMinutes - parsed.usedMinutes);
+    if (parsed.usedCredits != null) patch.realtime = parsed.usedCredits;
+    if (parsed.capCredits != null) patch.realtimeCap = parsed.capCredits;
+    if (parsed.usedCredits != null && parsed.capCredits != null) {
+      patch.realtimeRemaining = Math.max(0, parsed.capCredits - parsed.usedCredits);
     }
   } else {
-    if (parsed.usedMinutes != null) patch.standard = parsed.usedMinutes;
-    if (parsed.capMinutes != null) patch.standardCap = parsed.capMinutes;
-    if (parsed.usedMinutes != null && parsed.capMinutes != null) {
-      patch.standardRemaining = Math.max(0, parsed.capMinutes - parsed.usedMinutes);
+    if (parsed.usedCredits != null) patch.standard = parsed.usedCredits;
+    if (parsed.capCredits != null) patch.standardCap = parsed.capCredits;
+    if (parsed.usedCredits != null && parsed.capCredits != null) {
+      patch.standardRemaining = Math.max(0, parsed.capCredits - parsed.usedCredits);
     }
   }
   return Object.keys(patch).length ? patch : null;
@@ -133,8 +133,8 @@ interface ErrorFields {
   message?: string;
   upgrade_url?: string;
   mode?: TranslationTier;
-  used_minutes?: number;
-  cap_minutes?: number;
+  used_credits?: number;
+  cap_credits?: number;
   resets_at?: string;
 }
 
@@ -152,8 +152,8 @@ function readError(body: JsonObject | JsonArray | string | null): ErrorFields | 
       o["mode"] === TIER_STANDARD || o["mode"] === TIER_REALTIME
         ? (o["mode"] as TranslationTier)
         : undefined,
-    used_minutes: typeof o["used_minutes"] === "number" ? o["used_minutes"] : undefined,
-    cap_minutes: typeof o["cap_minutes"] === "number" ? o["cap_minutes"] : undefined,
+    used_credits: typeof o["used_credits"] === "number" ? o["used_credits"] : undefined,
+    cap_credits: typeof o["cap_credits"] === "number" ? o["cap_credits"] : undefined,
     resets_at: typeof o["resets_at"] === "string" ? o["resets_at"] : undefined,
   };
 }

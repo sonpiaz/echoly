@@ -45,8 +45,8 @@ import {
   capsForUsage,
   daysLeftLabel,
   fillPercent,
+  fmtCredits,
   fmtElapsed,
-  fmtMin,
   meterLevel,
   resetsAtLabel,
   shade,
@@ -401,14 +401,16 @@ export function initPopup(): void {
                           usage: State["usage"] | undefined) {
     const caps = capsForUsage(tier, usage ?? undefined);
     const used = usage ?? { standard: 0, realtime: 0 };
-    // Show Realtime remaining if the tier has rt allowance, else Standard.
-    const isRt = caps.rt > 0;
+    // Show Realtime remaining only for plans that may use Realtime (Max).
+    // Gate on the canonical plan rule, not on whatever cap the server sent —
+    // the server may echo a non-zero realtime cap for Free/Pro.
+    const isRt = canUseRealtime(tier) && caps.rt > 0;
     const remaining = isRt
       ? (usage?.realtimeRemaining ??
         Math.max(0, caps.rt - used.realtime))
       : (usage?.standardRemaining ??
         Math.max(0, caps.std - used.standard));
-    if (usageHintAmount) usageHintAmount.textContent = `${remaining} min`;
+    if (usageHintAmount) usageHintAmount.textContent = `${fmtCredits(remaining)} credits`;
     if (usageHintLabel)
       usageHintLabel.textContent = isRt ? "Realtime left this month" : "Standard left this month";
     if (usageHintReset) usageHintReset.textContent = resetsAtLabel(usage?.resetsAt);
@@ -438,15 +440,19 @@ export function initPopup(): void {
 
     const caps = capsForUsage(user.tier, usage ?? undefined);
     const u = usage ?? { standard: 0, realtime: 0 };
-    if (umStdUsed) umStdUsed.textContent = fmtMin(u.standard);
-    if (umStdCap)  umStdCap.textContent  = fmtMin(caps.std);
+    // Render meters in credits: "4,200 / 10,000 credits"
+    if (umStdUsed) umStdUsed.textContent = fmtCredits(u.standard);
+    if (umStdCap)  umStdCap.textContent  = `${fmtCredits(caps.std)} credits`;
     if (umStdFill) (umStdFill as HTMLElement).style.width = `${fillPercent(u.standard, caps.std)}%`;
     if (umStdNumbers)
       (umStdNumbers as HTMLElement).dataset.low = meterLevel(u.standard, caps.std) !== "ok" ? "true" : "false";
-    if (umRtBlock) umRtBlock.hidden = caps.rt === 0;
-    if (caps.rt > 0) {
-      if (umRtUsed) umRtUsed.textContent = fmtMin(u.realtime);
-      if (umRtCap)  umRtCap.textContent  = fmtMin(caps.rt);
+    // Realtime is a Max-only feature: gate the meter row on the canonical plan
+    // rule, not on the server-sent cap (which may be non-zero for Free/Pro).
+    const showRt = canUseRealtime(user.tier) && caps.rt > 0;
+    if (umRtBlock) umRtBlock.hidden = !showRt;
+    if (showRt) {
+      if (umRtUsed) umRtUsed.textContent = fmtCredits(u.realtime);
+      if (umRtCap)  umRtCap.textContent  = `${fmtCredits(caps.rt)} credits`;
       if (umRtFill) (umRtFill as HTMLElement).style.width = `${fillPercent(u.realtime, caps.rt)}%`;
       if (umRtNumbers)
         (umRtNumbers as HTMLElement).dataset.low = meterLevel(u.realtime, caps.rt) !== "ok" ? "true" : "false";

@@ -54,8 +54,8 @@ export function handleContentEvent(
       user: "",
       isQuotaOrTier: true,
       mode: message.mode,
-      usedMinutes: message.used_minutes,
-      capMinutes: message.cap_minutes,
+      usedCredits: message.used_credits,
+      capCredits: message.cap_credits,
       resetsAt: message.resets_at,
     };
     const patch = usagePatchFromServerError(parsed);

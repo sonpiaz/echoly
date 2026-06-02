@@ -7,8 +7,8 @@ export function notifyQuotaToBackground(parsed: ParsedServerError): void {
   post({
     type: "CONTENT_QUOTA",
     mode: parsed.mode,
-    used_minutes: parsed.usedMinutes,
-    cap_minutes: parsed.capMinutes,
+    used_credits: parsed.usedCredits,
+    cap_credits: parsed.capCredits,
     resets_at: parsed.resetsAt,
   });
 }

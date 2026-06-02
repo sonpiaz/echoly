@@ -1,5 +1,5 @@
 // Layer A — pure-fn golden tests for the popup reducers (chrome-free, node env).
-// Values are the real ones from legacy/popup.js (fmtMin/meterLevel/tier-gating).
+// Values are credits (1000 credits = $1). fmtCredits for meters; fmtElapsed for timer.
 import { describe, expect, it, vi } from "vitest";
 import { capsForTier } from "@/lib/tier-cap";
 import {
@@ -7,8 +7,8 @@ import {
   daysLeftLabel,
   daysUntilReset,
   fillPercent,
+  fmtCredits,
   fmtElapsed,
-  fmtMin,
   meterLevel,
   nextResetLabel,
   resetsAtLabel,
@@ -52,19 +52,23 @@ describe("fmtElapsed", () => {
   });
 });
 
-describe("fmtMin", () => {
-  it("rounds and groups with en-US locale", () => {
-    expect(fmtMin(0)).toBe("0");
-    expect(fmtMin(30)).toBe("30");
-    expect(fmtMin(600)).toBe("600");
-    expect(fmtMin(3000)).toBe("3,000");
-    expect(fmtMin(12.4)).toBe("12.4");
-    expect(fmtMin(12.5)).toBe("12.5");
+describe("fmtCredits", () => {
+  it("formats credit integers with thousands separators", () => {
+    expect(fmtCredits(0)).toBe("0");
+    expect(fmtCredits(1000)).toBe("1,000");
+    expect(fmtCredits(4200)).toBe("4,200");
+    expect(fmtCredits(10000)).toBe("10,000");
+    expect(fmtCredits(28000)).toBe("28,000");
+    expect(fmtCredits(6000)).toBe("6,000");
   });
-  it("treats falsy as 0 (legacy `n || 0`)", () => {
-    expect(fmtMin(NaN)).toBe("0");
-    // @ts-expect-error legacy tolerated undefined input
-    expect(fmtMin(undefined)).toBe("0");
+  it("rounds fractional credits to nearest integer", () => {
+    expect(fmtCredits(999.7)).toBe("1,000");
+    expect(fmtCredits(999.4)).toBe("999");
+  });
+  it("treats falsy as 0", () => {
+    expect(fmtCredits(NaN)).toBe("0");
+    // @ts-expect-error tolerated undefined
+    expect(fmtCredits(undefined)).toBe("0");
   });
 });
 
@@ -86,16 +90,16 @@ describe("meterLevel", () => {
   });
 });
 
-describe("capsForTier (offline bootstrap)", () => {
-  it("matches legacy caps exactly", () => {
-    expect(capsForTier("free")).toEqual({ std: 30, rt: 0 });
-    expect(capsForTier("pro")).toEqual({ std: 600, rt: 0 });
-    expect(capsForTier("max")).toEqual({ std: 3000, rt: 120 });
+describe("capsForTier (offline bootstrap — credits)", () => {
+  it("matches CAPS_CREDITS: free 1000, pro 10000, max 28000/6000", () => {
+    expect(capsForTier("free")).toEqual({ std: 1000, rt: 0 });
+    expect(capsForTier("pro")).toEqual({ std: 10000, rt: 0 });
+    expect(capsForTier("max")).toEqual({ std: 28000, rt: 6000 });
   });
   it("unknown / nullish tier falls back to free", () => {
-    expect(capsForTier("unknown")).toEqual({ std: 30, rt: 0 });
-    expect(capsForTier(undefined)).toEqual({ std: 30, rt: 0 });
-    expect(capsForTier(null)).toEqual({ std: 30, rt: 0 });
+    expect(capsForTier("unknown")).toEqual({ std: 1000, rt: 0 });
+    expect(capsForTier(undefined)).toEqual({ std: 1000, rt: 0 });
+    expect(capsForTier(null)).toEqual({ std: 1000, rt: 0 });
   });
 });
 

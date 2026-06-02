@@ -5,11 +5,16 @@ import { canUseRealtime } from "@/shared/tier";
 
 export { capsForTier, capsForUsage, type TierCap } from "@/lib/tier-cap";
 
-export function fmtMin(n: number): string {
-  const v = n || 0;
+/**
+ * Format a credits integer with thousands separators (en-US locale).
+ * e.g. fmtCredits(4200) → "4,200"
+ * Credits are always integers; no decimal display.
+ */
+export function fmtCredits(n: number): string {
+  const v = Math.round(n || 0);
   return v.toLocaleString("en-US", {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 1,
+    maximumFractionDigits: 0,
   });
 }
 
