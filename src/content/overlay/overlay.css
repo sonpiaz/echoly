@@ -88,7 +88,8 @@
 }
 
 .ec-root[data-state="live"] .ec-live-dot,
-.ec-root[data-state="connecting"] .ec-live-dot {
+.ec-root[data-state="connecting"] .ec-live-dot,
+.ec-root[data-state="switching"] .ec-live-dot {
   background: #ff6fb1;
 }
 

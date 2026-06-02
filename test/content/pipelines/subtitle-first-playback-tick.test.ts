@@ -319,28 +319,31 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
   });
 
   // ─ AC#4: _systemPaused guard ────────────────────────────────────────────────
+  // After the pause/resume rewire, onPause now calls pauseSession() (not stopSession).
+  // The _systemPaused guard still returns early to prevent a user-pause action
+  // when the driver itself issued the pause (buffer-wait micro-pause).
 
-  it("AC#4: _systemPaused=true → onPause guard returns early (stopSession NOT called)", () => {
-    const stopSession = vi.fn();
+  it("AC#4: _systemPaused=true → onPause guard returns early (pauseSession NOT called)", () => {
+    const pauseSession = vi.fn();
 
     function simulateOnPause(sess: { kind: string; _systemPaused?: boolean } | null) {
       if (!sess) return;
       if (sess.kind === "subtitle-first" && sess._systemPaused) return;
-      stopSession("video-paused");
+      pauseSession();
     }
 
-    // With _systemPaused: true — guard fires, no teardown.
+    // With _systemPaused: true — guard fires, no action.
     simulateOnPause({ kind: "subtitle-first", _systemPaused: true });
-    expect(stopSession).not.toHaveBeenCalled();
+    expect(pauseSession).not.toHaveBeenCalled();
 
-    // With _systemPaused: false — guard doesn't fire, teardown runs.
+    // With _systemPaused: false — guard doesn't fire, pauseSession runs.
     simulateOnPause({ kind: "subtitle-first", _systemPaused: false });
-    expect(stopSession).toHaveBeenCalledWith("video-paused");
+    expect(pauseSession).toHaveBeenCalledTimes(1);
 
-    stopSession.mockClear();
+    pauseSession.mockClear();
     // With _systemPaused: undefined — same as false.
     simulateOnPause({ kind: "subtitle-first", _systemPaused: undefined });
-    expect(stopSession).toHaveBeenCalledTimes(1);
+    expect(pauseSession).toHaveBeenCalledTimes(1);
   });
 
   // ─ AC#5: Play-once invariant — no dup src.start() ───────────────────────────

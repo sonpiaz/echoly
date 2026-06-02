@@ -1325,6 +1325,10 @@ body[data-state="paused"]     .usage-hint-row { display: none; }
 .am-reset { font-size: 10px; color: var(--text-faint); }
 
 .um-block { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+/* The JS sets [hidden] on the Realtime meter for non-Max plans (no Realtime
+   entitlement). Without this override the `display:flex` above beats the UA
+   `[hidden]{display:none}`, leaving a misleading empty Realtime quota row. */
+.um-block[hidden] { display: none; }
 .um-row {
   display: flex;
   justify-content: space-between;

@@ -40,6 +40,10 @@ import {
   type AdvancedSettings,
   type CaptionPosition,
 } from "@/shared/advanced";
+import {
+  STATUS_SWITCHING_VIDEO,
+  STATUS_LOADING_NEXT,
+} from "@/shared/product-copy";
 import { resolveLangName } from "@/lib/resolve-lang-name";
 import {
   capsForUsage,
@@ -562,16 +566,24 @@ export function initPopup(): void {
       updateLiveSummary();
     } else if (state.running && state.paused) {
       setStateClass("paused");
-      statusEl.textContent = "Paused.";
+      statusEl.textContent = state.status || "Paused.";
       setActionLabel("Stop dubbing");
       toggleBtn.classList.add("is-live");
     } else if (state.running) {
       setStateClass("active");
+      // Only override with state.status when it is a transition message (switching
+      // or loading the next video). Regular in-session status ("Translating") falls
+      // back to the canonical "Dubbing to {lang}." label so the popup copy is stable.
       const langName = resolveLangName(
         state.targetLanguage ?? "",
         state.languageNames,
       );
-      statusEl.textContent = `Dubbing to ${langName}.`;
+      const isTransitionStatus =
+        state.status === STATUS_SWITCHING_VIDEO ||
+        state.status === STATUS_LOADING_NEXT;
+      statusEl.textContent = isTransitionStatus
+        ? state.status!
+        : `Dubbing to ${langName}.`;
       setActionLabel("Stop dubbing");
       toggleBtn.classList.add("is-live");
     } else if (state.errorMessage) {

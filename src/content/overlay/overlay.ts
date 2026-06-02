@@ -784,7 +784,9 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   // ───── State / text setters (legacy content.js:318-329) ─────
   function setOverlayState(state: OverlayState): void {
     if (root) root.dataset.state = state;
-    if (state === "live" || state === "connecting") {
+    if (state === "live" || state === "connecting" || state === "switching") {
+      // "switching" is a brief in-session transition — the clock keeps running
+      // (the session is still alive; only "paused" freezes it).
       if (sessionStartedAt == null) sessionStartedAt = Date.now();
       startElapsedTimer();
     } else if (state === "ready" || state === "error" || state === "paused") {

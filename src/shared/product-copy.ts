@@ -28,3 +28,7 @@ export const TOAST_PRESS_PLAY = "Press play on the video to start dubbing";
 
 export const TOAST_NO_CC_FALLBACK =
   "No captions — using live voice dubbing (~5s lag)";
+
+export const STATUS_PAUSED_VIDEO = "Paused — press play to resume";
+export const STATUS_SWITCHING_VIDEO = "Switching to next video…";
+export const STATUS_LOADING_NEXT = "Loading next video…";

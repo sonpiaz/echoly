@@ -3,7 +3,6 @@
 import {
   CAPTION_POLL_MS,
   CONTENT_GLOBAL_KEY,
-  DEFAULT_TRANSLATION_TIER,
   ECHOLY_VERSION,
   HISTORY_MAX,
   ECHOLY_PROXY_BASE,
@@ -28,10 +27,7 @@ import { isSubtitleFirstSession, isWebRtcSession } from "./session-manager";
 import { TOAST_PRESS_PLAY } from "@/shared/product-copy";
 import { createController } from "./controller";
 import { STOP_REASON, STOP_REASON_MESSAGE, type StopReason } from "./stop-reasons";
-import {
-  bindSourceVideoPlayback,
-  syncSourcePauseState,
-} from "@/lib/rtc-media-sync";
+import { bindSourceVideoPlayback } from "@/lib/rtc-media-sync";
 import { drainRemoteAudio, RTC_DRAIN_TIMEOUT_MS } from "@/lib/rtc-handover";
 import { shouldIgnoreSourcePlaybackEvent } from "./source-playback-guards";
 import {
@@ -41,6 +37,9 @@ import {
 import { alignRealtimeVodBeforePlay } from "@/lib/standard-vod-start";
 import { detectAdapter } from "@/platforms/registry";
 import { setActiveAdapter } from "./media-stage";
+import { pauseSession, resumeSession } from "./pause-controller";
+import { NavigationWatcher } from "./navigation";
+import { continueOnNewVideo } from "./auto-next";
 
 /** Extra video listeners a pipeline can opt into. */
 interface ExtraVideoListeners {
@@ -68,16 +67,19 @@ export class ContentApp {
   /** Active platform adapter — set at session start, read throughout the session. */
   adapter: PlatformAdapter = detectAdapter(location.hostname);
 
+  /** SPA navigation watcher — replaces the old startSpaWatcher() polling.
+   *  Set in initContent after construction; null until then. */
+  nav: NavigationWatcher | null = null;
+
   // F3 — source caption polling state.
   private lastSeenCaption = "";
-  private lastSpaUrl = location.href;
 
   /** Detach source <video> pause/play/ended listeners (any platform). */
   private unbindSourcePlayback: (() => void) | null = null;
   /** Restores native captions if we suppressed them at session start. */
   private restoreNativeCaptions: (() => void) | null = null;
   /** Standard VOD adaptive dub/video sync only. */
-  private standardDubSync: StandardDubPlaybackSyncHandle | null = null;
+  standardDubSync: StandardDubPlaybackSyncHandle | null = null;
 
   constructor() {
     this.capture = new AudioCapture(this.sm, this.overlay);
@@ -239,33 +241,26 @@ export class ContentApp {
         const sess = this.sm.session;
         if (!sess) return;
         // Guard: if the subtitle-first driver issued this pause itself (to wait
-        // for a cue's buffer), do NOT tear down the session. _systemPaused is
+        // for a cue's buffer), do NOT pause the user session. _systemPaused is
         // set synchronously BEFORE video.pause() so it is already true here.
         if (isSubtitleFirstSession(sess) && sess._systemPaused) return;
-        // Pausing the source video STOPS the dub session entirely (user spec):
-        // the overlay returns to the Stopped state so it never lingers as "LIVE"
-        // while the video is paused. Resuming does NOT auto-restart — the user
-        // starts again from the popup. Same teardown as the Stop button.
-        this.stopSession(STOP_REASON.VIDEO_PAUSED);
+        // Pause the dub session (no teardown) — credits stop, overlay → paused.
+        // Resuming auto-resumes the dub.
+        pauseSession(this);
       },
       onPlay: () => {
         extra.onPlayExtra?.();
         if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
-        const sess = this.sm.session;
-        if (!sess) return;
-        // Guard: subtitle-first resumes via #resumeSystemPause (video.play());
-        // syncSourcePauseState is WebRTC-only and must not run here, or the
-        // WebRTC-only media-gate path fires on every system-pause resume.
-        if (isSubtitleFirstSession(sess)) return;
-        syncSourcePauseState(this.sm, sess, false);
-        this.overlay.setStatusText("Translating");
-        this.overlay.setOverlayState("live");
-        this.sm.emitState({ running: true, paused: false, status: "Translating" });
+        // resumeSession handles all tiers (WebRTC re-enables tracks; subtitle-first
+        // driver resumes on next tick automatically). Safe to call when not paused.
+        resumeSession(this);
       },
       onEnded: () => {
         extra.onEndedBefore?.();
-        // stopSession emits STOP_REASON_MESSAGE[VIDEO_ENDED].
-        this.stopSession(STOP_REASON.VIDEO_ENDED);
+        // Arm a pending-next window instead of immediate teardown. If autoplay
+        // navigates to the next video within ~8s, continueOnNewVideo takes over.
+        // Otherwise VIDEO_ENDED is emitted via stopSession after the timeout.
+        this.nav?.notifyEnded();
       },
       onSeeked: extra.onSeeked,
     });
@@ -289,6 +284,16 @@ export class ContentApp {
     sm.currentSourceText = "";
     sm.translationUtteranceOpen = false;
     sm.translationSegmentId = null;
+
+    // (Re-)start the nav watcher for this session. stopSession calls nav.stop() to
+    // flush pending-next / debounce timers; we re-arm here so each new session
+    // gets a fresh watcher with current URL tracking. nav.stop() is safe to call
+    // even if the nav is already stopped (idempotent cleanup).
+    this.nav = new NavigationWatcher(this);
+    this.nav.start((e) => {
+      if (e.kind === "continue") void continueOnNewVideo(this, e.videoId);
+      else this.stopSession(e.reason);
+    });
 
     // Detect the active platform adapter for this page.
     this.adapter = detectAdapter(location.hostname);
@@ -507,6 +512,9 @@ export class ContentApp {
     const { sm, capture } = this;
     this.stopStandardDubSync();
     sm.videoPaused = false;
+    sm.userPaused = false;
+    sm.connectionLost = false;
+    this.nav?.stop();
     sm.pageToken += 1;
     sm.clearSessionTimer();
     sm.stopHeartbeat();
@@ -748,19 +756,7 @@ export class ContentApp {
     this.capture.applyVolumes(originalVolume, voiceVolume);
   }
 
-  // ───── SPA navigation + unload hooks ──────────────────────────────────────
-
-  startSpaWatcher(): void {
-    setInterval(() => {
-      if (location.href !== this.lastSpaUrl) {
-        this.lastSpaUrl = location.href;
-        if (this.sm.session) {
-          // stopSession emits STOP_REASON_MESSAGE[SPA_NAVIGATION].
-          this.stopSession(STOP_REASON.SPA_NAVIGATION);
-        }
-      }
-    }, 500);
-  }
+  // ───── Unload hooks ────────────────────────────────────────────────────────
 
   handleUnload(): void {
     this.stopSession(STOP_REASON.UNLOAD);
@@ -786,8 +782,9 @@ export function initContent(): void {
   // fire the realtime /end keepalive on unload.
   app.sm.setUnloadHandler(() => app.handleUnload());
 
-  // SPA navigation watcher + tab-unload keepalive.
-  app.startSpaWatcher();
+  // NOTE: NavigationWatcher is started inside startSession (re-armed each time)
+  // and stopped inside stopSession. No global setup needed here.
+
   const onUnload = (): void => app.handleUnload();
   window.addEventListener("beforeunload", onUnload);
   window.addEventListener("pagehide", onUnload);

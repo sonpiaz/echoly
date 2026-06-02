@@ -4,6 +4,7 @@
 import {
   TIER_REALTIME,
   TIER_STANDARD,
+  RTC_LIVE_DURATION_HINT_SEC,
   type TranslationTier,
 } from "@/shared/constants";
 import { resolveLangName } from "@/lib/resolve-lang-name";
@@ -25,6 +26,7 @@ import {
 } from "../session-manager";
 import type { ContentApp } from "../index";
 import { STOP_REASON } from "../stop-reasons";
+import type { StartSettings } from "@/shared/types";
 
 interface CtaError extends Error {
   cta?: string;
@@ -265,6 +267,12 @@ export class WebRtcPipeline {
           if (sm.isSessionStale(token)) return;
           if (newSession !== sm.session) return;
           if (pc.iceConnectionState !== "disconnected") return;
+          // If the user has paused the source video, do NOT tear down the session —
+          // mark it as lost so resumeSession can attempt a one-shot rebuild (§2.5).
+          if (sm.userPaused) {
+            sm.connectionLost = true;
+            return;
+          }
           // stopSession emits STOP_REASON_MESSAGE[CONNECTION_LOST].
           this.app.stopSession(STOP_REASON.CONNECTION_LOST);
         }, 8_000);
@@ -273,7 +281,13 @@ export class WebRtcPipeline {
       if (ice === "closed" || ice === "failed") {
         clearIceDisconnectTimer();
         if (newSession === sm.session) {
-          this.app.stopSession(STOP_REASON.CONNECTION_LOST);
+          // Peer died — if the user is paused, mark as lost for resume-rebuild
+          // (§2.5); otherwise tear down immediately.
+          if (sm.userPaused) {
+            sm.connectionLost = true;
+          } else {
+            this.app.stopSession(STOP_REASON.CONNECTION_LOST);
+          }
         }
       }
     });
@@ -396,6 +410,141 @@ export class WebRtcPipeline {
     } finally {
       this.#handoverInFlight = false;
     }
+  }
+
+  /**
+   * Continue a Realtime or Standard-WebRTC session on a new video without
+   * tearing down the overlay. Keeps the background session running and the
+   * overlay mounted; only the peer + capture stream are rebuilt.
+   *
+   * For Realtime: POST /end on the old session, detach peer, then buildSession
+   * with a new token and restart the heartbeat.
+   * For Standard-WebRTC: stop dub-sync, detach peer, then buildSession and
+   * restart standardDubSync.
+   *
+   * Re-acquires the capture stream only when the <video> element reference has
+   * changed (YouTube reuses the same element so the stream survives; other
+   * platforms may replace it). Returns {ok:true} on success, {ok:false,error}
+   * on failure — the caller handles fallback/stopSession.
+   */
+  async continueOnNewVideo(
+    settings: StartSettings,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const { sm, capture } = this.app;
+    const session = sm.session;
+    if (!session || !isWebRtcSession(session)) {
+      return { ok: false, error: "No active WebRTC session." };
+    }
+
+    const pipeline = session.pipeline; // "realtime" | "standard"
+    const prevVideoEl = capture.videoEl;
+
+    // ── End the old session cleanly ──────────────────────────────────────────
+    if (pipeline === TIER_REALTIME) {
+      // /end the old realtime session (closes billing for the old video cleanly).
+      sm.stopHeartbeat();
+      if (session.rtcSessionId && session.apiBearer) {
+        void sm.endRtcSession(session.rtcSessionId, session.apiBearer);
+      }
+    } else {
+      // Standard: quiesce dub-sync before detaching the peer.
+      this.app.prepareStandardHandover();
+    }
+    detachOutgoingPeer(session);
+
+    // ── Acquire the video element + capture stream ────────────────────────────
+    const video = this.app.adapter.findVideo() ?? capture.findVideo();
+    if (!video) return { ok: false, error: "No playable video on this page." };
+
+    let stream = session.stream;
+    if (video !== prevVideoEl || !stream) {
+      // Element changed (or stream is gone) — re-acquire.
+      capture.videoEl = video;
+      capture.bindVolumeDriftGuard(video);
+      try {
+        stream = await capture.captureWithRetry(video);
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
+    // ── Build a new WebRTC session ────────────────────────────────────────────
+    const newToken = sm.nextToken();
+    if (newToken !== sm.pageToken) return { ok: false, error: "Stale." };
+
+    const voice =
+      pipeline === TIER_STANDARD
+        ? settings.standardVoice
+        : settings.realtimeVoice || "";
+
+    const live = capture.isLive(video);
+    const durationHintSec =
+      pipeline === TIER_REALTIME
+        ? live
+          ? RTC_LIVE_DURATION_HINT_SEC
+          : isFinite(video.duration) && video.duration > 0
+            ? Math.ceil(video.duration)
+            : undefined
+        : isFinite(video.duration) && video.duration > 0
+          ? Math.ceil(video.duration)
+          : undefined;
+
+    let newSession: WebRtcSession;
+    try {
+      newSession = await this.buildSession(newToken, stream!, {
+        apiBearer: settings.apiBearer,
+        targetLanguage: settings.targetLanguage,
+        pipeline,
+        voice: voice ?? "",
+        durationHintSec,
+      });
+    } catch (err) {
+      if (newToken !== sm.pageToken) return { ok: false, error: "Stale." };
+      return { ok: false, error: (err as Error).message };
+    }
+
+    if (newToken !== sm.pageToken) {
+      try {
+        newSession.pc?.close();
+      } catch {
+        /* ignore */
+      }
+      return { ok: false, error: "Stale session after build." };
+    }
+
+    // ── Swap in the new session ───────────────────────────────────────────────
+    sm.session = newSession;
+    sm.settings = { ...settings };
+    capture.videoEl = video;
+    capture.applyVolumes(settings.originalVolume, settings.voiceVolume);
+
+    // Reset live-text state for the new video's content.
+    sm.currentTargetText = "";
+    sm.currentSourceText = "";
+    sm.translationUtteranceOpen = false;
+    sm.translationSegmentId = null;
+
+    // ── Per-pipeline restart ──────────────────────────────────────────────────
+    if (pipeline === TIER_REALTIME) {
+      sm.startHeartbeat(newSession.rtcSessionId, newSession.apiBearer);
+    } else {
+      // Standard-WebRTC: rebuild dub-sync for the new video.
+      // beginStandardDubSync is private in ContentApp; call the internal path
+      // via completeStandardHandover which also handles VOD sync setup. But we
+      // skip the waitForFirstDub gate here (video is already playing) — just
+      // snap + start sync after a short ICE settle.
+      const connected = await capture.waitForPCConnected(newSession.pc!, 5000);
+      if (newToken !== sm.pageToken) return { ok: false, error: "Stale." };
+      if (!connected) {
+        return { ok: false, error: "WebRTC connection failed for new video." };
+      }
+      // completeStandardHandover handles beginStandardDubSync + snapPlaybackStart
+      // + start() + dub.play() — reuse it (wasPaused=false for a fresh video).
+      await this.app.completeStandardHandover(false);
+      if (newToken !== sm.pageToken) return { ok: false, error: "Stale." };
+    }
+
+    return { ok: true };
   }
 
   async #requestHandoverInner(partial: {

@@ -257,6 +257,199 @@ export class SubtitleFirstPipeline {
     return { ok: true };
   }
 
+  /**
+   * Continue dubbing on a NEW video without tearing down the overlay or the
+   * background session. Evicts the old subtitle-first driver, builds a FRESH
+   * SubtitleFirstSession (reusing audioCtx/outputGain to avoid an audio-graph
+   * glitch), swaps sm.session atomically, refetches captions for the new video,
+   * and restarts the playback tick + rolling renderer.
+   *
+   * Called from auto-next.ts after the new video element is ready.
+   */
+  async restart(
+    settings: StartSettings,
+    newVideoId: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const { sm } = this.app;
+    const adapter = this.app.adapter;
+
+    // ── Evict the old driver ──────────────────────────────────────────────────
+    // The old rolling-renderer while-loop guards on `sm.session === oldS` (and
+    // `oldS.stopFlag`). Setting stopFlag + clearing the playback timer ensures
+    // the old driver exits cleanly without a double-render race.
+    const oldS = sm.session;
+    if (oldS && oldS.kind === "subtitle-first") {
+      const sf = oldS as SubtitleFirstSession;
+      sf.stopFlag = true;
+      if (sf.playbackTimer) {
+        clearInterval(sf.playbackTimer);
+        sf.playbackTimer = null;
+      }
+      // Stop the currently-playing source node so audio goes silent immediately.
+      try {
+        sf.currentSource?.stop();
+      } catch {
+        /* may already be stopped */
+      }
+      // Abort any in-flight caption/TTS fetches on the OLD session.
+      try {
+        sf.abortController.abort();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // Reuse the audio graph from the old session so there is no teardown glitch.
+    const reuseCtx =
+      oldS && oldS.kind === "subtitle-first"
+        ? (oldS as SubtitleFirstSession).audioCtx
+        : null;
+    const reuseGain =
+      oldS && oldS.kind === "subtitle-first"
+        ? (oldS as SubtitleFirstSession).outputGain
+        : null;
+
+    // ── Build a FRESH session object ──────────────────────────────────────────
+    const token = sm.nextToken();
+    const abortController = new AbortController();
+
+    // If no reusable audio graph (shouldn't happen in practice), create a new one.
+    let audioCtx: AudioContext;
+    let outputGain: GainNode;
+    if (reuseCtx && reuseCtx.state !== "closed" && reuseGain) {
+      audioCtx = reuseCtx;
+      outputGain = reuseGain;
+      // Ensure it's running (might have been suspended).
+      if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+    } else {
+      try {
+        const Ctor =
+          window.AudioContext ||
+          (window as Window & { webkitAudioContext?: typeof AudioContext })
+            .webkitAudioContext;
+        audioCtx = new Ctor();
+        if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+        outputGain = audioCtx.createGain();
+        outputGain.gain.value = computeGain(settings.voiceVolume ?? 100);
+        outputGain.connect(audioCtx.destination);
+      } catch (err) {
+        return {
+          ok: false,
+          error: `AudioContext unavailable: ${(err as Error).message}`,
+        };
+      }
+    }
+
+    const newSession: SubtitleFirstSession = {
+      kind: "subtitle-first",
+      token,
+      audioCtx,
+      outputGain,
+      stream: null,
+      remoteAudio: null,
+      pc: null,
+      dc: null,
+      rtcSessionId: null,
+      apiBearer: settings.apiBearer,
+      abortController,
+      sentences: [],
+      translations: [],
+      currentSource: null,
+      currentPlayingIdx: null,
+      playbackTimer: null,
+      renderCursor: 0,
+      rollingInFlight: false,
+      stopFlag: false,
+      _systemPaused: false,
+      _bufferWaitStartedAt: undefined,
+    };
+
+    // ── Atomic swap: old loops will see sm.session !== oldS and exit ──────────
+    sm.session = newSession;
+
+    // ── Stale guard: check pageToken at every async boundary ─────────────────
+    if (sm.isSessionStale(token)) return { ok: false, error: "Cancelled." };
+
+    // ── Fetch captions for the new video ─────────────────────────────────────
+    const video = adapter.findVideo() ?? this.app.capture.findVideo();
+    if (!video) {
+      sm.session = null;
+      return { ok: false, error: "No playable video on this page." };
+    }
+
+    let captionResult;
+    try {
+      captionResult = await adapter.fetchCaptions({
+        videoId: newVideoId,
+        preferLang: settings.targetLanguage,
+        signal: abortController.signal,
+      });
+    } catch {
+      captionResult = null;
+    }
+
+    if (sm.isSessionStale(token) || newSession.stopFlag) {
+      return { ok: false, error: "Cancelled." };
+    }
+
+    if (!captionResult?.captions.length) {
+      return { ok: false, error: "No captions available for this video." };
+    }
+
+    // ── Capture video title for this new video ────────────────────────────────
+    const rawTitle = adapter.getVideoTitle?.() ?? null;
+    if (rawTitle) {
+      newSession.videoTitle = encodeURIComponent(rawTitle);
+    }
+
+    // ── Build sentences + initial translation batch ───────────────────────────
+    // regroupToSentences and SUBFIRST_LOOKAHEAD_MS are top-level static imports.
+    const sentences = regroupToSentences(captionResult.captions);
+    newSession.sentences = sentences;
+    newSession.translations = new Array(sentences.length);
+
+    const currentTime = video.currentTime;
+    const lookaheadSec = SUBFIRST_LOOKAHEAD_MS / 1000;
+    let firstWaveStart = sentences.findIndex((s) => s.start >= currentTime);
+    if (firstWaveStart === -1) firstWaveStart = sentences.length;
+    let lookaheadEnd = sentences.findIndex((s) => s.start > currentTime + lookaheadSec);
+    if (lookaheadEnd === -1) lookaheadEnd = sentences.length;
+    let firstWaveEnd = Math.min(lookaheadEnd, firstWaveStart + SUBFIRST_PREBUFFER_COUNT);
+    if (firstWaveEnd <= firstWaveStart && firstWaveStart < sentences.length) {
+      firstWaveEnd = firstWaveStart + 1;
+    }
+
+    try {
+      await this.#renderBatch(newSession, firstWaveStart, firstWaveEnd);
+    } catch (err) {
+      if (sm.isSessionStale(token) || newSession.stopFlag) {
+        return { ok: false, error: "Cancelled." };
+      }
+      // isPipelineToastError is a top-level static import.
+      const msg = isPipelineToastError(err)
+        ? err.user
+        : String((err as Error).message || err);
+      return { ok: false, error: msg };
+    }
+
+    if (sm.isSessionStale(token) || newSession.stopFlag) {
+      return { ok: false, error: "Cancelled." };
+    }
+
+    newSession.renderCursor = firstWaveEnd;
+
+    // ── Start playback driver (same as start()) ───────────────────────────────
+    newSession.playbackTimer = setInterval(
+      () => this.#playbackTick(newSession),
+      250,
+    );
+    // Fire once immediately so the first cue starts without waiting 250ms.
+    this.#playbackTick(newSession);
+    void this.#runRollingRenderer(newSession, video);
+
+    return { ok: true };
+  }
+
   async #renderBatch(s: SubtitleFirstSession, startIdx: number, endIdx: number): Promise<void> {
     const { sm } = this.app;
     const voiceId = sm.settings?.standardVoice || STANDARD_DEFAULT_VOICE;
@@ -410,10 +603,14 @@ export class SubtitleFirstPipeline {
       // so the cue starts immediately without waiting for the next 250ms tick.
     }
 
-    // ── Step 2: EXTERNAL pause (user) — unchanged tierD behaviour ──────────
-    // Pausing the video pauses the dub: stop the in-flight clip so the voice
-    // goes silent immediately. On resume the next cue picks up naturally.
-    if (video.paused) {
+    // ── Step 2: EXTERNAL pause (user) — idle on canonical userPaused flag ──
+    // When the user has genuinely paused the source video, stop any in-flight
+    // clip so the voice goes silent immediately; next tick picks up naturally.
+    // NOTE: system-pause (_systemPaused) was already handled in Step 1; it may
+    // have left video.paused===true momentarily while the buffer loads. We key
+    // off sm.userPaused (canonical) rather than video.paused so a system-pause
+    // never silences the dub prematurely.
+    if (sm.userPaused) {
       if (s.currentSource) this.#stopCurrent(s);
       return;
     }
@@ -563,17 +760,16 @@ export class SubtitleFirstPipeline {
       //
       // IMPORTANT: during a system-pause (the driver issued video.pause() to wait
       // for a cue's _buffer), video.paused IS true but we MUST keep rendering so
-      // the buffer actually gets produced. `sm.videoPaused` is WebRTC-only and is
-      // never set true for subtitle-first sessions (only syncSourcePauseState sets
-      // it, which is only called from the WebRTC onPlay handler). So the only term
-      // that would mistakenly block rendering here is `video.paused` — we exempt
-      // it when the session is in a driver-issued system-pause.
+      // the buffer actually gets produced. `sm.userPaused` is the canonical "user
+      // paused" flag (all tiers); `_systemPaused` is the driver-issued micro-pause.
+      // Idle only on a genuine user pause (sm.userPaused), never on a system-pause —
+      // so the buffer pump continues even when the video element is technically paused.
       const sfSess = sm.session;
       const isSystemPaused =
         sfSess != null &&
         sfSess.kind === "subtitle-first" &&
         (sfSess as import("../session-manager").SubtitleFirstSession)._systemPaused === true;
-      if (sm.videoPaused || (video.paused && !isSystemPaused)) continue;
+      if (sm.userPaused || (video.paused && !isSystemPaused)) continue;
 
       const t = video.currentTime;
       const lookaheadSec = SUBFIRST_LOOKAHEAD_MS / 1000;

@@ -4,7 +4,6 @@
 
 export const STOP_REASON = {
   DEFAULT: "stop",
-  VIDEO_PAUSED: "video-paused",
   VIDEO_ENDED: "video-ended",
   USER_STOP: "user-stop",
   BACKEND_STOP: "backend-stop",
@@ -16,6 +15,8 @@ export const STOP_REASON = {
   HANDOVER_FAILED: "handover-failed",
   /** Platform cannot capture audio (DRM) and has no captions for this video. */
   NO_CC_UNSUPPORTED: "no-cc-unsupported",
+  /** Auto-next continuation attempted but the new video could not be loaded/dubbed. */
+  NEXT_VIDEO_LOAD_FAILED: "next-video-load-failed",
 } as const;
 
 export type StopReason = (typeof STOP_REASON)[keyof typeof STOP_REASON];
@@ -28,7 +29,6 @@ export type StopReason = (typeof STOP_REASON)[keyof typeof STOP_REASON];
  */
 export const STOP_REASON_MESSAGE: Record<StopReason, string> = {
   [STOP_REASON.DEFAULT]: "Stopped",
-  [STOP_REASON.VIDEO_PAUSED]: "Stopped",
   [STOP_REASON.VIDEO_ENDED]: "Video ended.",
   [STOP_REASON.USER_STOP]: "Stopped",
   // Not emitted (backend already drove the stop) — kept for exhaustiveness.
@@ -40,4 +40,5 @@ export const STOP_REASON_MESSAGE: Record<StopReason, string> = {
   [STOP_REASON.SERVER_ERROR]: "Translation error.",
   [STOP_REASON.HANDOVER_FAILED]: "Switch failed.",
   [STOP_REASON.NO_CC_UNSUPPORTED]: "No captions available on this video.",
+  [STOP_REASON.NEXT_VIDEO_LOAD_FAILED]: "Couldn't load the next video.",
 };

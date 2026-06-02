@@ -60,7 +60,7 @@ const FIXTURE_HTML = `
     <button id="toggle"><span id="actionLabel">Start dubbing</span></button>
 
     <div class="usage-hint-row signedin-only idle-only" id="usage-hint-row">
-      <span><b id="usage-hint-amount">0 min</b><span id="usage-hint-label">left</span></span>
+      <span><b id="usage-hint-amount">— credits</b><span id="usage-hint-label">left</span></span>
       <span id="usage-hint-reset"></span>
     </div>
 

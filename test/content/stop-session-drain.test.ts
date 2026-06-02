@@ -214,16 +214,18 @@ describe("ContentApp.stopSession — drain BRANCHING (AC#12)", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // AC#12(c): VIDEO_PAUSED → IMMEDIATE cut (not drain).
+  // AC#12(c): CONNECTION_LOST → IMMEDIATE cut (not drain).
+  // The drain test is reason-agnostic for non-VIDEO_ENDED reasons; CONNECTION_LOST
+  // is a representative non-VIDEO_ENDED reason that exercises the immediate path.
   // ─────────────────────────────────────────────────────────────────────────
 
-  it("AC#12(c): VIDEO_PAUSED cuts immediately — no drain", () => {
+  it("AC#12(c): CONNECTION_LOST cuts immediately — no drain", () => {
     const session = makeWebRtcSession(3);
     const remoteAudio = session.remoteAudio!;
     app.sm.session = session;
     app.sm.pageToken = 3;
 
-    app.stopSession(STOP_REASON.VIDEO_PAUSED);
+    app.stopSession(STOP_REASON.CONNECTION_LOST);
 
     expect(drainSpy).not.toHaveBeenCalled();
     expect(remoteAudio.pause).toHaveBeenCalledTimes(1);

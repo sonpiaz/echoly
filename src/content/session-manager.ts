@@ -96,12 +96,27 @@ export class SessionManager {
   translationSegmentId: number | null = null;
   /** True while the source <video> is paused — ignore live metadata updates. */
   videoPaused = false;
+  /** Canonical "user paused the source video" flag (all tiers). Set in lockstep with
+   *  videoPaused for WebRTC; used by subtitle-first idle checks and overlay/emit/timer logic. */
+  userPaused = false;
+  /** Set when a WebRTC peer dies during pause (ICE timeout / media-gate 404). Triggers
+   *  a one-shot rebuild attempt on the next resume instead of resuming into dead audio. */
+  connectionLost = false;
 
   captionPollTimer: ReturnType<typeof setInterval> | null = null;
   heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   warningTimer: ReturnType<typeof setTimeout> | null = null;
   limitTimer: ReturnType<typeof setTimeout> | null = null;
   warningShown = false;
+
+  private _onWarning: (() => void) | null = null;
+  private _onLimit: (() => void) | null = null;
+  /** Absolute deadline (Date.now()-epoch ms) for the warning timer. 0 = not set. */
+  private _warningDeadline = 0;
+  /** Absolute deadline (Date.now()-epoch ms) for the limit timer. 0 = not set. */
+  private _limitDeadline = 0;
+  /** Wall-clock timestamp when pauseSessionTimer() was called (0 = not paused). */
+  private _pausedAt = 0;
 
   private runtimeAlive = true;
   private onRuntimeDead: UnloadHandler | null = null;
@@ -151,11 +166,6 @@ export class SessionManager {
     return token !== this.pageToken && this.session?.token !== token;
   }
 
-  /** @deprecated Use isSessionStale */
-  isRealtimeStale(token: number): boolean {
-    return this.isSessionStale(token);
-  }
-
   nextToken(): number {
     return ++this.pageToken;
   }
@@ -169,7 +179,8 @@ export class SessionManager {
       if (!this.session) return;
       fetch(url, {
         method: "POST",
-        headers: { Authorization: "Bearer " + apiBearer },
+        headers: { Authorization: "Bearer " + apiBearer, "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: this.userPaused }),
       }).catch(() => {});
     }, HEARTBEAT_MS);
   }
@@ -184,6 +195,10 @@ export class SessionManager {
   startSessionTimer(onWarning: () => void, onLimit: () => void): void {
     this.clearSessionTimer();
     this.warningShown = false;
+    this._onWarning = onWarning;
+    this._onLimit = onLimit;
+    this._warningDeadline = Date.now() + SESSION_WARNING_MS;
+    this._limitDeadline = Date.now() + SESSION_LIMIT_MS;
     this.warningTimer = setTimeout(() => {
       if (this.warningShown) return;
       this.warningShown = true;
@@ -192,6 +207,49 @@ export class SessionManager {
     this.limitTimer = setTimeout(() => {
       onLimit();
     }, SESSION_LIMIT_MS);
+  }
+
+  /** Freeze the 55/60-min warn+limit timers during a user pause. Clears the live
+   *  `setTimeout` handles but preserves absolute deadlines and callbacks so
+   *  `resumeSessionTimer` can rearm them shifted by the paused duration. */
+  pauseSessionTimer(): void {
+    if (!this.warningTimer && !this.limitTimer) return;
+    if (this.warningTimer) {
+      clearTimeout(this.warningTimer);
+      this.warningTimer = null;
+    }
+    if (this.limitTimer) {
+      clearTimeout(this.limitTimer);
+      this.limitTimer = null;
+    }
+    this._pausedAt = Date.now();
+  }
+
+  /** Re-arm the warn+limit timers after a user resume. Shifts absolute deadlines
+   *  forward by the paused duration so the timer resumes from where it froze. */
+  resumeSessionTimer(): void {
+    if (this._onLimit === null) return;
+    // Extend deadlines by the time spent paused.
+    const pausedDuration = Date.now() - this._pausedAt;
+    this._warningDeadline += pausedDuration;
+    this._limitDeadline += pausedDuration;
+    this._pausedAt = 0;
+
+    const warnRemaining = Math.max(0, this._warningDeadline - Date.now());
+    const limitRemaining = Math.max(0, this._limitDeadline - Date.now());
+
+    if (!this.warningShown && this._onWarning) {
+      const onWarning = this._onWarning;
+      this.warningTimer = setTimeout(() => {
+        if (this.warningShown) return;
+        this.warningShown = true;
+        onWarning();
+      }, warnRemaining);
+    }
+    const onLimit = this._onLimit;
+    this.limitTimer = setTimeout(() => {
+      onLimit();
+    }, limitRemaining);
   }
 
   clearSessionTimer(): void {
@@ -203,6 +261,11 @@ export class SessionManager {
       clearTimeout(this.limitTimer);
       this.limitTimer = null;
     }
+    this._onWarning = null;
+    this._onLimit = null;
+    this._warningDeadline = 0;
+    this._limitDeadline = 0;
+    this._pausedAt = 0;
   }
 
   async endRtcSession(

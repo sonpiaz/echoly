@@ -53,36 +53,45 @@ export function applyVideoPauseToSession(session: Session, paused: boolean): voi
   }
 }
 
-/** Tell the media node to stop emitting dub audio + partial captions. */
-export function notifyServerMediaGate(
+/** Tell the media node to stop emitting dub audio + partial captions.
+ *  Returns whether the server acknowledged (res.ok); false on a non-ok response or
+ *  network error. The caller should set sm.connectionLost on false. */
+export async function notifyServerMediaGate(
   apiBase: string,
   rtcSessionId: string,
   apiBearer: string,
   paused: boolean,
-): void {
+): Promise<boolean> {
   const path = paused ? "media-pause" : "media-resume";
   const url = `${apiBase}/rtc/translate/${rtcSessionId}/${path}`;
-  void fetch(url, {
-    method: "POST",
-    headers: { Authorization: "Bearer " + apiBearer },
-    keepalive: true,
-  }).catch(() => {});
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + apiBearer },
+      keepalive: true,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Client + server gate when the source video pauses or resumes. */
 export function syncSourcePauseState(
-  sm: { videoPaused: boolean; apiBase: string },
+  sm: { videoPaused: boolean; apiBase: string; connectionLost?: boolean },
   session: Session,
   paused: boolean,
 ): void {
   sm.videoPaused = paused;
   applyVideoPauseToSession(session, paused);
   if (session.rtcSessionId && session.apiBearer) {
-    notifyServerMediaGate(
+    void notifyServerMediaGate(
       sm.apiBase,
       session.rtcSessionId,
       session.apiBearer,
       paused,
-    );
+    ).then((ok) => {
+      if (!ok) sm.connectionLost = true;
+    });
   }
 }
