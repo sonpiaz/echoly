@@ -9,6 +9,9 @@ import {
   RTC_LIVE_DURATION_HINT_SEC,
   TIER_REALTIME,
   TIER_STANDARD,
+  AD_WAIT_POLL_MS,
+  DUB_LIVE_TTFA_CEILING_MS,
+  DUB_SYNC_POLL_MS,
 } from "@/shared/constants";
 import type { BgToContentMessage, BgToContentResponse } from "@/shared/protocol";
 import type { HistoryTurn, StartSettings } from "@/shared/types";
@@ -24,7 +27,7 @@ import { AudioCapture } from "./capture";
 import { WebRtcPipeline } from "./pipelines/webrtc-pipeline";
 import { SubtitleFirstPipeline } from "./pipelines/subtitle-first-pipeline";
 import { isSubtitleFirstSession, isWebRtcSession } from "./session-manager";
-import { TOAST_PRESS_PLAY } from "@/shared/product-copy";
+import { TOAST_PRESS_PLAY, STATUS_CONNECTING, STATUS_PREPARING_DUB, STATUS_AD_WAIT } from "@/shared/product-copy";
 import { createController } from "./controller";
 import { STOP_REASON, STOP_REASON_MESSAGE, type StopReason } from "./stop-reasons";
 import { bindSourceVideoPlayback } from "@/lib/rtc-media-sync";
@@ -36,6 +39,8 @@ import {
 } from "@/lib/dub-playback-sync";
 import { alignRealtimeVodBeforePlay } from "@/lib/standard-vod-start";
 import { detectAdapter } from "@/platforms/registry";
+import { installYtMainWorldBridge } from "@/platforms/youtube/yt-mainworld-cache";
+import { QuickStartLauncher } from "./launcher";
 import { setActiveAdapter } from "./media-stage";
 import { pauseSession, resumeSession } from "./pause-controller";
 import { NavigationWatcher } from "./navigation";
@@ -63,6 +68,9 @@ export class ContentApp {
   readonly webrtc: WebRtcPipeline;
   readonly subtitleFirst: SubtitleFirstPipeline;
   readonly callbacks: OverlayCallbacks;
+
+  /** On-page quick-start launcher (set in initContent). Refreshed on start/stop. */
+  launcher: QuickStartLauncher | null = null;
 
   /** Active platform adapter — set at session start, read throughout the session. */
   adapter: PlatformAdapter = detectAdapter(location.hostname);
@@ -184,7 +192,7 @@ export class ContentApp {
       return;
     }
 
-    this.overlay.setStatusText("Preparing dub");
+    this.overlay.setStatusText(STATUS_PREPARING_DUB);
     const connected = await this.capture.waitForPCConnected(session.pc, 8000);
     if (!connected) {
       this.overlay.showToast("Reconnecting after switch…", 5000);
@@ -251,8 +259,8 @@ export class ContentApp {
       onPlay: () => {
         extra.onPlayExtra?.();
         if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
-        // resumeSession handles all tiers (WebRTC re-enables tracks; subtitle-first
-        // driver resumes on next tick automatically). Safe to call when not paused.
+        // Resume is synchronous + non-blocking (no resume gate). Safe to call
+        // when not paused (idempotent).
         resumeSession(this);
       },
       onEnded: () => {
@@ -308,6 +316,67 @@ export class ContentApp {
       return { ok: false, error: "Unknown tier: " + tier };
     }
 
+    // ── Ad-gate: if an ad is currently playing, wait for it to end before ─────
+    // starting any pipeline. Show "ad-wait" state; poll until clear or stopped.
+    if (this.adapter.isAdPlaying?.() === true) {
+      overlay.buildOverlay(
+        this.callbacks,
+        incomingSettings.advanced?.captionPosition ?? null,
+        incomingSettings.languagePicker ?? undefined,
+        incomingSettings.apiMode === "proxy",
+        incomingSettings.standardVoices?.map((v) => [v.id, v.label]),
+        tier,
+      );
+      overlay.syncFromSettings(incomingSettings);
+      overlay.setOverlayState("ad-wait");
+      overlay.setStatusText(STATUS_AD_WAIT);
+
+      // Capture the token before the loop — if Stop is pressed, pageToken bumps.
+      const adWaitToken = sm.pageToken;
+      await new Promise<void>((resolve) => {
+        const poll = setInterval(() => {
+          // Stop/cancel: pageToken changed.
+          if (sm.pageToken !== adWaitToken) {
+            clearInterval(poll);
+            resolve();
+            return;
+          }
+          // Ad ended.
+          if (!this.adapter.isAdPlaying?.()) {
+            clearInterval(poll);
+            resolve();
+          }
+        }, AD_WAIT_POLL_MS);
+      });
+
+      // If cancelled (token changed), bail out cleanly.
+      if (sm.pageToken !== adWaitToken) {
+        overlay.removeOverlay();
+        return { ok: false, error: "Cancelled." };
+      }
+
+      // Ad ended — give the real-video DOM a brief beat to settle.
+      await new Promise<void>((r) => setTimeout(r, AD_WAIT_POLL_MS));
+
+      // Re-probe the real video now that the ad is gone.
+      overlay.removeOverlay();
+      // Re-evaluate adapter state (ad's <video> state differs from real video).
+      this.adapter = detectAdapter(location.hostname);
+      setActiveAdapter(this.adapter);
+    }
+
+    // ── Routing decision (run fresh after any ad-wait) ────────────────────────
+    return this._routeStart(incomingSettings, opts);
+  }
+
+  /** Routing decision: subtitleFirst vs WebRTC. Called both by startSession and
+   *  after the ad-wait loop (so probes are always re-evaluated against real video). */
+  private _routeStart(
+    incomingSettings: StartSettings,
+    opts?: { forceWebRtcStandard?: boolean },
+  ): Promise<{ ok: boolean; error?: string }> {
+    const { sm, capture } = this;
+    const tier = sm.settings!.tier;
     const videoProbe = this.adapter.findVideo() ?? capture.findVideo();
     const liveProbe = videoProbe ? capture.isLive(videoProbe) : false;
     if (
@@ -320,8 +389,7 @@ export class ContentApp {
     ) {
       return this.subtitleFirst.start(incomingSettings);
     }
-
-    return this.startWebRtcSession(incomingSettings);
+    return this.startWebRtcSession(incomingSettings, opts);
   }
 
   /** Standard voice fallback + Realtime — tab audio via WebRTC. */
@@ -333,7 +401,7 @@ export class ContentApp {
 
   async startWebRtcSession(
     incomingSettings: StartSettings,
-    _opts?: { forceWebRtcStandard?: boolean },
+    opts?: { forceWebRtcStandard?: boolean },
   ): Promise<{
     ok: boolean;
     error?: string;
@@ -372,7 +440,10 @@ export class ContentApp {
       overlay.syncFromSettings(settings);
       // SF8 only for Realtime — Standard adjusts rate via dub sync (dock hint).
       if (tier === TIER_REALTIME) capture.bindRateChangeWarn(video);
-      overlay.setStatusText("Acquiring audio");
+      overlay.setStatusText(STATUS_CONNECTING);
+      // C2: emit connecting state as soon as capture starts so the branded
+      // spinner is visible during the audio-acquisition phase (R6 fix).
+      overlay.setOverlayState("connecting");
       stream = await capture.captureWithRetry(video);
     } catch (err) {
       overlay.removeOverlay();
@@ -381,13 +452,15 @@ export class ContentApp {
 
     // Non-live sync (SF6): pause after we have capture tracks so the speaker
     // doesn't run ahead while the WebRTC channel sets up. Live skips this.
-    if (!live) {
+    // forceWebRtcStandard (no-CC live-dub fallback) also skips the pause —
+    // the user keeps watching; the dub trails by its natural lag.
+    if (!live && !opts?.forceWebRtcStandard) {
       try {
         video.pause();
       } catch {
         /* ignore */
       }
-      overlay.setStatusText("Connecting");
+      overlay.setStatusText(STATUS_CONNECTING);
     }
 
     const token = sm.nextToken();
@@ -443,8 +516,13 @@ export class ContentApp {
     }
 
     sm.session = newSession;
-    overlay.setOverlayState("live");
-    overlay.setStatusText(live ? "Translating" : "Almost ready");
+    // C2: keep "connecting" state through the VOD TTFA/align wait;
+    // only flip to "live" AFTER the first dub arrives (below). For live streams
+    // there is no TTFA gate, so flip to live immediately.
+    if (live) {
+      overlay.setOverlayState("live");
+    }
+    overlay.setStatusText(live ? "Translating" : STATUS_CONNECTING);
     if (pipeline === TIER_REALTIME) {
       sm.startHeartbeat(newSession.rtcSessionId, newSession.apiBearer);
     }
@@ -458,14 +536,68 @@ export class ContentApp {
 
     // VOD: SF6 already paused the video. Realtime → ICE + ms align; Standard →
     // TTFA gate + adaptive sync loop.
+    // Exception: forceWebRtcStandard (no-CC live-dub fallback) skips the pause
+    // and the TTFA gate — video keeps playing; dub trails by natural lag.
     if (!live) {
       await capture.waitForPCConnected(newSession.pc!, 3000);
       if (token !== sm.pageToken) {
         return { ok: false, error: "Cancelled before play." };
       }
-      if (pipeline === TIER_STANDARD) {
+
+      if (opts?.forceWebRtcStandard && pipeline === TIER_STANDARD) {
+        // ── No-CC live-dub fallback (SOLUTION B2+B3) ─────────────────────────
+        // Video already playing (not paused above). Show overlay in live-style
+        // state so the user knows translation is active.
+        overlay.setOverlayState("live");
+        overlay.setStatusText("Translating");
+
+        // Poll for first remote audio up to DUB_LIVE_TTFA_CEILING_MS.
+        // When it arrives: snap+start sync and play the dub.
+        // If ceiling elapses with null audio: tear down + error toast.
+        const ceilStart = Date.now();
+        let dubStarted = false;
+        await new Promise<void>((resolve) => {
+          const poll = setInterval(() => {
+            if (token !== sm.pageToken) {
+              clearInterval(poll);
+              resolve();
+              return;
+            }
+            const remoteAudio = sm.session?.remoteAudio ?? null;
+            if (remoteAudio && !dubStarted) {
+              dubStarted = true;
+              clearInterval(poll);
+              // Start sync engine now that we have real audio.
+              this.beginStandardDubSync(video);
+              this.standardDubSync?.snapPlaybackStart();
+              this.standardDubSync?.start();
+              void remoteAudio.play().catch(() => {});
+              resolve();
+              return;
+            }
+            if (Date.now() - ceilStart >= DUB_LIVE_TTFA_CEILING_MS) {
+              clearInterval(poll);
+              resolve();
+            }
+          }, DUB_SYNC_POLL_MS);
+        });
+
+        if (token !== sm.pageToken) {
+          return { ok: false, error: "Cancelled." };
+        }
+
+        if (!dubStarted) {
+          // Ceiling elapsed — no audio arrived. Show error toast (overlay still
+          // mounted here) then tear down the session cleanly.
+          overlay.showToast("Live dubbing unavailable — server took too long", 8000);
+          overlay.setOverlayState("error");
+          this.stopSession(STOP_REASON.DEFAULT);
+          return { ok: false, error: "Live dubbing unavailable — server took too long." };
+        }
+      } else if (pipeline === TIER_STANDARD) {
+        // ── Normal Standard-VOD path (caption-driven, video was paused above) ─
         this.beginStandardDubSync(video);
-        overlay.setStatusText("Preparing dub");
+        overlay.setStatusText(STATUS_PREPARING_DUB);
         await this.standardDubSync!.waitForFirstDub();
         if (token !== sm.pageToken) {
           return { ok: false, error: "Cancelled before play." };
@@ -478,7 +610,24 @@ export class ContentApp {
             /* ignore */
           }
         }
+        try {
+          await video.play();
+          if (this.standardDubSync) {
+            this.standardDubSync.snapPlaybackStart();
+            this.standardDubSync.start();
+            const dub2 = sm.session?.remoteAudio;
+            if (dub2) void dub2.play().catch(() => {});
+          }
+          // C2: first dub has arrived — now flip the overlay to "live".
+          overlay.setOverlayState("live");
+          overlay.setStatusText("Translating");
+        } catch {
+          overlay.setOverlayState("live");
+          overlay.setStatusText(TOAST_PRESS_PLAY);
+          overlay.showToast(TOAST_PRESS_PLAY, 6000);
+        }
       } else {
+        // ── Realtime-VOD path ─────────────────────────────────────────────────
         overlay.setStatusText("Almost ready");
         await alignRealtimeVodBeforePlay(
           () => sm.session?.remoteAudio ?? null,
@@ -486,19 +635,16 @@ export class ContentApp {
         if (token !== sm.pageToken) {
           return { ok: false, error: "Cancelled before play." };
         }
-      }
-      try {
-        await video.play();
-        if (pipeline === TIER_STANDARD && this.standardDubSync) {
-          this.standardDubSync.snapPlaybackStart();
-          this.standardDubSync.start();
-          const dub = sm.session?.remoteAudio;
-          if (dub) void dub.play().catch(() => {});
+        try {
+          await video.play();
+          // C2: first dub has arrived — now flip the overlay to "live".
+          overlay.setOverlayState("live");
+          overlay.setStatusText("Translating");
+        } catch {
+          overlay.setOverlayState("live");
+          overlay.setStatusText(TOAST_PRESS_PLAY);
+          overlay.showToast(TOAST_PRESS_PLAY, 6000);
         }
-        overlay.setStatusText("Translating");
-      } catch {
-        overlay.setStatusText(TOAST_PRESS_PLAY);
-        overlay.showToast(TOAST_PRESS_PLAY, 6000);
       }
     }
 
@@ -674,6 +820,8 @@ export class ContentApp {
     if (reason !== STOP_REASON.BACKEND_STOP) {
       sm.emitEnded(STOP_REASON_MESSAGE[reason]);
     }
+    // Session ended — re-show the on-page launcher if still eligible.
+    this.launcher?.refresh();
   }
 
   // ───── Live settings update ───────────────────────────────────────────────
@@ -771,12 +919,23 @@ export function initContent(): void {
   // ───── F9 — Idempotent version guard (MUST be first) ─────────────────────
   if (Reflect.get(window, CONTENT_GLOBAL_KEY) === ECHOLY_VERSION) return;
   // Older copy may have left UI behind; clean up before re-installing.
-  document.querySelectorAll(".ec-root").forEach((el) => el.remove());
+  document
+    .querySelectorAll(".ec-root, .ec-launcher")
+    .forEach((el) => el.remove());
   Reflect.set(window, CONTENT_GLOBAL_KEY, ECHOLY_VERSION);
 
   purgeEcholyOverlayRoots();
 
+  // Bridge for the MAIN-world caption-capture hook (yt-mainworld.content.ts).
+  // Listens for the page's own caption network traffic (pot-proof) so the
+  // YouTube caption fetch can reuse it. Idempotent; no-op off YouTube.
+  installYtMainWorldBridge();
+
   const app = new ContentApp();
+
+  // On-page quick-start launcher (signed-in + dubbable page + no session).
+  app.launcher = new QuickStartLauncher(app);
+  void app.launcher.init();
 
   // Orphaned-script teardown: when the runtime handle dies, stop emitting +
   // fire the realtime /end keepalive on unload.
@@ -785,7 +944,10 @@ export function initContent(): void {
   // NOTE: NavigationWatcher is started inside startSession (re-armed each time)
   // and stopped inside stopSession. No global setup needed here.
 
-  const onUnload = (): void => app.handleUnload();
+  const onUnload = (): void => {
+    app.launcher?.destroy();
+    app.handleUnload();
+  };
   window.addEventListener("beforeunload", onUnload);
   window.addEventListener("pagehide", onUnload);
 
@@ -804,9 +966,15 @@ export function initContent(): void {
               version: ECHOLY_VERSION,
             } satisfies BgToContentResponse["CONTENT_PING"]);
             break;
-          case "CONTENT_START":
-            sendResponse(await app.startSession(msg.settings));
+          case "CONTENT_START": {
+            const startResult = await app.startSession(msg.settings);
+            // Re-evaluate the on-page launcher: hide it once a session is live,
+            // or re-show it if the start failed. Covers popup- AND launcher-
+            // initiated starts (both relay CONTENT_START here).
+            app.launcher?.refresh();
+            sendResponse(startResult);
             break;
+          }
           case "CONTENT_STOP":
             app.stopSession(STOP_REASON.BACKEND_STOP);
             sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_STOP"]);
@@ -819,6 +987,27 @@ export function initContent(): void {
             app.applyVolumes(msg.originalVolume, msg.voiceVolume);
             sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_UPDATE_VOLUME"]);
             break;
+          case "CONTENT_PREPARE_INTENT": {
+            // GAP-1: pre-warm the WebRTC transport + provider WS ahead of Start.
+            // Guards (all must pass to avoid wasting a warm slot):
+            //   • No active session (would be useless / waste a slot).
+            //   • Settings must include an apiBearer and targetLanguage.
+            //   • Uses the current session settings tier, defaulting to "realtime".
+            //     Only "realtime" benefits from an eager WS dial (D-3).
+            const { sm } = app;
+            const s = sm.settings;
+            if (!sm.session && s?.apiBearer && s?.targetLanguage) {
+              const pipeline = s.tier ?? TIER_REALTIME;
+              // Only pre-warm for realtime; standard gets transport savings only.
+              void app.webrtc.prepareIntent({
+                apiBearer: s.apiBearer,
+                pipeline,
+                targetLanguage: s.targetLanguage,
+              });
+            }
+            sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_PREPARE_INTENT"]);
+            break;
+          }
           default:
             sendResponse({
               ok: false,

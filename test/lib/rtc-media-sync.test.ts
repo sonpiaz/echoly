@@ -54,10 +54,12 @@ describe("rtc-media-sync", () => {
     expect(session.remoteAudio!.play).toHaveBeenCalled();
   });
 
-  it("syncSourcePauseState sets videoPaused and notifies server", () => {
+  it("syncSourcePauseState sets videoPaused and notifies server", async () => {
     const sm = { videoPaused: false, apiBase: "https://api.test" };
     const session = makeSession();
-    syncSourcePauseState(sm, session, true);
+    // syncSourcePauseState is now async; the pause path fires notifyServerMediaGate
+    // fire-and-forget, so we await the call and flush microtasks.
+    await syncSourcePauseState(sm, session, true);
     expect(sm.videoPaused).toBe(true);
     expect(fetch).toHaveBeenCalledWith(
       "https://api.test/rtc/translate/rt_test/media-pause",

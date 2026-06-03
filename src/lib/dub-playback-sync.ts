@@ -135,6 +135,10 @@ export function bindStandardDubPlaybackSync(
     },
 
     snapPlaybackStart(): void {
+      // A1 (critical bug fix): clear stopped so the tick loop runs again after a
+      // pause/resume cycle. stop() sets stopped=true; without this the engine
+      // permanently exits tick() after the first pause/resume.
+      stopped = false;
       videoAnchor = null;
       dubAnchor = null;
       aheadEma = null;

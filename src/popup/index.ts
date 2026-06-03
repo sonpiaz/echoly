@@ -64,6 +64,51 @@ import {
   markHasEverSignedIn,
 } from "@/shared/storage-keys";
 
+// ── Popup state cache ─────────────────────────────────────────────────────────
+// We persist the last-known background state snapshot in chrome.storage.local
+// under this key so the popup can render optimistically before GET_STATE
+// resolves (masks MV3 service-worker cold-start latency of 200–1 500 ms).
+const POPUP_STATE_CACHE_KEY = "echoly_popup_state_cache";
+
+/** Persist the popup state snapshot for optimistic re-render on next open. */
+function cachePopupState(s: Partial<State>): void {
+  // Persist only the fields the popup uses for rendering — omit large arrays
+  // (languagePicker) and transient runtime IDs so the cache stays small.
+  const slim: Partial<State> = {
+    running: s.running,
+    connecting: s.connecting,
+    paused: s.paused,
+    tier: s.tier,
+    targetLanguage: s.targetLanguage,
+    realtimeVoice: s.realtimeVoice,
+    standardVoice: s.standardVoice,
+    originalVolume: s.originalVolume,
+    voiceVolume: s.voiceVolume,
+    showSource: s.showSource,
+    showTargetCaptions: s.showTargetCaptions,
+    signedInUser: s.signedInUser,
+    usage: s.usage,
+    advanced: s.advanced,
+    siteOverrides: s.siteOverrides,
+    advancedVersion: s.advancedVersion,
+    currentDomain: s.currentDomain,
+    sessionStartedAt: s.sessionStartedAt,
+  };
+  try {
+    chrome.storage?.local?.set?.({ [POPUP_STATE_CACHE_KEY]: slim }).catch(() => {});
+  } catch { /* storage unavailable */ }
+}
+
+/** Load the last-cached popup state, or null if none / unreadable. */
+async function loadCachedPopupState(): Promise<Partial<State> | null> {
+  try {
+    const r = await chrome.storage?.local?.get?.(POPUP_STATE_CACHE_KEY);
+    const v = r?.[POPUP_STATE_CACHE_KEY];
+    if (v && typeof v === "object") return v as Partial<State>;
+  } catch { /* storage unavailable */ }
+  return null;
+}
+
 interface VoiceOption {
   id: string;
   name: string;
@@ -470,8 +515,14 @@ export function initPopup(): void {
   }
 
   // ── applyState ────────────────────────────────────────────────────────
-  function applyState(s: Partial<State>) {
+  /**
+   * When `fromCache` is true the state came from the optimistic pre-render
+   * (chrome.storage cache) and should NOT be persisted back to cache — doing so
+   * would create a write-loop and mask reconciliation bugs.
+   */
+  function applyState(s: Partial<State>, fromCache = false) {
     state = { ...state, ...s };
+    if (!fromCache) cachePopupState(state);
 
     const acct = decideAccountState(state.signedInUser);
     setAccountClass(acct);
@@ -721,6 +772,21 @@ export function initPopup(): void {
     toggleBtn.disabled = true;
     try {
       if (state.running || state.connecting) {
+        // Instant stop: hit the content script DIRECTLY (bypassing the service
+        // worker relay) so dub audio is silenced in ~5ms instead of waiting on a
+        // possibly-cold SW. CONTENT_STOP → app.stopSession() is idempotent, so the
+        // authoritative SW STOP below is a safe no-op follow-up for bg state.
+        void chrome.tabs
+          .query({ active: true, currentWindow: true })
+          .then(([tab]) => {
+            if (tab?.id != null) {
+              chrome.tabs.sendMessage(tab.id, { type: "CONTENT_STOP" }).catch(() => {});
+            }
+          })
+          .catch(() => {});
+        // Optimistic UI: reflect "stopped" immediately, reconciled by the reply.
+        setStateClass("idle");
+        statusEl.textContent = "Stopping…";
         const reply = await send({ type: "STOP" });
         if (reply?.ok && reply.state) applyState(reply.state);
         else applyState({ running: false, connecting: false, paused: false });
@@ -738,6 +804,10 @@ export function initPopup(): void {
           toggleBtn.disabled = false;
           return;
         }
+        // Optimistic feedback BEFORE the (possibly cold-SW) round-trip so the
+        // user sees an immediate response instead of a frozen, disabled button.
+        setStateClass("connecting");
+        statusEl.textContent = "Connecting…";
         const reply = await send({ type: "START", settings: readSettings() });
         if (!reply?.ok) {
           statusEl.textContent = (reply as { error?: string })?.error || "Could not start.";
@@ -771,6 +841,10 @@ export function initPopup(): void {
       return;
     }
     void pushSettings();
+    // P3: switching TO Realtime is a strong start-intent signal — pre-warm now
+    // (not only on hover) so the cold WebRTC/OpenAI dial is off the click path.
+    prepareIntentSent = false;
+    maybeSendPrepareIntent();
   });
   voiceSelect.addEventListener("change", () => {
     const tier: TranslationTier =
@@ -790,6 +864,29 @@ export function initPopup(): void {
   originalVolumeInput.addEventListener("input", onVolumeChange);
   voiceVolumeInput.addEventListener("input", onVolumeChange);
   toggleBtn.addEventListener("click", () => void onToggle());
+
+  // ── Pre-warm intent (Workstream D / GAP-1) ────────────────────────────
+  // Send PREPARE_INTENT to the background on hover/focus of the Start button
+  // so the server can pre-allocate the WebRTC transport + provider WS.
+  // Guards: only when not running, realtime tier selected, button enabled.
+  // Debounce with a flag so rapid mousemoves don't spam the SW.
+  let prepareIntentSent = false;
+  function maybeSendPrepareIntent(): void {
+    if (state.running || state.connecting) return; // already live
+    if (tierSelect.value !== TIER_REALTIME) return;  // realtime only
+    if (toggleBtn.disabled) return;                  // gated (no Max plan)
+    if (prepareIntentSent) return;                   // debounce
+    prepareIntentSent = true;
+    void chrome.runtime
+      .sendMessage({ type: "PREPARE_INTENT" })
+      ?.catch?.(() => {});
+  }
+  toggleBtn.addEventListener("mouseenter", maybeSendPrepareIntent);
+  toggleBtn.addEventListener("focus", maybeSendPrepareIntent);
+  // Reset the debounce flag when the user leaves the button (so a second
+  // hover after the intent may fire again — but only once per hover session).
+  toggleBtn.addEventListener("mouseleave", () => { prepareIntentSent = false; });
+  toggleBtn.addEventListener("blur", () => { prepareIntentSent = false; });
 
   // ── Sign-in (all `[data-ec-signin]` triggers) ─────────────────────────
   for (const link of document.querySelectorAll<HTMLElement>("[data-ec-signin]")) {
@@ -1100,10 +1197,28 @@ export function initPopup(): void {
     } catch { /* storage unavailable */ }
     document.body.dataset.loadingShell = hasEverSignedIn ? "main" : "welcome";
 
+    // ── Optimistic pre-render (B3) ────────────────────────────────────────
+    // Paint the popup immediately from the last-cached state BEFORE the
+    // GET_STATE round-trip to the background SW resolves. This masks the
+    // MV3 service-worker cold-start penalty (200–1 500 ms). The optimistic
+    // render is marked `fromCache=true` so it is NOT written back to cache
+    // (preventing a stale-data loop). The authoritative GET_STATE reply
+    // reconciles by calling applyState() a second time, which overwrites.
+    const cached = await loadCachedPopupState();
+    if (cached) {
+      // Propagate hasEverSignedIn from the cached user so the shell renders
+      // correctly (e.g. "main" vs "welcome") even before GET_STATE lands.
+      if (cached.signedInUser) hasEverSignedIn = true;
+      applyState(cached, /* fromCache */ true);
+    }
+
     try {
       const reply = await send({ type: "GET_STATE" });
       if (reply?.ok && reply.state) applyState(reply.state);
       else applyState({});
+      // P3: if the popup opens with Realtime already selected, pre-warm now so
+      // the dial is off the click path even if the user never hovers Start.
+      maybeSendPrepareIntent();
     } catch (err) {
       const msg = (err as Error).message;
       if (!isBenign(msg)) { statusEl.textContent = msg; setStateClass("error"); }

@@ -15,7 +15,7 @@
 // resolves to null (no captions) so every run hits the no-caption branch.
 // `AudioContext` and `location.href` are shimmed for jsdom.
 
-import { beforeEach, describe, it, expect, vi } from "vitest";
+import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { SubtitleFirstPipeline } from "@/content/pipelines/subtitle-first-pipeline";
 import { STOP_REASON } from "@/content/stop-reasons";
 import type { PlatformAdapter, PlatformCapabilities } from "@/shared/platform-ports";
@@ -287,5 +287,216 @@ describe("SubtitleFirstPipeline — no-caption routing", () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain("No captions available");
     });
+  });
+
+  // ─── Defect-fix tests (Agent-3: redundant-token-bump + silent-capture-failure) ─
+
+  describe("no-CC fallback defect fixes", () => {
+    it("shows an error toast when startWebRtcStandard returns {ok:false}", async () => {
+      const errorMsg = "Mic permission denied";
+      const adapter = makeAdapter(true, "vid-capture-fail");
+      const app = makeApp(adapter);
+      // Override default ok:true → ok:false with a specific error
+      (app.startWebRtcStandard as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: false,
+        error: errorMsg,
+      });
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      await pipeline.start(makeSettings());
+
+      // Toast must have been shown with the error message BEFORE restorePlay
+      expect(app.overlay.showToast).toHaveBeenCalledWith(errorMsg, 6000);
+    });
+
+    it("falls back to 'Couldn't start live dubbing' when error is undefined in {ok:false}", async () => {
+      const adapter = makeAdapter(true, "vid-capture-no-msg");
+      const app = makeApp(adapter);
+      (app.startWebRtcStandard as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: false,
+        // no error field
+      });
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      await pipeline.start(makeSettings());
+
+      expect(app.overlay.showToast).toHaveBeenCalledWith("Couldn't start live dubbing", 6000);
+    });
+
+    it("does NOT double-bump pageToken before startWebRtcStandard (pageToken delta = 1 from nextToken only)", async () => {
+      const adapter = makeAdapter(true, "vid-token-check");
+      const app = makeApp(adapter);
+      // Capture pageToken at the moment startWebRtcStandard is called
+      let tokenAtCallTime = -1;
+      (app.startWebRtcStandard as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        tokenAtCallTime = app.sm.pageToken;
+        return { ok: true };
+      });
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      const initialToken = app.sm.pageToken; // 0 before start()
+      await pipeline.start(makeSettings());
+
+      // start() calls sm.nextToken() once → pageToken becomes 1.
+      // The redundant sm.pageToken += 1 was removed, so pageToken at call time = 1,
+      // not 2. The delta from initial (0) to call-time must be exactly 1.
+      expect(tokenAtCallTime - initialToken).toBe(1);
+    });
+
+    it("shows TOAST_NO_CC_FALLBACK when startWebRtcStandard returns {ok:true}", async () => {
+      // Arrange: use default mock (ok: true)
+      const adapter = makeAdapter(true, "vid-toast-ok");
+      const app = makeApp(adapter);
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      await pipeline.start(makeSettings());
+
+      // Must show the "falling back to live dub" toast (not an error toast)
+      const { TOAST_NO_CC_FALLBACK: FALLBACK_MSG } = await import(
+        "@/shared/product-copy"
+      );
+      expect(app.overlay.showToast).toHaveBeenCalledWith(FALLBACK_MSG, 5000);
+    });
+  });
+});
+
+// ─── B3: Pipeline-level HTML5 fallback ───────────────────────────────────────
+//
+// When adapter.fetchCaptions returns null BUT the <video> has textTrack cues,
+// the pipeline should use those cues and NOT call startWebRtcStandard (start())
+// or return "No captions available" (restart()).
+
+describe("SubtitleFirstPipeline — B3 HTML5 textTrack fallback", () => {
+  // Build a mock TextTrackCueList with a single cue
+  function makeLoadedTrackList(): TextTrackList {
+    const cue = {
+      startTime: 1.0,
+      endTime: 4.0,
+      text: "Fallback cue from textTracks.",
+    } as unknown as VTTCue;
+
+    const cueList = {
+      length: 1,
+      0: cue,
+      [Symbol.iterator]() {
+        let i = 0;
+        return {
+          next() {
+            return i < 1
+              ? { value: cue, done: false as const }
+              : { value: undefined as unknown as VTTCue, done: true as const };
+          },
+        };
+      },
+    } as unknown as TextTrackCueList;
+
+    const track = {
+      kind: "subtitles",
+      language: "en",
+      label: "English",
+      mode: "showing" as TextTrackMode,
+      cues: cueList,
+    } as unknown as TextTrack;
+
+    return {
+      length: 1,
+      0: track,
+      [Symbol.iterator]() {
+        let i = 0;
+        return {
+          next() {
+            return i < 1
+              ? { value: track, done: false as const }
+              : { value: undefined as unknown as TextTrack, done: true as const };
+          },
+        };
+      },
+    } as unknown as TextTrackList;
+  }
+
+  let audioCtxShimB3: ReturnType<typeof makeAudioContextShim>;
+
+  beforeEach(() => {
+    document.body.innerHTML = '<video style="width:640px;height:360px"></video>';
+    const video = document.querySelector("video")!;
+    Object.defineProperty(video, "getBoundingClientRect", {
+      value: () => ({ width: 640, height: 360, left: 0, top: 0, right: 640, bottom: 360 }),
+      configurable: true,
+    });
+
+    // Give the video element loaded textTracks
+    Object.defineProperty(video, "textTracks", {
+      get: () => makeLoadedTrackList(),
+      configurable: true,
+    });
+
+    audioCtxShimB3 = makeAudioContextShim();
+    (window as { AudioContext: unknown }).AudioContext = vi
+      .fn()
+      .mockReturnValue(audioCtxShimB3);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  it("start(): uses textTrack cues when adapter.fetchCaptions returns null — does NOT call startWebRtcStandard", async () => {
+    const adapter = makeAdapter(true, "html5-fallback-vid");
+    // fetchCaptions returns null — no adapter-level captions
+    (adapter.fetchCaptions as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    const app = makeApp(adapter);
+
+    // renderSubtitleDubStream must succeed — stub it so the pipeline can boot
+    // We need to mock the echoly-api module so renderSubtitleDubBatch/Stream work.
+    // We can just mock the stream to yield nothing and let pipeline proceed.
+    const echolyApi = await import("@/lib/echoly-api");
+    vi.spyOn(echolyApi, "renderSubtitleDubStream").mockImplementation(async function* () {
+      // yield nothing — empty stream simulates no TTS data
+    });
+
+    const pipeline = new SubtitleFirstPipeline(app as never);
+    const result = await pipeline.start(makeSettings());
+
+    // The pipeline found HTML5 cues → proceeded to caption path, NOT live-dub fallback
+    expect(app.startWebRtcStandard).not.toHaveBeenCalled();
+    // Should be ok (pipeline started) or at minimum did NOT trigger no-CC fallback
+    // (ok may be false if audio/video play fails in jsdom — that's fine)
+    expect(app.startWebRtcStandard).not.toHaveBeenCalled();
+  });
+
+  it("restart(): uses textTrack cues when adapter.fetchCaptions returns null — does NOT return 'No captions available'", async () => {
+    const adapter = makeAdapter(true, "html5-restart-vid");
+    (adapter.fetchCaptions as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    const app = makeApp(adapter);
+
+    const echolyApi = await import("@/lib/echoly-api");
+    vi.spyOn(echolyApi, "renderSubtitleDubStream").mockImplementation(async function* () {
+      // empty stream
+    });
+
+    // Seed a running subtitle-first session so restart() has something to evict
+    const { SubtitleFirstPipeline: SFP } = await import("@/content/pipelines/subtitle-first-pipeline");
+    const pipeline = new SFP(app as never);
+
+    // Set a minimal prior session so restart doesn't crash on oldS
+    app.sm.session = {
+      kind: "subtitle-first",
+      token: 0,
+      stopFlag: false,
+      playbackTimer: null,
+      currentSource: null,
+      abortController: new AbortController(),
+      audioCtx: audioCtxShimB3,
+      outputGain: audioCtxShimB3.createGain(),
+    };
+
+    const result = await pipeline.restart(makeSettings(), "html5-restart-vid");
+
+    // Should NOT return "No captions available for this video."
+    // (It may fail for other jsdom reasons like audio graph, but NOT that specific error)
+    expect(result.error).not.toBe("No captions available for this video.");
   });
 });

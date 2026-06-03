@@ -211,6 +211,15 @@ export interface PlatformAdapter {
   shouldIgnorePlaybackEvent?(ev: Event, video: HTMLVideoElement): boolean;
 
   /**
+   * Returns `true` when an ad is currently playing on this platform (e.g. a
+   * YouTube pre/mid-roll). When implemented, `startSession` gates on this:
+   * Translate pressed during an ad enters the "ad-wait" state and defers until
+   * the ad ends, rather than translating the ad / mis-reporting "no captions".
+   * Adapters that cannot detect ads omit this (treated as "no ad detection").
+   */
+  isAdPlaying?(): boolean;
+
+  /**
    * Register background-SW services (e.g. `webRequest` intercept for the
    * YouTube timedtext cache). Called once at SW boot via
    * `installAllBackgroundServices()` in the registry.

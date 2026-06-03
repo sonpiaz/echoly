@@ -10,9 +10,13 @@
 // ahead and updates the live subtitle display.
 
 import { computeGain } from "@/lib/audio";
-import { isPipelineToastError, renderSubtitleDubBatch } from "@/lib/echoly-api";
+import { isPipelineToastError, renderSubtitleDubBatch, renderSubtitleDubStream } from "@/lib/echoly-api";
 import { STANDARD_DEFAULT_VOICE } from "@/shared/constants";
 import type { StartSettings } from "@/shared/types";
+import {
+  getPrefetchedCaptions,
+  clearPrefetchedCaptions,
+} from "@/platforms/youtube/caption-cache";
 import {
   regroupToSentences,
   SUBFIRST_BATCH_SIZE,
@@ -20,9 +24,14 @@ import {
 } from "@/lib/caption-utils";
 import type { SubtitleFirstSession } from "../session-manager";
 import type { ContentApp } from "../index";
-import { TOAST_NO_CC_FALLBACK, TOAST_PRESS_PLAY } from "@/shared/product-copy";
+import {
+  TOAST_NO_CC_FALLBACK,
+  TOAST_PRESS_PLAY,
+  STATUS_BUFFERING,
+} from "@/shared/product-copy";
 import { STOP_REASON, STOP_REASON_MESSAGE } from "../stop-reasons";
 import { currentSiteHost } from "@/shared/site-host";
+import { fetchHtml5TextTrackCaptions } from "@/lib/html5-captions";
 
 // Start a cue's dub up to this many seconds before its caption start.
 const SUBFIRST_DUE_AHEAD_SEC = 0.15;
@@ -30,8 +39,17 @@ const SUBFIRST_DUE_AHEAD_SEC = 0.15;
 // playing it late. Bounds how far the dub can drift behind on dense captions.
 const SUBFIRST_DRIFT_SKIP_SEC = 3;
 // How many sentences to decode before the initial video.play() at startup
-// (larger = less starvation risk; +1 extra TTS round-trip vs the old cap of 2).
-const SUBFIRST_PREBUFFER_COUNT = 3;
+// (lower = less startup freeze; rolling renderer covers the lookahead window).
+// Lines whose TTS must finish before video.play() is released on Start. This IS
+// the user-visible "frozen video" window, so we gate on just the FIRST due line
+// (one TTS) and let #runRollingRenderer fill the rest immediately after play;
+// #playbackTick's micro-pause is the safety net if a later cue isn't ready in time.
+const SUBFIRST_PREBUFFER_COUNT = 1;
+
+// Rolling-renderer poll interval. Kept short so the buffer-ahead pump reacts
+// quickly right after Start (and after a seek) instead of the playhead catching
+// an un-rendered cue during the first second — the main source of early stutter.
+const SUBFIRST_RENDER_TICK_MS = 350;
 // Maximum ms the driver will keep the video paused waiting for a cue's _buffer.
 // Once exceeded the micro-pause is released and the normal drift-skip logic takes
 // over so we never freeze forever.
@@ -126,14 +144,24 @@ export class SubtitleFirstPipeline {
     }
 
     let captionResult;
-    try {
-      captionResult = await adapter.fetchCaptions({
-        videoId,
-        preferLang: sm.settings.targetLanguage,
-        signal: abortController.signal,
-      });
-    } catch {
-      captionResult = null;
+    // B4: Consume the eager prefetch result if available (YouTube-only).
+    // The NavigationWatcher populated this cache when the video was detected
+    // without an active session. One-shot: clear after reading so stale data
+    // is never re-used on a subsequent Start.
+    const prefetched = adapter.id === "youtube" ? getPrefetchedCaptions(videoId) : null;
+    if (prefetched) {
+      clearPrefetchedCaptions(videoId);
+      captionResult = prefetched;
+    } else {
+      try {
+        captionResult = await adapter.fetchCaptions({
+          videoId,
+          preferLang: sm.settings.targetLanguage,
+          signal: abortController.signal,
+        });
+      } catch {
+        captionResult = null;
+      }
     }
 
     if (sm.isSessionStale(token) || newSession.stopFlag) {
@@ -143,9 +171,25 @@ export class SubtitleFirstPipeline {
     }
 
     if (!captionResult?.captions.length) {
+      // B3: pipeline-level HTML5 text-track fallback — try the standard mechanism
+      // BEFORE concluding "no captions". Covers generic sites and any platform that
+      // ships standard <track> elements even when the adapter's fetchCaptions returns
+      // null/empty (Udemy, generic). Uses the same abort signal already in scope.
+      const html5 = await fetchHtml5TextTrackCaptions(video, {
+        preferLang: sm.settings.targetLanguage,
+        signal: abortController.signal,
+      });
+      if (html5?.captions.length) {
+        captionResult = html5;
+      }
+    }
+
+    if (!captionResult?.captions.length) {
       this.#teardownAudio(newSession);
       sm.session = null;
-      sm.pageToken += 1;
+      // NOTE: do NOT bump sm.pageToken here — startWebRtcStandard → startWebRtcSession
+      // calls sm.nextToken() itself, which increments pageToken. A redundant bump here
+      // would double-increment and stale out the session token from nextToken().
       overlay.removeOverlay();
 
       // Branch on audioCapture capability:
@@ -156,6 +200,7 @@ export class SubtitleFirstPipeline {
         if (result.ok) {
           overlay.showToast(TOAST_NO_CC_FALLBACK, 5000);
         } else {
+          overlay.showToast(result.error ?? "Couldn't start live dubbing", 6000);
           restorePlay();
         }
         return result;
@@ -231,6 +276,19 @@ export class SubtitleFirstPipeline {
       // not yet _played) gets src.start() while the session is still alive.
       onEndedBefore: () => this.#playbackTick(newSession),
     });
+
+    // Resume the AudioContext BEFORE the video plays. AudioContext.resume() is
+    // async; if we release the video while the context is still "suspended", the
+    // first #playbackTick bails at the suspended-guard and the cue only starts on
+    // a later tick — so the video visibly moves ~250ms before any dub is heard
+    // ("video chạy 1 tý mới thấy tiếng"). Awaiting resume (bounded) makes the
+    // first cue start in lock-step with playback. Soft-fail so it can't hang.
+    if (audioCtx.state === "suspended") {
+      await Promise.race([
+        audioCtx.resume().catch(() => {}),
+        new Promise((r) => setTimeout(r, 400)),
+      ]);
+    }
 
     try {
       await video.play();
@@ -378,18 +436,37 @@ export class SubtitleFirstPipeline {
     }
 
     let captionResult;
-    try {
-      captionResult = await adapter.fetchCaptions({
-        videoId: newVideoId,
-        preferLang: settings.targetLanguage,
-        signal: abortController.signal,
-      });
-    } catch {
-      captionResult = null;
+    // B4: Consume the eager prefetch result if available (YouTube-only).
+    const prefetchedRestart = adapter.id === "youtube" ? getPrefetchedCaptions(newVideoId) : null;
+    if (prefetchedRestart) {
+      clearPrefetchedCaptions(newVideoId);
+      captionResult = prefetchedRestart;
+    } else {
+      try {
+        captionResult = await adapter.fetchCaptions({
+          videoId: newVideoId,
+          preferLang: settings.targetLanguage,
+          signal: abortController.signal,
+        });
+      } catch {
+        captionResult = null;
+      }
     }
 
     if (sm.isSessionStale(token) || newSession.stopFlag) {
       return { ok: false, error: "Cancelled." };
+    }
+
+    if (!captionResult?.captions.length) {
+      // B3: pipeline-level HTML5 text-track fallback in restart() — same rescue
+      // as in start() so auto-next videos with <track> elements are not abandoned.
+      const html5 = await fetchHtml5TextTrackCaptions(video, {
+        preferLang: settings.targetLanguage,
+        signal: abortController.signal,
+      });
+      if (html5?.captions.length) {
+        captionResult = html5;
+      }
     }
 
     if (!captionResult?.captions.length) {
@@ -471,7 +548,13 @@ export class SubtitleFirstPipeline {
         .slice(Math.max(0, i - 4), i)
         .filter((t): t is string => typeof t === "string" && t.trim().length > 0);
       const siteHost = currentSiteHost() ?? undefined;
-      const dubbed = await renderSubtitleDubBatch({
+
+      // E-4: pass abortController.signal on EVERY batch so Stop halts server synthesis.
+      // E-5: populate s.sentences[idx]._buffer in STRICT index order as lines arrive
+      //      (the SSE generator yields line 0 first, then 1, then 2, …) so
+      //      onResumeCheck's "next due cue buffered?" check behaves identically to
+      //      the buffered path.
+      for await (const item of renderSubtitleDubStream({
         apiBase: sm.apiBase,
         bearer: s.apiBearer,
         sentences: slice,
@@ -482,20 +565,27 @@ export class SubtitleFirstPipeline {
         sessionId: `sf_${s.token}`,
         siteHost,
         videoTitle: s.videoTitle,
-        signal: s.abortController.signal,
-      });
-      if (sm.session !== s || s.stopFlag) return;
-      for (let j = 0; j < dubbed.length; j++) {
-        const idx = i + j;
-        s.translations[idx] = dubbed[j]!.text;
-        const mp3 = dubbed[j]!.audioMp3;
-        if (mp3.byteLength > 0 && s.audioCtx) {
+        signal: s.abortController.signal,  // E-4: always thread the signal
+      })) {
+        // Check stale/stopped BEFORE writing each decoded buffer so we bail
+        // promptly when Stop is pressed mid-stream.
+        if (sm.session !== s || s.stopFlag) return;
+
+        // item.index is the 0-based index WITHIN the slice — map to global idx.
+        const idx = i + item.index;
+        s.translations[idx] = item.text;
+
+        // E-5: write _buffer in strict index order (the generator yields in order).
+        if (item.audioMp3.byteLength > 0 && s.audioCtx) {
           try {
-            s.sentences[idx]!._buffer = await s.audioCtx.decodeAudioData(mp3.slice(0));
+            s.sentences[idx]!._buffer = await s.audioCtx.decodeAudioData(item.audioMp3.slice(0));
           } catch {
-            /* ignore decode failure */
+            /* ignore decode failure — _buffer stays undefined; playback tick skips */
           }
         }
+
+        // Re-check after async decodeAudioData — an abort may have fired.
+        if (sm.session !== s || s.stopFlag) return;
       }
     }
   }
@@ -528,7 +618,10 @@ export class SubtitleFirstPipeline {
   #enterSystemPause(s: SubtitleFirstSession): void {
     s._systemPaused = true;
     s._bufferWaitStartedAt = performance.now();
-    this.app.overlay.setStatusText("Buffering…");
+    // C2: emit "buffering" overlay state so the branded spinner is shown during
+    // the micro-pause (matches the clock-RUNNING branch in overlay.ts).
+    this.app.overlay.setOverlayState("buffering");
+    this.app.overlay.setStatusText(STATUS_BUFFERING);
     try {
       this.app.capture.videoEl?.pause();
     } catch {
@@ -540,6 +633,8 @@ export class SubtitleFirstPipeline {
   #resumeSystemPause(s: SubtitleFirstSession): void {
     s._systemPaused = false;
     s._bufferWaitStartedAt = undefined;
+    // C2: restore "live" state when the micro-pause ends.
+    this.app.overlay.setOverlayState("live");
     this.app.overlay.setStatusText("Translating");
     try {
       this.app.capture.videoEl?.play().catch(() => {});
@@ -752,7 +847,10 @@ export class SubtitleFirstPipeline {
   async #runRollingRenderer(s: SubtitleFirstSession, video: HTMLVideoElement): Promise<void> {
     const { sm } = this.app;
     while (sm.session === s && !s.stopFlag) {
-      await new Promise((r) => setTimeout(r, 1000));
+      // Poll on SUBFIRST_RENDER_TICK_MS so the buffer-ahead pump reacts quickly
+      // after Start/seek (was 1000ms — too slow, the playhead caught un-rendered
+      // cues in the first second causing early stutter).
+      await new Promise((r) => setTimeout(r, SUBFIRST_RENDER_TICK_MS));
       if (sm.session !== s || s.stopFlag) continue;
       // While the user has genuinely paused the video, do NO translate/display work
       // — otherwise the dub keeps being produced and the UI looks like it is still
@@ -805,6 +903,9 @@ export class SubtitleFirstPipeline {
   }
 
   #teardownAudio(s: SubtitleFirstSession): void {
+    // Stop the playing source FIRST (synchronous, instant silence) — closing the
+    // AudioContext is async and would let the current cue ring out for a beat.
+    this.#stopCurrent(s);
     try {
       s.audioCtx?.close();
     } catch {

@@ -73,6 +73,12 @@ export function handleContentEvent(
     void deps.session.stop();
     return;
   }
+  if (message.type === "START_REQUEST") {
+    // On-page launcher click — run the same START path as the popup (uses stored
+    // settings; targets the active tab, which is the launcher's tab).
+    void deps.session.start();
+    return;
+  }
   if (message.type === "CONTENT_ENDED") {
     store.setRunning(false);
     store.setConnecting(false);
@@ -181,6 +187,8 @@ async function handlePopupMessage(
       return session.refreshSettings();
     case "LIST_AUDIO_OUTPUT_DEVICES":
       return listAudioOutputDevices();
+    case "PREPARE_INTENT":
+      return prepareIntentOnActiveTab(store);
     default: {
       const unsupported = message as { type?: string };
       return { ok: false, error: "Unknown message: " + unsupported.type };
@@ -195,6 +203,41 @@ async function handlePopupMessage(
  *  it does NOT mock a device list (the SW has no way to know what's plugged
  *  in). The contract documents this as the architected behaviour, not a
  *  TODO: enumeration is a presentation concern. */
+/**
+ * Pre-warm intent relay (Workstream D / GAP-1).
+ * Forwards CONTENT_PREPARE_INTENT to the active content tab — fire-and-forget from
+ * the popup's mouseenter/focus on the Start button. Guards:
+ *  • Only fires when a session is NOT already running/connecting.
+ *  • Safe no-op if the tab can't be found or the content script isn't injected.
+ *  • Does not relay to tabs without a meaningful tabId.
+ */
+async function prepareIntentOnActiveTab(store: Store): Promise<{ ok: true }> {
+  // Guard: already running — the warm slot is useless.
+  const { running, connecting, tabId } = store.state;
+  if (running || connecting) return { ok: true };
+
+  // Find the active tab to relay to. Prefer the tracked tabId if available;
+  // fall back to the focused window's active tab (popup context heuristic).
+  let targetTabId: number | null = tabId ?? null;
+  if (!targetTabId) {
+    try {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      targetTabId = activeTab?.id ?? null;
+    } catch {
+      return { ok: true }; // tabs API unavailable — no-op
+    }
+  }
+  if (!targetTabId) return { ok: true };
+
+  // Fire-and-forget relay; any failure (content script not injected, etc.) is silent.
+  try {
+    await chrome.tabs.sendMessage(targetTabId, { type: "CONTENT_PREPARE_INTENT" });
+  } catch {
+    // Content script not injected / tab closed — acceptable, just skips pre-warm.
+  }
+  return { ok: true };
+}
+
 async function listAudioOutputDevices(): Promise<AudioDeviceList> {
   const md: MediaDevices | undefined = (
     globalThis as { navigator?: { mediaDevices?: MediaDevices } }
@@ -235,6 +278,61 @@ export function routeMessage(
     const entry = videoId ? getYtCaptionCache(videoId) : undefined;
     sendResponse(entry ? { ok: true, ...entry } : { ok: false });
     return false;
+  }
+
+  // On-page launcher: report sign-in (gates the launcher). Each call also wakes /
+  // keeps the MV3 service worker warm (P2) so the eventual Start is off the cold path.
+  if (isFromContent(sender) && message.type === "GET_LAUNCH_STATE") {
+    sendResponse({ ok: true, signedIn: !!deps.store.state.signedInUser });
+    return false;
+  }
+
+  // MAIN-world player response: run executeScript on the sender's tab to read the
+  // live YouTube caption tracks from getPlayerResponse() — always fresh post-SPA/ad.
+  if (isFromContent(sender) && message.type === "GET_YT_PLAYER_RESPONSE") {
+    const tabId = sender.tab?.id;
+    if (tabId == null) {
+      sendResponse({ ok: false });
+      return true;
+    }
+    void (async () => {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: () => {
+            const p = document.getElementById("movie_player");
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const player = p as any;
+            const tracks =
+              player && typeof player.getPlayerResponse === "function"
+                ? player
+                    .getPlayerResponse()
+                    ?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+                : null;
+            return Array.isArray(tracks)
+              ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (tracks as any[]).map((t) => ({
+                  baseUrl: t.baseUrl as string | undefined,
+                  languageCode: t.languageCode as string | undefined,
+                  kind: t.kind as string | undefined,
+                }))
+              : null;
+          },
+        });
+        const tracks = results?.[0]?.result;
+        if (tracks && Array.isArray(tracks) && tracks.length) {
+          sendResponse({ ok: true, captionTracks: tracks });
+        } else {
+          sendResponse({ ok: false });
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        console.warn("[router] GET_YT_PLAYER_RESPONSE executeScript failed:", error);
+        sendResponse({ ok: false });
+      }
+    })();
+    return true; // async — keep the message channel open
   }
 
   // Content-originated messages (have sender.tab).

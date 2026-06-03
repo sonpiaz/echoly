@@ -29,6 +29,27 @@ export const TOAST_PRESS_PLAY = "Press play on the video to start dubbing";
 export const TOAST_NO_CC_FALLBACK =
   "No captions — using live voice dubbing (~5s lag)";
 
+/** Shown in the "ad-wait" overlay state while a YouTube ad plays. */
+export const STATUS_AD_WAIT = "Waiting for ad to finish…";
+
 export const STATUS_PAUSED_VIDEO = "Paused — press play to resume";
 export const STATUS_SWITCHING_VIDEO = "Switching to next video…";
 export const STATUS_LOADING_NEXT = "Loading next video…";
+
+// ── Phase-label copy for the loading/buffering UX (Workstream C3) ──────────
+// These are the honest status strings shown during each loading phase.
+// Callers set these via overlay.setStatusText(). Keeping them here (rather
+// than inline) means copy-only changes stay in one place and referencing code
+// gets a named constant the type-checker can track.
+
+/** Shown while acquiring audio capture / initial WebRTC handshake (pre-connect). */
+export const STATUS_CONNECTING = "Connecting…";
+
+/** Shown during the caption-fetch + first TTS batch phase (subtitle-first pipeline). */
+export const STATUS_PREPARING_DUB = "Preparing dub…";
+
+/** Shown during subtitle-first micro-pause (next cue not yet buffered). */
+export const STATUS_BUFFERING = "Buffering…";
+
+/** Shown when a WebRTC session is reconnecting after connection loss. */
+export const STATUS_RECONNECTING = "Reconnecting…";

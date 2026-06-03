@@ -12,8 +12,9 @@
 import type { CaptionPosition } from "./advanced";
 import type { HistoryTurn, TranslationTier } from "./types";
 
-/** Drives the `data-state` attribute on `.ec-root` (legacy values). */
-export type OverlayState = "ready" | "connecting" | "live" | "paused" | "switching" | "error";
+/** Drives the `data-state` attribute on `.ec-root` (legacy values).
+ *  "ad-wait": a YouTube ad is playing; translation is deferred until it ends. */
+export type OverlayState = "ready" | "connecting" | "live" | "paused" | "switching" | "buffering" | "error" | "ad-wait";
 
 /** Toast options. A bare number is shorthand for `{ durationMs }` (legacy
  *  showToast accepted either a number or an opts object). `cta`/`ctaLabel`

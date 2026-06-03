@@ -245,6 +245,46 @@ describe("overlay view methods", () => {
     );
   });
 
+  // GAP-4: "buffering" sets data-state="buffering" AND joins the clock-RUNNING
+  // branch (elapsed timer starts / sessionStartedAt set). Guards against a refactor
+  // that drops "buffering" from the running branch (overlay.ts:~791).
+  it('setOverlayState("buffering") sets data-state=buffering AND restarts the elapsed clock after paused', () => {
+    vi.useFakeTimers();
+    try {
+      const ov = createOverlay();
+      ov.buildOverlay(makeCallbacks());
+      const root = document.body.querySelector(".ec-root") as HTMLElement;
+      const elapsed = root.querySelector("[data-ec-elapsed]") as HTMLElement | null;
+
+      // 1. Start a live session so the clock is running.
+      ov.setOverlayState("live");
+      expect(root.dataset.state).toBe("live");
+
+      // 2. Pause → clock stops, elapsed resets to "00:00".
+      ov.setOverlayState("paused");
+      expect(root.dataset.state).toBe("paused");
+      // After pausing the elapsed timer is stopped and sessionStartedAt cleared.
+      if (elapsed) {
+        expect(elapsed.textContent).toBe("00:00");
+      }
+
+      // 3. Buffering (e.g. paused→buffering transition on resume) → must join the
+      //    RUNNING branch, NOT the paused/ready/error branch.
+      ov.setOverlayState("buffering");
+      expect(root.dataset.state).toBe("buffering");
+
+      // Advance fake time 2 s. If "buffering" joined the RUNNING branch, the
+      // setInterval fires → elapsed updates past "00:00". If it fell through both
+      // branches (no startElapsedTimer), the element stays "00:00".
+      vi.advanceTimersByTime(2000);
+      if (elapsed) {
+        expect(elapsed.textContent).not.toBe("00:00");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("setTargetText sets text + dir=ltr for LTR languages", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());

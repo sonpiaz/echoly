@@ -19,7 +19,7 @@ import type {
 
 const GENERIC_CAPABILITIES: PlatformCapabilities = {
   audioCapture: true,
-  subtitleFirst: false,
+  subtitleFirst: true,
   isSpa: false,
   hasNativeCaptions: false,
   hasAdOverlays: false,

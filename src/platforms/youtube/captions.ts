@@ -63,6 +63,67 @@ export function parseJson3Events(
   return out;
 }
 
+// ─── Timedtext body parser (json3 OR srv3/srv1 XML) ───────────────────────────
+
+/**
+ * Parse a raw YouTube timedtext response body into CaptionCue[]. Handles the
+ * json3 format (`{events:[...]}`) AND the XML formats (srv3 `<p t d>` / srv1
+ * `<text start dur>`) — the player may fetch any of these, and the MAIN-world
+ * capture relays whatever the player actually got (pot-proof, zero refetch).
+ * Returns [] when the body is empty/unparseable.
+ */
+export function parseTimedtextBody(body: string): CaptionCue[] {
+  const trimmed = body?.trim();
+  if (!trimmed) return [];
+  // json3
+  if (trimmed.startsWith("{")) {
+    try {
+      const json = JSON.parse(trimmed) as {
+        events?: Parameters<typeof parseJson3Events>[0];
+      };
+      return parseJson3Events(json.events || []);
+    } catch {
+      return [];
+    }
+  }
+  // XML (srv3 / srv1)
+  if (trimmed.startsWith("<")) {
+    try {
+      const doc = new DOMParser().parseFromString(trimmed, "text/xml");
+      if (doc.querySelector("parsererror")) return [];
+      const out: CaptionCue[] = [];
+      // srv3: <body><p t="ms" d="ms"><s>seg</s>...</p></body>
+      const ps = Array.from(doc.querySelectorAll("p"));
+      if (ps.length) {
+        for (const p of ps) {
+          const t = Number(p.getAttribute("t"));
+          if (!Number.isFinite(t)) continue;
+          const d = Number(p.getAttribute("d") || "0");
+          const text = (p.textContent || "").replace(/\s+/g, " ").trim();
+          if (!text) continue;
+          const start = t / 1000;
+          out.push({ start, end: start + (Number.isFinite(d) ? d / 1000 : 0), text });
+        }
+        if (out.length) return out;
+      }
+      // srv1: <transcript><text start="s" dur="s">...</text></transcript>
+      const texts = Array.from(doc.querySelectorAll("text"));
+      for (const el of texts) {
+        const start = Number(el.getAttribute("start"));
+        if (!Number.isFinite(start)) continue;
+        const dur = Number(el.getAttribute("dur") || "0");
+        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!text) continue;
+        out.push({ start, end: start + (Number.isFinite(dur) ? dur : 0), text });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 // ─── Subtitle translation prompt helpers ─────────────────────────────────────
 
 export function buildSubtitleTranslatePrompt(

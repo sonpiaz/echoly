@@ -5,7 +5,7 @@
 
 import type { PlatformAdapter, PlatformCapabilities, CaptionFetchResult } from "@/shared/platform-ports";
 import { getYouTubeVideoId } from "./captions";
-import { fetchYouTubeCaptions, readPlayerResponseFromDom } from "./captions-fetch";
+import { fetchYouTubeCaptionsWithSettle, readPlayerResponseFromDom } from "./captions-fetch";
 import { installYoutubeCaptionCache } from "./caption-cache";
 import { isYouTubeAdPlaying } from "./ad-state";
 import { suppressYouTubeNativeCaptions } from "./native-captions";
@@ -75,7 +75,7 @@ export const youtubeAdapter: PlatformAdapter = {
     preferLang?: string;
     signal: AbortSignal;
   }): Promise<CaptionFetchResult | null> {
-    return fetchYouTubeCaptions(opts.videoId, opts.preferLang ?? "en", opts.signal);
+    return fetchYouTubeCaptionsWithSettle(opts.videoId, opts.preferLang ?? "en", opts.signal);
   },
 
   readLiveCaptionText(): string | null {
@@ -93,6 +93,10 @@ export const youtubeAdapter: PlatformAdapter = {
 
   suppressNativeCaptions(): () => void {
     return suppressYouTubeNativeCaptions();
+  },
+
+  isAdPlaying(): boolean {
+    return isYouTubeAdPlaying();
   },
 
   shouldIgnorePlaybackEvent(_ev: Event, _video: HTMLVideoElement): boolean {

@@ -452,6 +452,8 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
         !next.startsWith(prev) &&
         !prev.startsWith(next);
       elements.target.textContent = next;
+      elements.target.removeAttribute("role");
+      elements.target.removeAttribute("aria-label");
       if (elements.panelPreview) {
         elements.panelPreview.dir = dir;
         elements.panelPreview.textContent = next;
@@ -467,7 +469,7 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     } else {
       const hint =
         elements.status?.textContent?.trim() || "Preparing translation…";
-      elements.target.textContent = hint;
+      renderCaptionLoader(elements.target, hint);
       if (elements.panelPreview) elements.panelPreview.textContent = "";
       elements.target.classList.remove("ec-caption--rolling");
       elements.target.classList.add("ec-target--placeholder");
@@ -475,6 +477,40 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
       resetCaptionScroll(elements.panelPreview);
       lastRenderedCaption = "";
     }
+  }
+
+  /**
+   * Placeholder/loading state for the on-video caption card: instead of dumping
+   * raw status text ("Translating 290 lines"), show a branded 3-dot gradient
+   * loader. The status text is preserved as an aria-label for screen readers.
+   * The dots are rebuilt only when absent (so re-paints don't restart the pulse);
+   * the label is refreshed every call so the a11y text stays current.
+   */
+  function renderCaptionLoader(el: HTMLElement, label: string): void {
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-label", label);
+    if (el.querySelector(".ec-caption-loader")) return;
+    el.textContent = "";
+    // Single branded Echoly logo mark (gradient tile + white waveform), the same
+    // glyph as the dock, gently breathing — one clean icon, no scattered bars.
+    const NS = "http://www.w3.org/2000/svg";
+    const loader = document.createElement("span");
+    loader.className = "ec-caption-loader";
+    loader.setAttribute("aria-hidden", "true");
+    const mark = document.createElement("span");
+    mark.className = "ec-caption-loader-mark";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2.2");
+    svg.setAttribute("stroke-linecap", "round");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", "M7 9v6M11 6v12M15 8v8M19 11v2");
+    svg.appendChild(path);
+    mark.appendChild(svg);
+    loader.appendChild(mark);
+    el.appendChild(loader);
   }
 
   function setSelectValue(
@@ -784,13 +820,21 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   // ───── State / text setters (legacy content.js:318-329) ─────
   function setOverlayState(state: OverlayState): void {
     if (root) root.dataset.state = state;
-    if (state === "live" || state === "connecting" || state === "switching") {
-      // "switching" is a brief in-session transition — the clock keeps running
-      // (the session is still alive; only "paused" freezes it).
+    if (
+      state === "live" ||
+      state === "connecting" ||
+      state === "switching" ||
+      state === "buffering"
+    ) {
+      // "switching" and "buffering" are brief in-session transitions — the
+      // clock keeps running (the session is still alive; only "paused" freezes
+      // it). "buffering" after a paused→resume restarts the elapsed clock so
+      // the user sees active progress rather than a frozen counter.
       if (sessionStartedAt == null) sessionStartedAt = Date.now();
       startElapsedTimer();
-    } else if (state === "ready" || state === "error" || state === "paused") {
-      // "paused" must stop the running clock so the overlay doesn't look live.
+    } else if (state === "ready" || state === "error" || state === "paused" || state === "ad-wait") {
+      // "paused" and "ad-wait" must stop the running clock — no session is
+      // running during either of these states.
       stopElapsedTimer();
     }
   }

@@ -42,7 +42,11 @@ export type PopupToBgMessage =
   | { type: "SAVE_SITE_DEFAULT"; domain: string }       // popup snapshots current advanced into the override
   | { type: "REFRESH_SETTINGS" }                        // force GET /v1/me/settings
   // ── Output device enumeration (popup picker populating) ────────────────
-  | { type: "LIST_AUDIO_OUTPUT_DEVICES" };
+  | { type: "LIST_AUDIO_OUTPUT_DEVICES" }
+  // ── Pre-warm intent (Workstream D): sent on Start button hover/focus ───
+  // Only fires when the realtime tier is selected and no session is running.
+  // Background relays to the active content script; any error is a no-op.
+  | { type: "PREPARE_INTENT" };
 
 export type AudioDeviceList = {
   ok: true;
@@ -63,6 +67,7 @@ export interface PopupToBgResponse {
   SAVE_SITE_DEFAULT:        StateResult;
   REFRESH_SETTINGS:         StateResult;
   LIST_AUDIO_OUTPUT_DEVICES: AudioDeviceList;
+  PREPARE_INTENT: Ack;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -78,7 +83,9 @@ export type BgToContentMessage =
   | { type: "CONTENT_START"; settings: StartSettings }
   | { type: "CONTENT_STOP" }
   | { type: "CONTENT_UPDATE_SETTINGS"; settings: State }
-  | { type: "CONTENT_UPDATE_VOLUME"; originalVolume: number; voiceVolume: number };
+  | { type: "CONTENT_UPDATE_VOLUME"; originalVolume: number; voiceVolume: number }
+  /** Pre-warm intent relay: background forwards to content after PREPARE_INTENT from popup. */
+  | { type: "CONTENT_PREPARE_INTENT" };
 
 export interface BgToContentResponse {
   CONTENT_PING: { ok: true; version: string };
@@ -86,6 +93,7 @@ export interface BgToContentResponse {
   CONTENT_STOP: Ok;
   CONTENT_UPDATE_SETTINGS: { ok: true; state?: Partial<State> }; // state OPTIONAL
   CONTENT_UPDATE_VOLUME: Ok;
+  CONTENT_PREPARE_INTENT: Ok;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -102,6 +110,10 @@ export type ContentToBgMessage =
   | { type: "CONTENT_ENDED"; reason?: string }
   /** Overlay Stop — ask background to run the same STOP path as the popup. */
   | { type: "CONTENT_STOP_REQUEST" }
+  /** On-page launcher — ask background to run the same START path as the popup. */
+  | { type: "START_REQUEST" }
+  /** On-page launcher — query sign-in (gates the launcher) + keep the SW warm. */
+  | { type: "GET_LAUNCH_STATE" }
   | {
       type: "CONTENT_QUOTA";
       mode?: TranslationTier;
@@ -110,7 +122,21 @@ export type ContentToBgMessage =
       resets_at?: string;
     }
   | { type: "UPDATE_SETTINGS"; settings: Partial<Settings> }
-  | { type: "GET_YT_CC_URL"; videoId: string };
+  | { type: "GET_YT_CC_URL"; videoId: string }
+  | { type: "GET_YT_PLAYER_RESPONSE" };
+
+/** A single caption track as exposed by YouTube's player response (MAIN-world
+ *  `movie_player.getPlayerResponse().captions.playerCaptionsTracklistRenderer
+ *  .captionTracks`). Only the fields the caption fetch needs. */
+export interface YtCaptionTrack {
+  baseUrl?: string;
+  languageCode?: string;
+  kind?: string;
+}
+
+export type YtPlayerResponseResult =
+  | { ok: true; captionTracks: YtCaptionTrack[] }
+  | { ok: false };
 
 export type YtCcUrlResult =
   | {
@@ -124,6 +150,8 @@ export type YtCcUrlResult =
     }
   | { ok: false };
 
+export type LaunchStateResult = { ok: true; signedIn: boolean } | { ok: false };
+
 export interface ContentToBgResponse {
   CONTENT_STATE: Ok;
   CONTENT_ENDED: Ok;
@@ -131,6 +159,9 @@ export interface ContentToBgResponse {
   CONTENT_QUOTA: Ok;
   UPDATE_SETTINGS: Ok;
   GET_YT_CC_URL: YtCcUrlResult;
+  GET_YT_PLAYER_RESPONSE: YtPlayerResponseResult;
+  START_REQUEST: Ok;
+  GET_LAUNCH_STATE: LaunchStateResult;
 }
 
 // ───── Convenience: everything the background onMessage listener can receive ─
@@ -169,8 +200,11 @@ export function relayToContent<T extends BgToContentMessage["type"]>(
 /** Fire-and-forget send over chrome.runtime (broadcast to popup, or content's
  *  notifyBackground). Errors are swallowed.
  *  Returns false if the runtime handle is already gone (SW/page torn down). */
-/** Callback-style request from content (GET_YT_CC_URL). */
-export function sendFromContent<T extends "GET_YT_CC_URL">(
+/** Callback-style request from content that expects a typed reply
+ *  (GET_YT_CC_URL, GET_YT_PLAYER_RESPONSE, GET_LAUNCH_STATE). */
+export function sendFromContent<
+  T extends "GET_YT_CC_URL" | "GET_YT_PLAYER_RESPONSE" | "GET_LAUNCH_STATE",
+>(
   message: Extract<ContentToBgMessage, { type: T }>,
 ): Promise<ContentToBgResponse[T]> {
   return chrome.runtime.sendMessage(message) as Promise<ContentToBgResponse[T]>;

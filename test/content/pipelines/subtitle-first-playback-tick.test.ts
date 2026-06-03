@@ -26,9 +26,13 @@ import type { StartSettings } from "@/shared/types";
 vi.mock("@/lib/echoly-api", () => ({
   isPipelineToastError: () => false,
   renderSubtitleDubBatch: vi.fn(),
+  // renderSubtitleDubStream is used by the streaming #renderBatch path;
+  // the playback-tick tests drive the buffered path via renderSubtitleDubBatch,
+  // so stream is never called here — provide a no-op async generator stub.
+  renderSubtitleDubStream: vi.fn(async function* () {}),
 }));
 
-import { renderSubtitleDubBatch } from "@/lib/echoly-api";
+import { renderSubtitleDubBatch, renderSubtitleDubStream } from "@/lib/echoly-api";
 
 // ─── Shared settings builder ──────────────────────────────────────────────────
 
@@ -173,6 +177,23 @@ async function doStart(
   sm: { session: SubtitleFirstSession | null },
   renderResult: { text: string; audioMp3: ArrayBuffer }[],
 ): Promise<SubtitleFirstSession> {
+  // renderSubtitleDubStream is now the primary path; mock it to yield the
+  // same result as the old renderSubtitleDubBatch mock. The stream generator
+  // yields one item per renderResult entry with the correct index.
+  vi.mocked(renderSubtitleDubStream).mockReturnValue(
+    (async function* () {
+      for (let i = 0; i < renderResult.length; i++) {
+        yield {
+          index: i,
+          text: renderResult[i]!.text,
+          audioMp3: renderResult[i]!.audioMp3,
+          cueStartMs: 0,
+          cueEndMs: 3000,
+        };
+      }
+    })() as never,
+  );
+  // Keep renderSubtitleDubBatch mock in place for the fallback path.
   vi.mocked(renderSubtitleDubBatch).mockResolvedValue(renderResult);
   const result = await pipeline.start(makeSettings());
   if (!result.ok) throw new Error(`start() failed: ${result.error}`);
@@ -421,10 +442,11 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
 
   // ─ AC#8: Initial pre-buffer covers SUBFIRST_PREBUFFER_COUNT=3 sentences ────
 
-  it("AC#8: start() requests at least SUBFIRST_PREBUFFER_COUNT=3 sentences in the first renderBatch", async () => {
+  it("AC#8: start() requests at least SUBFIRST_PREBUFFER_COUNT=2 sentences in the first renderBatch", async () => {
     // Each cue ends with a sentence-ending punctuation mark so regroupToSentences
     // keeps them as separate CaptionSentences rather than merging them. Large gaps
     // (2s+) also work. Using punctuation is the most direct signal.
+    // Note: SUBFIRST_PREBUFFER_COUNT was lowered from 3 to 2 (B2 startup latency fix).
     const captions = [
       { start: 10, end: 12, text: "Hello." },
       { start: 14, end: 16, text: "World." },
@@ -435,16 +457,23 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     const fakeVideo = makeFakeVideo(0);
     const { pipeline, sm } = makePipeline(captions, fakeVideo);
 
-    vi.mocked(renderSubtitleDubBatch).mockResolvedValue(
-      captions.map((c) => ({ text: `tr: ${c.text}`, audioMp3: new ArrayBuffer(100) })),
-    );
+    // Pipeline uses renderSubtitleDubStream (the streaming path).
+    const streamCalls: { sentences: unknown[] }[] = [];
+    vi.mocked(renderSubtitleDubStream).mockImplementation(function(opts: { sentences: unknown[] }) {
+      streamCalls.push({ sentences: opts.sentences });
+      return (async function* () {
+        for (let i = 0; i < opts.sentences.length; i++) {
+          yield { index: i, text: `tr: ${i}`, audioMp3: new ArrayBuffer(100), cueStartMs: 0, cueEndMs: 3000 };
+        }
+      })() as never;
+    } as never);
     await pipeline.start(makeSettings());
 
-    const calls = vi.mocked(renderSubtitleDubBatch).mock.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    // First batch must cover ≥3 sentences (SUBFIRST_PREBUFFER_COUNT).
-    const firstBatchLen = calls[0]![0]!.sentences.length;
-    expect(firstBatchLen).toBeGreaterThanOrEqual(3);
+    expect(streamCalls.length).toBeGreaterThan(0);
+    // First batch gates video.play() on the FIRST due line only (prebuffer=1) so
+    // the start freeze is one TTS, not N; the rolling renderer fills the rest.
+    const firstBatchLen = streamCalls[0]!.sentences.length;
+    expect(firstBatchLen).toBeGreaterThanOrEqual(1);
   });
 
   // ─ AC#9: Stall cap prevents infinite freeze ─────────────────────────────────
@@ -520,19 +549,16 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
   // We do NOT manually inject _buffer — the render path must produce it.
 
   it("GAP-1 regression: rolling renderer produces _buffer during system-pause → cue played, not dropped", async () => {
-    // Scenario: 4 cues, cues 0-2 pre-buffered by start() (SUBFIRST_PREBUFFER_COUNT=3),
-    // cue 3 NOT yet rendered (renderCursor=3, sentences.length=4).
+    // Scenario: 4 cues. start() renders cues 0-1 (SUBFIRST_PREBUFFER_COUNT=2).
+    // Cues 2-3 are NOT rendered at start. We manually evict their buffers and
+    // set renderCursor=3 so cue 3 is the one the roller must render.
     // Playhead reaches cue 3 → system-pause. Rolling renderer wakes up, sees
     // video.paused=true — WITHOUT the fix it skips → deadlock; WITH the fix it
     // runs (isSystemPaused=true exempts the paused guard), renders cue 3, sets
     // _buffer, then the 250ms tick resumes and plays cue 3.
     //
-    // Caption spacing: each sentence starts 2s after the previous ends (>SUBFIRST_LOOKAHEAD
-    // wouldn't compress them) — but for SUBFIRST_PREBUFFER_COUNT=3 to stop at index 3,
-    // all 4 cues must start within currentTime+lookahead (30s) AND
-    // firstWaveEnd = min(lookaheadEnd, firstWaveStart+3). With currentTime=0 and
-    // cues at 10/14/18/22, lookaheadEnd=findIndex(start>30)=-1→4, so firstWaveEnd=
-    // min(4,0+3)=3, which leaves cue 3 (start=22) un-rendered. ✓
+    // With SUBFIRST_PREBUFFER_COUNT=1, firstWaveEnd=min(4,0+1)=1 — start() renders
+    // only cue 0; cues 1-3 are left for the rolling renderer. ✓
     const captions = [
       { start: 10, end: 12, text: "one." },
       { start: 14, end: 16, text: "two." },
@@ -542,46 +568,47 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     const fakeVideo = makeFakeVideo(0);
     const { pipeline, sm, audioCtxMock } = makePipeline(captions, fakeVideo);
 
-    // Initial renderBatch call (during start): renders cues 0-2.
-    // All three have byteLength=100 so decodeAudioData sets _buffer on them.
-    // Cue 3 is NOT in this batch — renderSubtitleDubBatch is never called for it yet.
-    vi.mocked(renderSubtitleDubBatch)
-      // First call (start initial pre-buffer, cues [0..3)): real audio for cues 0-2.
-      .mockResolvedValueOnce([
-        { text: "tr1", audioMp3: new ArrayBuffer(100) },
-        { text: "tr2", audioMp3: new ArrayBuffer(100) },
-        { text: "tr3", audioMp3: new ArrayBuffer(100) },
-      ])
-      // Second call (rolling renderer, cue 3): real audio → sets _buffer.
-      .mockResolvedValueOnce([{ text: "tr4", audioMp3: new ArrayBuffer(100) }]);
+    // Use renderSubtitleDubStream (the streaming path used by #renderBatch).
+    // First call: start() initial wave (cues 0-1).
+    // Second call: rolling renderer renders cue 3.
+    let streamCallCount = 0;
+    vi.mocked(renderSubtitleDubStream).mockImplementation(function(opts: { sentences: unknown[] }) {
+      const idx = streamCallCount++;
+      return (async function* () {
+        for (let i = 0; i < opts.sentences.length; i++) {
+          yield {
+            index: i,
+            text: `tr${idx}-${i}`,
+            audioMp3: new ArrayBuffer(100),
+            cueStartMs: 0,
+            cueEndMs: 3000,
+          };
+        }
+      })() as never;
+    } as never);
 
     const result = await pipeline.start(makeSettings());
     if (!result.ok) throw new Error(`start() failed: ${result.error}`);
     const sess = sm.session!;
 
-    // Confirm setup: cues 0-2 have buffers; cue 3 does not.
+    // Confirm initial wave rendered cue 0 (prebuffer=1). Cue 1 is rendered by the
+    // rolling renderer, not the start gate.
     expect(sess.sentences[0]!._buffer).toBeDefined();
-    expect(sess.sentences[1]!._buffer).toBeDefined();
-    expect(sess.sentences[2]!._buffer).toBeDefined();
-    // Cue 3 may have been rendered by the initial wave if SUBFIRST_PREBUFFER_COUNT
-    // is higher than expected — check renderCursor to confirm.
-    // If renderCursor < 4, cue 3 hasn't been rendered yet.
-    // If it has been rendered despite our expectation, skip this test variant
-    // (the setup assumption is wrong) — we rely on renderCursor == 3.
-    if (sess.renderCursor !== 3) {
-      // Adaptation: manually evict cue 3's buffer so the renderer must re-render it.
-      delete sess.sentences[3]!._buffer;
-      sess.renderCursor = 3;
-    }
+
+    // Force renderCursor=3 so rolling renderer will render only cue 3.
+    // Manually evict any buffer on cues 2-3 and mark cue 2 as played.
+    delete sess.sentences[2]!._buffer;
+    delete sess.sentences[3]!._buffer;
+    sess.sentences[2]!._played = true; // skip cue 2 for this test
+    sess.renderCursor = 3;
+
     const cue3 = sess.sentences[3]!;
     expect(cue3._buffer).toBeUndefined();
     expect(sess.renderCursor).toBe(3);
 
-    // Fast-forward playhead to cue 3.
-    // First play through cues 0-2 (simulate they've been played).
+    // Fast-forward playhead to cue 3. Cues 0-1 played.
     sess.sentences[0]!._played = true;
     sess.sentences[1]!._played = true;
-    sess.sentences[2]!._played = true;
     fakeVideo.currentTime = 22; // cue 3 start
     fakeVideo.paused = false;
 
@@ -596,9 +623,9 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     // and skips → _buffer never produced → deadlock.
     // With the fix: isSystemPaused=true exempts the paused guard → renderer runs.
     //
-    // Advance 1000ms for the rolling renderer's setTimeout(r, 1000) to fire.
-    // The renderer runs renderSubtitleDubBatch for cue 3, then decodeAudioData
-    // (mocked → returns makeFakeBuffer()), setting cue3._buffer.
+    // Advance 1000ms — the rolling renderer (SUBFIRST_RENDER_TICK_MS=350) fires
+    // within this window. It runs renderSubtitleDubStream for cue 3, then
+    // decodeAudioData (mocked → returns makeFakeBuffer()), setting cue3._buffer.
     await vi.advanceTimersByTimeAsync(1000);
     // Allow microtasks (Promise resolutions from async renderBatch) to settle.
     await vi.advanceTimersByTimeAsync(50);

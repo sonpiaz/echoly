@@ -3,9 +3,18 @@
 // Replaces the old ContentApp.startSpaWatcher() polling (the WIRE agent removes
 // that method). Emits NavEvents to a callback; the callback dispatches to
 // continueOnNewVideo or stopSession.
+//
+// B4: Also kicks off an eager caption prefetch when a new YouTube videoId is
+// detected AND no session is active, so Start does not pay the caption-fetch
+// latency. The result is stored in the prefetch caption cache (caption-cache.ts)
+// and consumed by the subtitle-first pipeline via `getPrefetchedCaptions`.
 
 import { STOP_REASON, type StopReason } from "./stop-reasons";
 import type { ContentApp } from "./index";
+import {
+  setPrefetchedCaptions,
+  clearPrefetchedCaptions,
+} from "@/platforms/youtube/caption-cache";
 
 /** Emitted by NavigationWatcher when it detects a relevant URL change or video end. */
 export type NavEvent =
@@ -43,6 +52,12 @@ export class NavigationWatcher {
 
   // YouTube yt-navigate-finish listener (best-effort, cleaned up in stop()).
   #ytNavListener: (() => void) | null = null;
+
+  // ── B4: eager caption prefetch ────────────────────────────────────────────
+  /** AbortController for the in-flight prefetch (one per videoId). */
+  #prefetchAbort: AbortController | null = null;
+  /** videoId currently being prefetched (guards against duplicate triggers). */
+  #prefetchingForId: string | null = null;
 
   constructor(app: ContentApp) {
     this.#app = app;
@@ -85,6 +100,7 @@ export class NavigationWatcher {
     }
     this.#clearDebounce();
     this.#clearPendingNext();
+    this.#cancelPrefetch();
     this.#ytNavListener?.();
     this.#ytNavListener = null;
     this.#onEvent = null;
@@ -150,16 +166,27 @@ export class NavigationWatcher {
     // Must have a valid id that differs from the last-known id.
     if (!newId || newId === this.#lastVideoId) return;
 
-    // A session must be running for continuation to make sense.
+    // B4: When no session is active and the adapter supports subtitle-first
+    // captions (e.g. YouTube), kick off an eager caption prefetch so that Start
+    // does not wait for the caption-fetch step.  The prefetch is cancellable:
+    // if the videoId changes again before it completes, we abort it.
     if (this.#app.sm.session == null) {
       // Update tracking so the next navigation starts fresh.
       this.#lastVideoId = newId;
+      // Trigger prefetch only for adapters with subtitle-first capability.
+      if (this.#app.adapter.capabilities.subtitleFirst) {
+        this.#startPrefetch(newId);
+      }
       return;
     }
 
     // Resolve the pending-next window (if any) — the nav replaces it.
     this.#clearPendingNext();
     this.#pendingNext = false;
+
+    // Cancel any outstanding prefetch — a session is about to start and will
+    // call adapter.fetchCaptions itself.
+    this.#cancelPrefetch();
 
     // Update tracking.
     this.#lastVideoId = newId;
@@ -179,6 +206,65 @@ export class NavigationWatcher {
       this.#emitting = false;
     }
   }
+
+  // ── B4: prefetch helpers ─────────────────────────────────────────────────
+
+  /**
+   * Start an eager caption prefetch for `videoId` if no prefetch is already
+   * in-flight for this video.  Each call gets its own AbortController; a
+   * subsequent call for a different videoId aborts the previous one first so
+   * rapid playlist skipping does not accumulate stale fetches.
+   */
+  #startPrefetch(videoId: string): void {
+    // Guard: don't re-fetch what we're already fetching.
+    if (this.#prefetchingForId === videoId) return;
+
+    // Abort any previous in-flight prefetch (different videoId).
+    this.#cancelPrefetch();
+
+    // Guard: if a session started while the debounce was running, skip.
+    if (this.#app.sm.session != null) return;
+
+    const ac = new AbortController();
+    this.#prefetchAbort = ac;
+    this.#prefetchingForId = videoId;
+
+    // Clear any previous prefetch result for this videoId — a new navigation
+    // to the same video should get fresh captions.
+    clearPrefetchedCaptions(videoId);
+
+    void this.#app.adapter
+      .fetchCaptions({ videoId, signal: ac.signal })
+      .then((result) => {
+        // Bail out if cancelled or if a session has started in the meantime.
+        if (ac.signal.aborted) return;
+        if (this.#prefetchingForId !== videoId) return;
+        if (this.#app.sm.session != null) return;
+        if (result) {
+          setPrefetchedCaptions(videoId, result);
+        }
+      })
+      .catch(() => {
+        // Network error or aborted — silently swallow; Start will fetch normally.
+      })
+      .finally(() => {
+        if (this.#prefetchingForId === videoId) {
+          this.#prefetchAbort = null;
+          this.#prefetchingForId = null;
+        }
+      });
+  }
+
+  /** Cancel the current in-flight prefetch (if any). */
+  #cancelPrefetch(): void {
+    if (this.#prefetchAbort !== null) {
+      this.#prefetchAbort.abort();
+      this.#prefetchAbort = null;
+      this.#prefetchingForId = null;
+    }
+  }
+
+  // ── Debounce / pending-next helpers ──────────────────────────────────────
 
   #clearDebounce(): void {
     if (this.#debounceTimer !== null) {

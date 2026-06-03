@@ -59,7 +59,15 @@ export const DUB_SYNC_SLOW_RATE = 0.96;
 export const DUB_SYNC_HARD_SLOW_RATE = 0.92;
 export const DUB_SYNC_CATCHUP_RATE = 1.02;
 /** Max wait for first Standard dub before video.play (VOD). */
-export const DUB_TTFA_GATE_MS = 14_000;
+export const DUB_TTFA_GATE_MS = 8_000;
+/** No-CC live-dub fallback: ceiling to wait for first remote audio before
+ *  tearing down with an error. NOT a video-release gate — the video plays
+ *  immediately (live-style) and dub trails by its natural lag. */
+export const DUB_LIVE_TTFA_CEILING_MS = 30_000;
+/** Poll interval while holding in the "ad-wait" state for a YouTube ad to end. */
+export const AD_WAIT_POLL_MS = 250;
+/** Max ms to wait for the media-gate POST / AudioContext.resume() before proceeding anyway (soft-fail). */
+export const MEDIA_GATE_TIMEOUT_MS = 1500;
 /** Realtime VOD only — post-ICE align before play (no adaptive sync). */
 export const REALTIME_VOD_PLAY_ALIGN_MS = 80;
 

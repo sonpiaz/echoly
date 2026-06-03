@@ -28,9 +28,9 @@ export function pauseSession(app: ContentApp): void {
 
   if (isWebRtcSession(sess)) {
     // Disable sender tracks + pause remoteAudio + suspend AudioContext +
-    // POST media-pause to server. On a non-ok server response, syncSourcePauseState
-    // sets sm.connectionLost = true so resumeSession can rebuild.
-    syncSourcePauseState(app.sm, sess, true);
+    // POST media-pause to server (fire-and-forget; pause path is not awaited).
+    // On a non-ok server response, syncSourcePauseState sets sm.connectionLost = true.
+    void syncSourcePauseState(app.sm, sess, true);
     if (sess.pipeline === "standard") {
       // Quiesce dub-sync so it doesn't apply a stale catch-up rate on resume.
       app.standardDubSync?.stop();
@@ -50,6 +50,16 @@ export function pauseSession(app: ContentApp): void {
  * Rebuilds the peer if it was lost during the pause, re-enables dub audio
  * (tier-specific), flips overlay back to live, and thaws the session-limit timer.
  * Safe to call when no session is active (no-op).
+ *
+ * NON-BLOCKING by design. An earlier version held the video on resume behind an
+ * awaited server media-gate POST + a dub-buffer gate (waitForFirstDub) + a fixed
+ * settle sleep — which froze the video for hundreds of ms to several seconds on
+ * every press-play (a worse regression than the brief A/V drift it tried to fix).
+ * Instead we kick the re-enable off in the BACKGROUND (fire-and-forget) and let
+ * the Standard-WebRTC drift corrector smooth any momentary dub lag via its rate
+ * ramp — snapPlaybackStart() now resets stopped=false so the engine actually
+ * ticks again after a pause (the one genuine fix worth keeping). Subtitle-first
+ * resumes on its own 250ms #playbackTick.
  */
 export function resumeSession(app: ContentApp): void {
   const sess = app.sm.session;
@@ -57,15 +67,13 @@ export function resumeSession(app: ContentApp): void {
   // Idempotency: if not user-paused, nothing to do.
   if (!app.sm.userPaused) return;
 
-  // ── Peer-death recovery (WebRTC only) ──────────────────────────────────────
+  // ── Peer-death recovery (WebRTC only) — unchanged ──────────────────────────
   if (app.sm.connectionLost && isWebRtcSession(sess)) {
-    // Attempt one rebuild with the current settings — keeps overlay + bg session.
     const settings = app.sm.settings;
     if (!settings) {
       app.stopSession(STOP_REASON.CONNECTION_LOST);
       return;
     }
-    // continueOnNewVideo rebuilds the peer in-place (same video, new session).
     void app.webrtc.continueOnNewVideo(settings).then((result) => {
       if (!result.ok) {
         app.stopSession(STOP_REASON.CONNECTION_LOST);
@@ -73,7 +81,6 @@ export function resumeSession(app: ContentApp): void {
       }
       app.sm.connectionLost = false;
       app.sm.userPaused = false;
-      // continueOnNewVideo already set overlay to live — emit state.
       app.sm.emitState({ running: true, paused: false, status: "Translating" });
       app.sm.resumeSessionTimer();
     });
@@ -83,16 +90,21 @@ export function resumeSession(app: ContentApp): void {
   app.sm.userPaused = false;
 
   if (isWebRtcSession(sess)) {
-    // Re-enable sender tracks + resume remoteAudio + resume AudioContext +
-    // POST media-resume to server.
-    syncSourcePauseState(app.sm, sess, false);
+    // Fire-and-forget: re-enable sender tracks + remoteAudio + AudioContext +
+    // media-resume POST. NOT awaited — awaiting it froze the video on resume.
+    // The server gate reopens in the background; audio resumes as soon as it does.
+    void syncSourcePauseState(app.sm, sess, false);
     if (sess.pipeline === "standard") {
-      // Re-anchor dub-sync at the current resume playhead so no stale rate is applied.
+      // Re-anchor + restart the drift corrector. snapPlaybackStart() resets
+      // stopped=false (the real bug fix), so the engine ticks again and smooths
+      // any brief dub-lag via its rate ramp — no video hold needed.
       app.standardDubSync?.snapPlaybackStart();
       app.standardDubSync?.start();
     }
   }
-  // subtitle-first: the driver's next 250ms tick resumes naturally — no action needed.
+  // subtitle-first: the 250ms #playbackTick + #runRollingRenderer resume naturally
+  // once userPaused is false; #playbackTick step 4 micro-pauses ONLY if the due
+  // cue is genuinely un-buffered (same fallback as before). No proactive re-pause.
 
   app.overlay.setOverlayState("live");
   app.overlay.setStatusText("Translating");

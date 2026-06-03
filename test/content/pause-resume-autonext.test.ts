@@ -172,14 +172,27 @@ function makeFakeApp(sess: WebRtcSession | SubtitleFirstSession | null) {
     stop: vi.fn(),
     snapPlaybackStart: vi.fn(),
     start: vi.fn(),
+    waitForFirstDub: vi.fn().mockResolvedValue(true),
   };
   const webrtc = {
     continueOnNewVideo: vi.fn().mockResolvedValue({ ok: true }),
   };
+  // capture.videoEl = null means no video available → gates will skip hold
+  const capture = { videoEl: null as HTMLVideoElement | null };
+  // subtitleFirst stub with onResumeCheck
+  const subtitleFirst = { onResumeCheck: vi.fn() };
   const stopSession = vi.fn();
   // Use `unknown` intermediary so the partial fake satisfies the ContentApp parameter type.
-  const asApp = { sm, overlay, standardDubSync, webrtc, stopSession } as unknown as ContentApp;
-  return Object.assign(asApp, { sm, overlay, standardDubSync, webrtc, stopSession });
+  const asApp = {
+    sm,
+    overlay,
+    standardDubSync,
+    webrtc,
+    capture,
+    subtitleFirst,
+    stopSession,
+  } as unknown as ContentApp;
+  return Object.assign(asApp, { sm, overlay, standardDubSync, webrtc, capture, subtitleFirst, stopSession });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,12 +308,12 @@ describe("pause-controller — resumeSession", () => {
     uninstallChrome();
   });
 
-  it("sets sm.userPaused=false and emits live state for WebRTC", () => {
+  it("sets sm.userPaused=false and emits live state for WebRTC", async () => {
     const sess = makeWebRtcSession(1);
     const app = makeFakeApp(sess);
     app.sm.userPaused = true; // simulate already paused
     const emitSpy = vi.spyOn(app.sm, "emitState");
-    resumeSession(app);
+    await resumeSession(app);
 
     expect(app.sm.userPaused).toBe(false);
     expect(app.overlay.setOverlayState).toHaveBeenCalledWith("live");
@@ -310,22 +323,22 @@ describe("pause-controller — resumeSession", () => {
     );
   });
 
-  it("re-anchors standardDubSync on Standard resume", () => {
+  it("re-anchors standardDubSync on Standard resume", async () => {
     const sess = makeWebRtcSession(2);
     (sess as unknown as { pipeline: string }).pipeline = "standard";
     const app = makeFakeApp(sess);
     app.sm.userPaused = true;
-    resumeSession(app);
+    await resumeSession(app);
 
     expect(app.standardDubSync.snapPlaybackStart).toHaveBeenCalledTimes(1);
     expect(app.standardDubSync.start).toHaveBeenCalledTimes(1);
   });
 
-  it("is idempotent — no-op when not paused", () => {
+  it("is idempotent — no-op when not paused", async () => {
     const sess = makeWebRtcSession(3);
     const app = makeFakeApp(sess);
     app.sm.userPaused = false;
-    resumeSession(app);
+    await resumeSession(app);
 
     expect(app.overlay.setOverlayState).not.toHaveBeenCalled();
   });
@@ -341,7 +354,7 @@ describe("pause-controller — resumeSession", () => {
     } as Parameters<typeof resumeSession>[0]["sm"]["settings"];
     app.webrtc.continueOnNewVideo.mockResolvedValueOnce({ ok: true });
 
-    resumeSession(app);
+    void resumeSession(app);
 
     // Allow the promise to resolve
     await vi.runAllTimersAsync();
@@ -362,10 +375,77 @@ describe("pause-controller — resumeSession", () => {
     } as Parameters<typeof resumeSession>[0]["sm"]["settings"];
     app.webrtc.continueOnNewVideo.mockResolvedValueOnce({ ok: false, error: "WebRTC failed." });
 
-    resumeSession(app);
+    void resumeSession(app);
     await vi.runAllTimersAsync();
 
     expect(app.stopSession).toHaveBeenCalledWith(STOP_REASON.CONNECTION_LOST);
+  });
+
+  // ── Resume is NON-BLOCKING (regression fix): no video hold, no dub-buffer gate ──
+
+  it("Standard-WebRTC resume: re-anchors + restarts the drift engine WITHOUT a waitForFirstDub hold", () => {
+    const sess = makeWebRtcSession(10);
+    (sess as unknown as { pipeline: string }).pipeline = "standard";
+    const app = makeFakeApp(sess);
+    app.sm.userPaused = true;
+
+    const fakeVideo = {
+      paused: false,
+      play: vi.fn().mockResolvedValue(undefined),
+      pause: vi.fn(),
+    } as unknown as HTMLVideoElement;
+    app.capture.videoEl = fakeVideo;
+
+    resumeSession(app);
+
+    // The drift corrector is re-anchored + restarted (snapPlaybackStart resets
+    // stopped=false so it actually ticks again — the genuine bug fix we keep).
+    expect(app.standardDubSync.snapPlaybackStart).toHaveBeenCalledTimes(1);
+    expect(app.standardDubSync.start).toHaveBeenCalledTimes(1);
+    // NO dub-buffer gate on resume (that froze the video — the regression).
+    expect(app.standardDubSync.waitForFirstDub).not.toHaveBeenCalled();
+    // The video is NEVER re-paused on resume.
+    expect(fakeVideo.pause).not.toHaveBeenCalled();
+    // userPaused cleared, overlay → live (no "buffering" churn on resume).
+    expect(app.sm.userPaused).toBe(false);
+    expect(app.overlay.setOverlayState).toHaveBeenCalledWith("live");
+    expect(app.overlay.setOverlayState).not.toHaveBeenCalledWith("buffering");
+  });
+
+  it("Realtime resume: fires media-resume in the background and goes live immediately (no settle sleep, no hold)", () => {
+    const sess = makeWebRtcSession(12);
+    expect(sess.pipeline).toBe("realtime");
+    const app = makeFakeApp(sess);
+    app.sm.userPaused = true;
+
+    const fakeVideo = {
+      paused: false,
+      play: vi.fn().mockResolvedValue(undefined),
+      pause: vi.fn(),
+    } as unknown as HTMLVideoElement;
+    app.capture.videoEl = fakeVideo;
+
+    // Synchronous return = no awaited server round-trip / settle on the resume path.
+    resumeSession(app);
+
+    expect(app.sm.userPaused).toBe(false);
+    expect(fakeVideo.pause).not.toHaveBeenCalled();
+    expect(app.overlay.setOverlayState).toHaveBeenCalledWith("live");
+    expect(app.overlay.setOverlayState).not.toHaveBeenCalledWith("buffering");
+  });
+
+  it("subtitle-first resume: no proactive micro-pause — just clears userPaused + goes live", () => {
+    const sess = { kind: "subtitle-first", _systemPaused: false } as unknown as ReturnType<typeof makeWebRtcSession>;
+    const app = makeFakeApp(sess);
+    app.sm.userPaused = true;
+
+    resumeSession(app);
+
+    // The old wave called onResumeCheck (which could re-pause); we no longer do.
+    expect(app.subtitleFirst.onResumeCheck).not.toHaveBeenCalled();
+    expect(app.sm.userPaused).toBe(false);
+    expect(app.overlay.setOverlayState).toHaveBeenCalledWith("live");
+    expect(app.overlay.setOverlayState).not.toHaveBeenCalledWith("buffering");
   });
 });
 

@@ -456,6 +456,49 @@ describe("stageInsets", () => {
   });
 });
 
+// ─── VTT fetch credentials bug fix ───────────────────────────────────────────
+//
+// The VTT fetch must include credentials:"include" to avoid silent 403 errors
+// on CDN URLs that rely on session cookies.
+
+describe("fetchCaptions — VTT fetch credentials", () => {
+  it("calls the VTT URL with credentials:'include'", async () => {
+    installAppLoader(42);
+
+    const captions = [
+      { locale_id: "en_US", video_label: "English", url: "https://cdn.udemy.com/captions/en.vtt", title: "English" },
+    ];
+
+    const fetchMock = vi.fn(async (url: unknown, init?: unknown) => {
+      const urlStr = String(url);
+      if (urlStr.includes("api-2.0")) {
+        return {
+          ok: true,
+          json: async () => makeLectureJson(captions),
+          text: async () => "",
+        };
+      }
+      // VTT fetch
+      return {
+        ok: true,
+        json: async () => ({}),
+        text: async () => SAMPLE_VTT,
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const signal = new AbortController().signal;
+    await udemyAdapter.fetchCaptions({ videoId: "99991234", preferLang: "en", signal });
+
+    // Find the VTT fetch call (second call, to cdn.udemy.com)
+    const vttCall = fetchMock.mock.calls.find(
+      (call) => String(call[0]).includes("cdn.udemy.com"),
+    );
+    expect(vttCall).toBeDefined();
+    expect(vttCall![1]).toMatchObject({ credentials: "include" });
+  });
+});
+
 // ─── suppressNativeCaptions ──────────────────────────────────────────────────
 
 describe("suppressNativeCaptions", () => {

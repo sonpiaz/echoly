@@ -111,8 +111,55 @@ function parseMetadataEvent(raw: string): MetadataEvent | null {
 
 export class WebRtcPipeline {
   #handoverInFlight = false;
+  /**
+   * Short-lived prepare_id from the last successful prepareIntent() call.
+   * Set on hover/focus intent; cleared once consumed by buildSession() or on
+   * any error (graceful fallback to cold path).
+   */
+  #pendingPrepareId: string | null = null;
 
   constructor(private readonly app: ContentApp) {}
+
+  /**
+   * Fire-and-forget pre-warm intent — call on Start button hover/focus.
+   * Posts to /v1/rtc/prepare to pre-allocate the media transport + provider WS.
+   * Stores the returned prepare_id for the next buildSession() call.
+   * Any failure is silently ignored; buildSession() falls back to the cold path.
+   *
+   * D-3: for pipeline=standard the server accepts the request but returns no warm
+   * WS benefit — the prepare_id is still threaded through and will produce a slot
+   * that is claimed (transport already allocated). On standard the benefit is
+   * ~50–100 ms transport-create savings only.
+   */
+  async prepareIntent(opts: {
+    apiBearer: string;
+    pipeline: string;
+    targetLanguage: string;
+  }): Promise<void> {
+    const { sm } = this.app;
+    try {
+      const res = await fetch(`${sm.apiBase}/rtc/prepare`, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + opts.apiBearer,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          pipeline: opts.pipeline,
+          target_language: opts.targetLanguage,
+        }),
+      });
+      if (!res.ok) {
+        this.#pendingPrepareId = null;
+        return;
+      }
+      const json = (await res.json()) as { prepare_id?: string };
+      this.#pendingPrepareId = typeof json.prepare_id === "string" ? json.prepare_id : null;
+    } catch {
+      // Network error or JSON parse failure — ignore, cold path will be used.
+      this.#pendingPrepareId = null;
+    }
+  }
 
   async buildSession(
     token: number,
@@ -296,6 +343,12 @@ export class WebRtcPipeline {
     if (token !== sm.pageToken) throw new Error("Stale session.");
     await pc.setLocalDescription(offer);
 
+    // D — consume the pending prepare_id if one is available (pre-warm path).
+    // Consume and clear before the fetch so a second concurrent buildSession()
+    // doesn't also attempt to use the same (single-use) prepare_id.
+    const prepareId = this.#pendingPrepareId;
+    this.#pendingPrepareId = null;
+
     const qs = new URLSearchParams({
       targetLanguage: lang,
       pipeline: opts.pipeline,
@@ -308,6 +361,10 @@ export class WebRtcPipeline {
     ) {
       qs.set("durationHintSec", String(Math.ceil(opts.durationHintSec)));
     }
+    // Thread the prepare_id into the query string if available. The server will
+    // claim the warm slot; if it's missing/expired the server falls through to
+    // the standard cold answer() path (back-compat, AC11).
+    if (prepareId) qs.set("prepareId", prepareId);
 
     const sdpHeaders: Record<string, string> = {
       Authorization: "Bearer " + opts.apiBearer,

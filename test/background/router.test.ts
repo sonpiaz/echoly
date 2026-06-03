@@ -60,6 +60,26 @@ describe("routeMessage — channel semantics (sender.tab pivot)", () => {
     expect(ret).toBe(false);
     expect(response()).toEqual({ ok: true });
   });
+
+  it("GET_LAUNCH_STATE (content) reports signed-out and keeps SW warm (sync)", () => {
+    const { ret, response } = route(deps, { type: "GET_LAUNCH_STATE" }, CONTENT_SENDER);
+    expect(ret).toBe(false);
+    expect(response()).toEqual({ ok: true, signedIn: false });
+  });
+
+  it("GET_LAUNCH_STATE (content) reports signed-in when a user is present", () => {
+    deps.store.setSignedInUser({ email: "u@x.com" } as never);
+    const { response } = route(deps, { type: "GET_LAUNCH_STATE" }, CONTENT_SENDER);
+    expect(response()).toEqual({ ok: true, signedIn: true });
+  });
+
+  it("START_REQUEST (launcher) runs the same start path as the popup", () => {
+    const startSpy = vi.spyOn(deps.session, "start").mockResolvedValue({ ok: true } as never);
+    const { ret, response } = route(deps, { type: "START_REQUEST" }, CONTENT_SENDER);
+    expect(ret).toBe(false); // sync ack
+    expect(response()).toEqual({ ok: true });
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("routeMessage — popup dispatch reaches the right handler", () => {
@@ -93,5 +113,123 @@ describe("handleContentEvent — UPDATE_SETTINGS", () => {
       { type: "UPDATE_SETTINGS", settings: { tier: TIER_STANDARD } },
     );
     expect(updateSettings).toHaveBeenCalledWith({ tier: TIER_STANDARD });
+  });
+});
+
+// ── GET_YT_PLAYER_RESPONSE — MAIN-world caption track retrieval ───────────────
+describe("routeMessage — GET_YT_PLAYER_RESPONSE", () => {
+  let chromeMock: FakeChrome;
+  let deps: RouterDeps;
+
+  beforeEach(() => {
+    chromeMock = resetChrome();
+    deps = buildDeps();
+  });
+
+  it("returns {ok:true, captionTracks} when executeScript resolves with tracks", async () => {
+    const tracks = [{ baseUrl: "u", languageCode: "en", kind: undefined }];
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: tracks }]);
+
+    const sender: chrome.runtime.MessageSender = { tab: { id: 42 } as chrome.tabs.Tab };
+    const { ret, response } = route(deps, { type: "GET_YT_PLAYER_RESPONSE" }, sender);
+
+    // must return true (async channel kept open)
+    expect(ret).toBe(true);
+
+    await vi.waitFor(() => expect(response()).toBeDefined());
+    expect(response()).toEqual({ ok: true, captionTracks: tracks });
+    expect(chromeMock.scripting.executeScript).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { tabId: 42 }, world: "MAIN" }),
+    );
+  });
+
+  it("returns {ok:false} when executeScript result is null (player not ready)", async () => {
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: null }]);
+
+    const sender: chrome.runtime.MessageSender = { tab: { id: 42 } as chrome.tabs.Tab };
+    const { ret, response } = route(deps, { type: "GET_YT_PLAYER_RESPONSE" }, sender);
+
+    expect(ret).toBe(true);
+    await vi.waitFor(() => expect(response()).toBeDefined());
+    expect(response()).toEqual({ ok: false });
+  });
+
+  it("returns {ok:false} immediately when sender.tab.id is undefined — no executeScript call", () => {
+    const sender: chrome.runtime.MessageSender = { tab: {} as chrome.tabs.Tab };
+    const { ret, response } = route(deps, { type: "GET_YT_PLAYER_RESPONSE" }, sender);
+
+    expect(ret).toBe(true);
+    // sendResponse is called synchronously in this guard path
+    expect(response()).toEqual({ ok: false });
+    expect(chromeMock.scripting.executeScript).not.toHaveBeenCalled();
+  });
+
+  it("returns {ok:false} when executeScript throws", async () => {
+    chromeMock.scripting.executeScript.mockRejectedValue(new Error("scripting denied"));
+
+    const sender: chrome.runtime.MessageSender = { tab: { id: 42 } as chrome.tabs.Tab };
+    const { ret, response } = route(deps, { type: "GET_YT_PLAYER_RESPONSE" }, sender);
+
+    expect(ret).toBe(true);
+    await vi.waitFor(() => expect(response()).toBeDefined());
+    expect(response()).toEqual({ ok: false });
+  });
+});
+
+// ── GAP-1: PREPARE_INTENT message handling ────────────────────────────────────
+describe("routeMessage — PREPARE_INTENT relay", () => {
+  let chromeMock: FakeChrome;
+  let deps: RouterDeps;
+
+  beforeEach(() => {
+    chromeMock = resetChrome();
+    deps = buildDeps();
+  });
+
+  afterEach(() => {
+    resetHydrateSignedInState();
+  });
+
+  it("relays CONTENT_PREPARE_INTENT to the active tab when no session is running", async () => {
+    // Simulate an active tab (id=42) returned by tabs.query.
+    chromeMock.tabs.query.mockResolvedValue([{ id: 42, active: true }]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+
+    // Store has no running session (default).
+    const { ret } = route(deps, { type: "PREPARE_INTENT" }, POPUP_SENDER);
+    expect(ret).toBe(true);
+
+    await vi.waitFor(() =>
+      expect(chromeMock.tabs.sendMessage).toHaveBeenCalledWith(
+        42,
+        { type: "CONTENT_PREPARE_INTENT" },
+      ),
+    );
+  });
+
+  it("does NOT relay CONTENT_PREPARE_INTENT when a session is already running", async () => {
+    chromeMock.tabs.query.mockResolvedValue([{ id: 42, active: true }]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+
+    // Mark session as running so the guard short-circuits.
+    deps.store.setRunning(true);
+
+    const { ret } = route(deps, { type: "PREPARE_INTENT" }, POPUP_SENDER);
+    expect(ret).toBe(true);
+
+    // Wait briefly; sendMessage should NOT have been called.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(chromeMock.tabs.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT relay when connecting is true (in-flight start)", async () => {
+    chromeMock.tabs.query.mockResolvedValue([{ id: 42, active: true }]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+
+    deps.store.setConnecting(true);
+
+    route(deps, { type: "PREPARE_INTENT" }, POPUP_SENDER);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(chromeMock.tabs.sendMessage).not.toHaveBeenCalled();
   });
 });

@@ -229,7 +229,7 @@ export const udemyAdapter: PlatformAdapter = {
       const track = pickCaptionTrack(captions, preferLang);
       if (!track?.url) return null;
 
-      const vttRes = await fetch(track.url, { signal });
+      const vttRes = await fetch(track.url, { credentials: "include", signal });
       if (!vttRes.ok) return null;
 
       const vttText = await vttRes.text();
