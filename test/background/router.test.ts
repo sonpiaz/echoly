@@ -207,6 +207,40 @@ describe("routeMessage — PREPARE_INTENT relay", () => {
     );
   });
 
+  it("relays an intent (apiBearer/targetLanguage/pipeline) when signed in", async () => {
+    chromeMock.tabs.query.mockResolvedValue([{ id: 42, active: true }]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+
+    // Signed in: token (cookie) + cached user → decideApiMode resolves a mode.
+    vi.spyOn(deps.auth, "getSessionToken").mockResolvedValue("tok-abc");
+    deps.store.setSignedInUser({ email: "u@x.com", tier: "max" } as never);
+    await deps.store.persistSettings({ targetLanguage: "es", tier: TIER_STANDARD });
+
+    route(deps, { type: "PREPARE_INTENT" }, POPUP_SENDER);
+
+    await vi.waitFor(() =>
+      expect(chromeMock.tabs.sendMessage).toHaveBeenCalledWith(42, {
+        type: "CONTENT_PREPARE_INTENT",
+        intent: { apiBearer: "tok-abc", targetLanguage: "es", pipeline: TIER_STANDARD },
+      }),
+    );
+  });
+
+  it("relays a bare message (no intent) when signed out — content no-ops", async () => {
+    chromeMock.tabs.query.mockResolvedValue([{ id: 42, active: true }]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+
+    // No token → decideApiMode returns null → no intent attached.
+    vi.spyOn(deps.auth, "getSessionToken").mockResolvedValue(null);
+
+    route(deps, { type: "PREPARE_INTENT" }, POPUP_SENDER);
+
+    await vi.waitFor(() => expect(chromeMock.tabs.sendMessage).toHaveBeenCalled());
+    const [, payload] = chromeMock.tabs.sendMessage.mock.calls[0] as [number, { intent?: unknown }];
+    expect(payload).toEqual({ type: "CONTENT_PREPARE_INTENT", intent: undefined });
+    expect(payload.intent).toBeUndefined();
+  });
+
   it("does NOT relay CONTENT_PREPARE_INTENT when a session is already running", async () => {
     chromeMock.tabs.query.mockResolvedValue([{ id: 42, active: true }]);
     chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });

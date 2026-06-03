@@ -78,27 +78,29 @@ export function installYtMainWorldBridge(): void {
         poToken?: string;
         captionTracks?: YtCapturedTrack[];
       };
+      // A capture goes ONLY to its per-video entry when we can key it by videoId,
+      // and ONLY to `latest` when we can't. `latest` must never hold a *known*
+      // video's data — otherwise a fresh video (whose own request hasn't been
+      // captured yet) would be served the PREVIOUS video's captions. Caption
+      // bodies/URLs AND captionTracks/poToken are all video-scoped (YouTube's pot
+      // token is bound to the videoId), so the same scoping rule applies to all.
       if (d.kind === "cc-url" && typeof d.url === "string") {
         const url = d.url;
         const vid = videoIdFromUrl(url);
-        for (const tgt of vid ? [entryFor(vid), latest] : [latest]) {
-          pushCapped(tgt.ccUrls, url, (u) => u === url);
-        }
+        pushCapped(entryFor(vid).ccUrls, url, (u) => u === url);
       } else if (d.kind === "cc-body" && typeof d.url === "string" && typeof d.body === "string") {
         const rec = { url: d.url, body: d.body };
         const vid = videoIdFromUrl(d.url);
-        for (const tgt of vid ? [entryFor(vid), latest] : [latest]) {
-          pushCapped(tgt.ccBodies, rec, (r) => r.url === rec.url);
-        }
+        pushCapped(entryFor(vid).ccBodies, rec, (r) => r.url === rec.url);
       } else if (d.kind === "player") {
+        // entryFor(null) === latest, so an un-keyed player response still lands
+        // in the fallback bucket; a keyed one stays scoped to its video.
         const tgt = entryFor(d.videoId ?? null);
         if (Array.isArray(d.captionTracks) && d.captionTracks.length) {
           tgt.captionTracks = d.captionTracks;
-          latest.captionTracks = d.captionTracks;
         }
         if (d.poToken) {
           tgt.poToken = d.poToken;
-          latest.poToken = d.poToken;
         }
       }
     } catch {

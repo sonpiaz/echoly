@@ -16,6 +16,7 @@ import type { EcholyAuth } from "./auth";
 import type { SessionCoordinator } from "./session-coordinator";
 import { setSigninTabId, getSigninTabId } from "./auth-listener";
 import { usagePatchFromServerError } from "@/lib/server-errors";
+import { decideApiMode } from "@/lib/api-mode";
 import { getYtCaptionCache } from "@/platforms/youtube/caption-cache";
 import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
 import type { SettingsClient } from "./settings-client";
@@ -188,7 +189,7 @@ async function handlePopupMessage(
     case "LIST_AUDIO_OUTPUT_DEVICES":
       return listAudioOutputDevices();
     case "PREPARE_INTENT":
-      return prepareIntentOnActiveTab(store);
+      return prepareIntentOnActiveTab(store, auth);
     default: {
       const unsupported = message as { type?: string };
       return { ok: false, error: "Unknown message: " + unsupported.type };
@@ -211,7 +212,10 @@ async function handlePopupMessage(
  *  • Safe no-op if the tab can't be found or the content script isn't injected.
  *  • Does not relay to tabs without a meaningful tabId.
  */
-async function prepareIntentOnActiveTab(store: Store): Promise<{ ok: true }> {
+async function prepareIntentOnActiveTab(
+  store: Store,
+  auth: EcholyAuth,
+): Promise<{ ok: true }> {
   // Guard: already running — the warm slot is useless.
   const { running, connecting, tabId } = store.state;
   if (running || connecting) return { ok: true };
@@ -229,9 +233,31 @@ async function prepareIntentOnActiveTab(store: Store): Promise<{ ok: true }> {
   }
   if (!targetTabId) return { ok: true };
 
+  // Resolve the settings the Start would use and ship them with the relay — the
+  // content script's own sm.settings is null before the first CONTENT_START (and
+  // stale after an old session), so it cannot supply them itself. decideApiMode
+  // is PURE (no network): it returns a mode only when both the ec_session token
+  // (a cheap cookie read) and the cached signed-in user are present. When signed
+  // out / on a cold SW we relay a bare message and content no-ops — the warm slot
+  // is simply skipped for that hover (no /auth/me fetch on hover).
+  let intent: { apiBearer: string; targetLanguage: string; pipeline: string } | undefined;
+  try {
+    const token = await auth.getSessionToken();
+    const mode = decideApiMode({ token, user: store.state.signedInUser ?? null });
+    if (mode) {
+      intent = {
+        apiBearer: mode.apiKey,
+        targetLanguage: store.state.targetLanguage,
+        pipeline: store.state.tier,
+      };
+    }
+  } catch {
+    // Token read failed — relay a bare message; content no-ops.
+  }
+
   // Fire-and-forget relay; any failure (content script not injected, etc.) is silent.
   try {
-    await chrome.tabs.sendMessage(targetTabId, { type: "CONTENT_PREPARE_INTENT" });
+    await chrome.tabs.sendMessage(targetTabId, { type: "CONTENT_PREPARE_INTENT", intent });
   } catch {
     // Content script not injected / tab closed — acceptable, just skips pre-warm.
   }

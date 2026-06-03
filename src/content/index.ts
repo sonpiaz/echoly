@@ -989,20 +989,21 @@ export function initContent(): void {
             break;
           case "CONTENT_PREPARE_INTENT": {
             // GAP-1: pre-warm the WebRTC transport + provider WS ahead of Start.
-            // Guards (all must pass to avoid wasting a warm slot):
+            // The intent (apiBearer / targetLanguage / pipeline) is supplied by
+            // the background — NOT read from sm.settings, which is null before the
+            // first CONTENT_START and stale after an old session. Guards:
             //   • No active session (would be useless / waste a slot).
-            //   • Settings must include an apiBearer and targetLanguage.
-            //   • Uses the current session settings tier, defaulting to "realtime".
-            //     Only "realtime" benefits from an eager WS dial (D-3).
+            //   • A resolved intent with an apiBearer + targetLanguage (omitted by
+            //     the background when signed out / cold SW → no-op).
+            //   • pipeline defaults to "realtime"; only realtime benefits from an
+            //     eager WS dial (D-3), standard gets transport savings only.
             const { sm } = app;
-            const s = sm.settings;
-            if (!sm.session && s?.apiBearer && s?.targetLanguage) {
-              const pipeline = s.tier ?? TIER_REALTIME;
-              // Only pre-warm for realtime; standard gets transport savings only.
+            const intent = msg.intent;
+            if (!sm.session && intent?.apiBearer && intent?.targetLanguage) {
               void app.webrtc.prepareIntent({
-                apiBearer: s.apiBearer,
-                pipeline,
-                targetLanguage: s.targetLanguage,
+                apiBearer: intent.apiBearer,
+                pipeline: intent.pipeline || TIER_REALTIME,
+                targetLanguage: intent.targetLanguage,
               });
             }
             sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_PREPARE_INTENT"]);

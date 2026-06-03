@@ -84,8 +84,16 @@ export type BgToContentMessage =
   | { type: "CONTENT_STOP" }
   | { type: "CONTENT_UPDATE_SETTINGS"; settings: State }
   | { type: "CONTENT_UPDATE_VOLUME"; originalVolume: number; voiceVolume: number }
-  /** Pre-warm intent relay: background forwards to content after PREPARE_INTENT from popup. */
-  | { type: "CONTENT_PREPARE_INTENT" };
+  /** Pre-warm intent relay: background forwards to content after PREPARE_INTENT
+   *  from popup. Carries the settings the Start would use (resolved by the
+   *  background, the source of truth) so content does NOT depend on its own
+   *  `sm.settings`, which is null before the first CONTENT_START and stale after
+   *  an old session. `intent` is omitted when signed out / cold SW → content
+   *  no-ops. `pipeline` is the translation tier ("standard" | "realtime"). */
+  | {
+      type: "CONTENT_PREPARE_INTENT";
+      intent?: { apiBearer: string; targetLanguage: string; pipeline: string };
+    };
 
 export interface BgToContentResponse {
   CONTENT_PING: { ok: true; version: string };
