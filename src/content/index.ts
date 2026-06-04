@@ -28,6 +28,7 @@ import { WebRtcPipeline } from "./pipelines/webrtc-pipeline";
 import { SubtitleFirstPipeline } from "./pipelines/subtitle-first-pipeline";
 import { isSubtitleFirstSession, isWebRtcSession } from "./session-manager";
 import { TOAST_PRESS_PLAY, STATUS_CONNECTING, STATUS_PREPARING_DUB, STATUS_AD_WAIT } from "@/shared/product-copy";
+import { isPipelineToastError } from "@/lib/echoly-api";
 import { createController } from "./controller";
 import { STOP_REASON, STOP_REASON_MESSAGE, type StopReason } from "./stop-reasons";
 import { bindSourceVideoPlayback } from "@/lib/rtc-media-sync";
@@ -493,6 +494,14 @@ export class ContentApp {
         }
       }
       overlay.removeOverlay();
+      if (isPipelineToastError(err) && err.expiryLike) {
+        overlay.showToast(err.user, {
+          durationMs: err.durationMs ?? 8000,
+          ...(err.cta ? { cta: err.cta } : {}),
+          ...(err.ctaLabel ? { ctaLabel: err.ctaLabel } : {}),
+        });
+        return { ok: false, error: err.user };
+      }
       const e = err as Error & { cta?: string };
       const msg = e.cta ? `${e.message} (${e.cta})` : e.message;
       return { ok: false, error: msg };
@@ -1007,6 +1016,15 @@ export function initContent(): void {
               });
             }
             sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_PREPARE_INTENT"]);
+            break;
+          }
+          case "CONTENT_SHOW_TOAST": {
+            app.overlay.showToast(msg.text, {
+              durationMs: msg.durationMs ?? 8000,
+              ...(msg.cta ? { cta: msg.cta } : {}),
+              ...(msg.ctaLabel ? { ctaLabel: msg.ctaLabel } : {}),
+            });
+            sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_SHOW_TOAST"]);
             break;
           }
           default:

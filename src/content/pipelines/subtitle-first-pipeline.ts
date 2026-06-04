@@ -250,6 +250,13 @@ export class SubtitleFirstPipeline {
       overlay.removeOverlay();
       restorePlay();
       const msg = isPipelineToastError(err) ? err.user : String((err as Error).message || err);
+      if (isPipelineToastError(err) && err.expiryLike) {
+        overlay.showToast(err.user, {
+          durationMs: err.durationMs ?? 8000,
+          ...(err.cta ? { cta: err.cta } : {}),
+          ...(err.ctaLabel ? { ctaLabel: err.ctaLabel } : {}),
+        });
+      }
       return { ok: false, error: msg };
     }
 
@@ -506,6 +513,13 @@ export class SubtitleFirstPipeline {
       const msg = isPipelineToastError(err)
         ? err.user
         : String((err as Error).message || err);
+      if (isPipelineToastError(err) && err.expiryLike) {
+        this.app.overlay.showToast(err.user, {
+          durationMs: err.durationMs ?? 8000,
+          ...(err.cta ? { cta: err.cta } : {}),
+          ...(err.ctaLabel ? { ctaLabel: err.ctaLabel } : {}),
+        });
+      }
       return { ok: false, error: msg };
     }
 

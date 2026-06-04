@@ -3,7 +3,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import { CONTENT_SCRIPT_PATH, CONTENT_CSS_PATH } from "@/shared/constants";
-import { signInToStartMessage } from "@/shared/echoly-config";
+import { signInToStartMessage, ECHOLY_WEB_URLS } from "@/shared/echoly-config";
 import { ERR_NO_VIDEO_TAB } from "@/shared/product-copy";
 import { relayToContent } from "@/shared/protocol";
 import type { Ack, StateResult } from "@/shared/protocol";
@@ -168,6 +168,39 @@ export class SessionCoordinator {
     const mode = await resolveApiMode(this.auth, this.store.state.signedInUser);
     if (!mode) {
       const msg = signInToStartMessage();
+      // Best-effort relay a page toast so the on-page launcher path is not silent.
+      // Runs BEFORE the store updates so the async tab lookup doesn't race with
+      // cleanup. A missing tab, uninjected content script, or any other error is
+      // silently swallowed — the { ok:false } return always proceeds.
+      try {
+        let toastTabId: number | undefined;
+        try {
+          const tab = await this.sessionTabForStart();
+          toastTabId = tab.id;
+        } catch {
+          // No dubbable tab found — fall back to the focused window's active tab.
+          try {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            toastTabId = activeTab?.id;
+          } catch {
+            // tabs API unavailable — skip toast.
+          }
+        }
+        if (toastTabId != null) {
+          try {
+            await chrome.tabs.sendMessage(toastTabId, {
+              type: "CONTENT_SHOW_TOAST" as const,
+              text: msg,
+              cta: ECHOLY_WEB_URLS.signin(),
+              ctaLabel: "Sign in",
+            } satisfies import("@/shared/protocol").BgToContentMessage);
+          } catch {
+            // Content script not injected in this tab — acceptable, skip toast.
+          }
+        }
+      } catch {
+        // Unexpected error in relay logic — never propagate out of start().
+      }
       this.store.setError(msg);
       this.store.setStatus(msg);
       this.store.setConnecting(false);

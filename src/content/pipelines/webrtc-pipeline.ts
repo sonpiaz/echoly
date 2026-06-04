@@ -9,6 +9,7 @@ import {
 } from "@/shared/constants";
 import { resolveLangName } from "@/lib/resolve-lang-name";
 import { parseServerError } from "@/lib/server-errors";
+import { pipelineToastFromServer } from "@/lib/pipeline-error";
 import { notifyQuotaToBackground } from "@/lib/quota-notify";
 import { RTC_METADATA_CHANNEL } from "@/shared/rtc-metadata";
 import { currentSiteHost } from "@/shared/site-host";
@@ -389,10 +390,8 @@ export class WebRtcPipeline {
       pc.close();
       const parsed = await parseServerError(sdpResp);
       notifyQuotaToBackground(parsed);
-      const err: CtaError = new Error(parsed.user);
-      if (parsed.cta) err.cta = parsed.cta;
-      if (parsed.ctaLabel) err.ctaLabel = parsed.ctaLabel;
-      throw err;
+      const toast = pipelineToastFromServer(parsed);
+      throw Object.assign(new Error(toast.user), toast);
     }
 
     const rtcSessionId = sdpResp.headers.get("x-echoly-session-id") || null;

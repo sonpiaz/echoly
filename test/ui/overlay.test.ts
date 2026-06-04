@@ -588,6 +588,68 @@ describe("syncFromSettings", () => {
   });
 });
 
+// ── showToast self-mount (AC 3 from SOLUTION.md) ─────────────────────────
+
+describe("showToast — self-mount when root is null (cold / no buildOverlay)", () => {
+  it("mounts a .ec-root and places .ec-toast inside it without prior buildOverlay", () => {
+    // Precondition: no ec-root in the DOM.
+    expect(document.body.querySelector(".ec-root")).toBeNull();
+
+    const ov = createOverlay();
+    // Deliberately do NOT call buildOverlay — test the self-mount path.
+    ov.showToast("Session expired. Please sign in.");
+
+    const root = document.body.querySelector(".ec-root");
+    expect(root).not.toBeNull();
+
+    const toast = root!.querySelector(".ec-toast");
+    expect(toast).not.toBeNull();
+    expect(toast!.textContent).toContain("Session expired");
+  });
+
+  it("self-mounted .ec-root is a child of document.body", () => {
+    const ov = createOverlay();
+    ov.showToast("Credits used up.");
+
+    const root = document.body.querySelector(".ec-root");
+    expect(root).not.toBeNull();
+    expect(root!.parentElement).toBe(document.body);
+  });
+});
+
+describe("showToast — after removeOverlay, subsequent showToast still renders", () => {
+  it("showToast with cta after removeOverlay renders .ec-toast with <a> href", () => {
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks());
+    expect(ov.isMounted()).toBe(true);
+
+    // Tear down the session overlay (as the content catch does before toasting).
+    ov.removeOverlay();
+    expect(ov.isMounted()).toBe(false);
+    expect(document.body.querySelector(".ec-root")).toBeNull();
+
+    // Now call showToast — must self-mount a new root.
+    ov.showToast("Credits exhausted. Upgrade your plan.", {
+      cta: "https://echolyhq.com/upgrade",
+      ctaLabel: "Upgrade",
+    });
+
+    const root = document.body.querySelector(".ec-root");
+    expect(root).not.toBeNull();
+
+    const toast = root!.querySelector(".ec-toast");
+    expect(toast).not.toBeNull();
+    expect(toast!.textContent).toContain("Credits exhausted");
+
+    const link = root!.querySelector(".ec-toast a") as HTMLAnchorElement | null;
+    expect(link).not.toBeNull();
+    expect(link!.href).toBe("https://echolyhq.com/upgrade");
+    expect(link!.textContent).toBe("Upgrade");
+    expect(link!.target).toBe("_blank");
+    expect(link!.rel).toBe("noopener noreferrer");
+  });
+});
+
 describe("caption auto-scroll", () => {
   async function flushCaptionScroll(): Promise<void> {
     await new Promise<void>((resolve) => {

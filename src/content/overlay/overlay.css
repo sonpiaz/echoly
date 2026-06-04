@@ -993,6 +993,12 @@
   z-index: 2147483601;
   pointer-events: none;
 }
+/* Re-enable pointer events on the CTA link so Upgrade / Sign-in is clickable.
+   The toast container itself stays pointer-events:none (no hit-test on the
+   background), but the nested <a> is interactive. */
+.ec-toast a {
+  pointer-events: auto;
+}
 
 @media (prefers-reduced-motion: reduce) {
   /* Disable all animated elements so users who request reduced motion see a

@@ -93,6 +93,16 @@ export type BgToContentMessage =
   | {
       type: "CONTENT_PREPARE_INTENT";
       intent?: { apiBearer: string; targetLanguage: string; pipeline: string };
+    }
+  /** Background relays a toast to display on the page. Used for pre-content
+   *  failures (e.g. session expired before content script is involved) so the
+   *  user sees a friendly on-page notification instead of silence. */
+  | {
+      type: "CONTENT_SHOW_TOAST";
+      text: string;
+      durationMs?: number;
+      cta?: string;
+      ctaLabel?: string;
     };
 
 export interface BgToContentResponse {
@@ -102,6 +112,7 @@ export interface BgToContentResponse {
   CONTENT_UPDATE_SETTINGS: { ok: true; state?: Partial<State> }; // state OPTIONAL
   CONTENT_UPDATE_VOLUME: Ok;
   CONTENT_PREPARE_INTENT: Ok;
+  CONTENT_SHOW_TOAST: Ok;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

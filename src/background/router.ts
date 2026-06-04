@@ -54,6 +54,7 @@ export function handleContentEvent(
       code: "quota_exhausted" as const,
       user: "",
       isQuotaOrTier: true,
+      kind: "quota" as const,
       mode: message.mode,
       usedCredits: message.used_credits,
       capCredits: message.cap_credits,

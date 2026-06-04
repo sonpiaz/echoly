@@ -21,6 +21,7 @@
 import type { ToastOptions } from "@/shared/ports";
 import { TIER_REALTIME, TIER_STANDARD, type TranslationTier } from "@/shared/constants";
 import type { Usage } from "@/shared/types";
+import { ECHOLY_WEB_URLS } from "@/shared/echoly-config";
 
 export type ServerErrorCode =
   | "tier_locked"
@@ -42,12 +43,22 @@ export interface ParsedServerError {
   code: ServerErrorCode;
   /** User-facing message (server's `error.message`, or a status fallback). */
   user: string;
-  /** Server's upgrade_url, if present on the 402 paths. */
+  /** Server's upgrade_url, if present on the 402/403 paths. */
   cta?: string;
-  /** Suggested CTA label ("Upgrade" by default for 402s). */
+  /** Suggested CTA label ("Upgrade" for 402/403, "Sign in" for 401). */
   ctaLabel?: string;
   /** True if the status was 402 — used to drive the upgrade-toast UX. */
   isQuotaOrTier: boolean;
+  /**
+   * Coarse classification of the HTTP status for downstream error routing.
+   *   402 → 'quota'     (credit/tier gate)
+   *   401 → 'auth'      (session expired / signed out)
+   *   403 → 'access'    (plan lapsed / access revoked)
+   *   429 → 'rate'      (too many requests)
+   *   413 → 'too_large' (request body too large)
+   *   else → 'other'
+   */
+  kind: 'quota' | 'auth' | 'access' | 'rate' | 'too_large' | 'other';
   /** Present on 402 reserve-rejection envelopes. */
   mode?: TranslationTier;
   usedCredits?: number;
@@ -61,6 +72,16 @@ interface JsonObject {
 }
 type JsonArray = JsonValue[];
 
+/** Derive the `kind` discriminant from an HTTP status. */
+function kindFromStatus(status: number): ParsedServerError['kind'] {
+  if (status === 402) return 'quota';
+  if (status === 401) return 'auth';
+  if (status === 403) return 'access';
+  if (status === 429) return 'rate';
+  if (status === 413) return 'too_large';
+  return 'other';
+}
+
 /**
  * Parse a non-OK Response into the typed shape above. Best-effort on bodies
  * that aren't JSON or don't match the envelope — we still return SOMETHING so
@@ -68,6 +89,7 @@ type JsonArray = JsonValue[];
  */
 export async function parseServerError(res: Response): Promise<ParsedServerError> {
   const status = res.status;
+  const kind = kindFromStatus(status);
   let body: JsonObject | JsonArray | string | null = null;
   try {
     body = await res.json();
@@ -75,36 +97,76 @@ export async function parseServerError(res: Response): Promise<ParsedServerError
     // Not JSON — try text for the user message.
     try {
       const text = await res.text();
+      const user = text.slice(0, 200) || `Server returned ${status}.`;
+      const cta = kind === 'auth' ? ECHOLY_WEB_URLS.signin() : undefined;
+      const ctaLabel = kind === 'auth' ? "Sign in" : undefined;
       return {
         status,
         code: `http_${status}`,
-        user: text.slice(0, 200) || `Server returned ${status}.`,
+        user,
         isQuotaOrTier: false,
+        kind,
+        ...(cta ? { cta } : {}),
+        ...(ctaLabel ? { ctaLabel } : {}),
       };
     } catch {
+      const cta = kind === 'auth' ? ECHOLY_WEB_URLS.signin() : undefined;
+      const ctaLabel = kind === 'auth' ? "Sign in" : undefined;
       return {
         status,
         code: `http_${status}`,
         user: `Server returned ${status}.`,
         isQuotaOrTier: false,
+        kind,
+        ...(cta ? { cta } : {}),
+        ...(ctaLabel ? { ctaLabel } : {}),
       };
     }
   }
 
   const err = readError(body);
   const isQuota = status === 402;
+
+  // Determine cta/ctaLabel based on status:
+  //   402 → upgrade_url (if present), "Upgrade"
+  //   403 → upgrade_url (if present), "Upgrade"
+  //   401 → signin URL, "Sign in"
+  let cta: string | undefined;
+  let ctaLabel: string | undefined;
+  if (isQuota) {
+    cta = err?.upgrade_url;
+    ctaLabel = err?.upgrade_url ? "Upgrade" : undefined;
+  } else if (status === 403) {
+    cta = err?.upgrade_url;
+    ctaLabel = err?.upgrade_url ? "Upgrade" : undefined;
+  } else if (status === 401) {
+    cta = ECHOLY_WEB_URLS.signin();
+    ctaLabel = "Sign in";
+  }
+
   return {
     status,
     code: err?.code ?? `http_${status}`,
     user: err?.message ?? `Server returned ${status}.`,
-    cta: isQuota ? err?.upgrade_url : undefined,
-    ctaLabel: isQuota && err?.upgrade_url ? "Upgrade" : undefined,
     isQuotaOrTier: isQuota,
+    kind,
+    ...(cta !== undefined ? { cta } : {}),
+    ...(ctaLabel !== undefined ? { ctaLabel } : {}),
     mode: err?.mode,
     usedCredits: err?.used_credits,
     capCredits: err?.cap_credits,
     resetsAt: err?.resets_at,
   };
+}
+
+/**
+ * Returns true when the error represents an "expiry-like" condition — the user
+ * cannot translate right now because of their account / credit / license state,
+ * and it is NOT a transient bug (quota, session expired, access revoked).
+ * Used by pipelines to decide whether to show a persistent CTA toast on the page.
+ */
+export function isExpiryLike(p: ParsedServerError): boolean {
+  return p.kind === 'quota' || p.kind === 'auth' || p.kind === 'access';
 }
 
 /** Map a parsed 402 into store.usage fields (O(1), no bootstrap). */

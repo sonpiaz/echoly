@@ -1,8 +1,11 @@
 // Authenticated Echoly API helpers (subtitle-first Standard).
 
 import { parseServerError } from "@/lib/server-errors";
-import { pipelineToastFromServer, type PipelineToastError } from "@/lib/pipeline-error";
+import { pipelineToastFromServer, isPipelineToastError } from "@/lib/pipeline-error";
 import type { CaptionSentence } from "@/lib/caption-utils";
+
+// Re-export so existing importers that do `import { isPipelineToastError } from "@/lib/echoly-api"` keep working.
+export { isPipelineToastError };
 
 const HDR_REQUEST_ID = "x-echoly-request-id";
 const HDR_SESSION_ID = "x-echoly-session-id";
@@ -261,11 +264,3 @@ export async function* renderSubtitleDubStream(opts: {
   }
 }
 
-export function isPipelineToastError(err: unknown): err is PipelineToastError {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "user" in err &&
-    typeof (err as PipelineToastError).user === "string"
-  );
-}

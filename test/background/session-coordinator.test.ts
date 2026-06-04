@@ -224,3 +224,90 @@ describe("updateVolume / stop — active-tab fallback when tabId is null", () =>
     expect(volCall![0]).toBe(3);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// start — signed-out / expired session relays CONTENT_SHOW_TOAST
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("start — signed-out/expired session → CONTENT_SHOW_TOAST relay", () => {
+  let chromeMock: FakeChrome;
+  let store: Store;
+  let session: SessionCoordinator;
+  let auth: EcholyAuth;
+
+  beforeEach(() => {
+    chromeMock = resetChrome();
+    ({ store, session, auth } = build(chromeMock));
+  });
+
+  it("relays CONTENT_SHOW_TOAST to the active tab when resolveApiMode returns null (no session token)", async () => {
+    // Simulate: getSessionToken returns null → resolveApiMode will return null
+    // (no proxy mode available, user is signed out).
+    vi.spyOn(auth, "getSessionToken").mockResolvedValue(null);
+    vi.spyOn(auth, "fetchUser").mockResolvedValue(null);
+
+    // Provide an active tab so the coordinator can find it.
+    const TAB_ID = 42;
+    chromeMock.tabs.query.mockImplementation(async (query: chrome.tabs.QueryInfo) => {
+      // sessionTabForStart queries for all tabs; fallback queries active+currentWindow.
+      // Return a valid web tab either way.
+      if (query.active === true) {
+        return [{ id: TAB_ID, url: "https://www.youtube.com/watch?v=xyz" }];
+      }
+      return [{ id: TAB_ID, url: "https://www.youtube.com/watch?v=xyz" }];
+    });
+    // sendMessage should succeed (content script is "injected").
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+
+    await store.loadSettings();
+    const result = await session.start({ targetLanguage: "vi" });
+
+    // The call must return ok: false (sign-in required).
+    expect(result.ok).toBe(false);
+
+    // A CONTENT_SHOW_TOAST message must have been sent to a tab.
+    const toastCall = chromeMock.tabs.sendMessage.mock.calls.find(
+      (c: unknown[]) => (c[1] as { type?: string })?.type === "CONTENT_SHOW_TOAST",
+    );
+    expect(toastCall).toBeDefined();
+
+    // The toast message must carry a non-empty text (the "sign in" message).
+    const toastMsg = toastCall![1] as { type: string; text: string };
+    expect(typeof toastMsg.text).toBe("string");
+    expect(toastMsg.text.length).toBeGreaterThan(0);
+  });
+
+  it("returns { ok: false } even when the tab is missing (no tab → skip toast, never throw)", async () => {
+    vi.spyOn(auth, "getSessionToken").mockResolvedValue(null);
+    vi.spyOn(auth, "fetchUser").mockResolvedValue(null);
+
+    // No tabs available — both queries return empty arrays.
+    chromeMock.tabs.query.mockResolvedValue([]);
+    chromeMock.tabs.sendMessage.mockResolvedValue({ ok: true });
+
+    await store.loadSettings();
+    const result = await session.start();
+
+    // Must NOT throw — coordinator swallows tab-not-found gracefully.
+    expect(result.ok).toBe(false);
+    // No CONTENT_SHOW_TOAST was sent (no tab to send to — acceptable).
+    const toastCall = chromeMock.tabs.sendMessage.mock.calls.find(
+      (c: unknown[]) => (c[1] as { type?: string })?.type === "CONTENT_SHOW_TOAST",
+    );
+    expect(toastCall).toBeUndefined();
+  });
+
+  it("does NOT relay CONTENT_SHOW_TOAST when session is already running (benign guard)", async () => {
+    // Already running → the early-return path runs before resolveApiMode.
+    store.setRunning(true);
+
+    const result = await session.start();
+
+    expect(result).toEqual({ ok: false, error: "Session already running." });
+
+    const toastCall = chromeMock.tabs.sendMessage.mock.calls.find(
+      (c: unknown[]) => (c[1] as { type?: string })?.type === "CONTENT_SHOW_TOAST",
+    );
+    expect(toastCall).toBeUndefined();
+  });
+});

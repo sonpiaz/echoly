@@ -181,6 +181,9 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   let overlayCallbacks: OverlayCallbacks | null = null;
   let signedInProxyMode = false;
   let lastSyncSettings: StartSettings | null = null;
+  // True when root was created solely to host a toast (no full session overlay).
+  // showToast auto-removes this minimal host when the toast expires.
+  let toastOnlyRoot = false;
 
   const DOCK_W = 248;
   const DOCK_H = 46;
@@ -617,12 +620,18 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     if (standardVoices?.length) standardVoiceOptions = standardVoices;
     signedInProxyMode = !!signedInProxy;
     overlayCallbacks = callbacks;
-    if (root) return;
+    if (root) {
+      // A full session overlay supersedes any toast-only host: clear the flag so
+      // the toast timeout cleanup does not tear down the real session overlay.
+      toastOnlyRoot = false;
+      return;
+    }
     // Re-seed the layout from the Advanced caption-position preset (only when
     // nothing persisted yet). This is the right moment — by buildOverlay time,
     // the SW has merged effective Advanced into StartSettings.advanced and the
     // controller passes it through. (No-op when the user has already dragged.)
     layout = loadLayout(captionPosition ?? null);
+    toastOnlyRoot = false;
     root = document.createElement("aside");
     root.className = "ec-root";
     root.dataset.state = "ready";
@@ -764,6 +773,7 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
       root.remove();
       root = null;
     }
+    toastOnlyRoot = false;
     purgeEcholyOverlayRoots();
     elements = emptyElements();
     overlayCallbacks = null;
@@ -906,18 +916,35 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
 
   // Toast — built via DOM APIs (NEVER innerHTML). Default 8000ms; replaces any
   // existing toast; auto-removes. (legacy showToast, content.js:333-353.)
+  //
+  // Self-mounts a minimal `.ec-root` host when none is mounted (e.g. after
+  // removeOverlay or before any session starts). The bare aside is just enough
+  // for the existing CSS to position the toast correctly (ec-root is 0×0
+  // overflow:visible fixed, ec-toast is position:fixed to the viewport).
+  // The host removes itself once the toast expires if no real session overlay
+  // was mounted in the meantime (toastOnlyRoot still true at timeout).
+  function ensureRootForToast(): void {
+    if (root) return;
+    const host = document.createElement("aside");
+    host.className = "ec-root";
+    (document.body ?? document.documentElement).appendChild(host);
+    root = host;
+    toastOnlyRoot = true;
+  }
+
   function showToast(text: string, opts?: number | ToastOptions): void {
-    if (!root) return;
+    ensureRootForToast();
     const o: ToastOptions =
       typeof opts === "number" ? { durationMs: opts } : (opts ?? {});
     const ms = o.durationMs ?? 8000;
-    let toast = root.querySelector(".ec-toast");
+    let toast = root!.querySelector(".ec-toast");
     if (toast) toast.remove();
     toast = document.createElement("div");
     toast.className = "ec-toast";
     toast.textContent = String(text || "");
-    // Optional CTA link (e.g. "Top up" on insufficient balance). DOM APIs only —
-    // the text/href may originate from a provider error body (XSS guard).
+    // Optional CTA link (e.g. "Upgrade" / "Sign in" on quota/auth expiry).
+    // DOM APIs only — the text/href may originate from a provider error body
+    // (XSS guard). Pointer events re-enabled via CSS (.ec-toast a).
     if (o.cta) {
       toast.append(" ");
       const a = document.createElement("a");
@@ -927,8 +954,18 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
       a.textContent = String(o.ctaLabel || "Open");
       toast.appendChild(a);
     }
-    root.appendChild(toast);
-    setTimeout(() => toast!.remove(), ms);
+    root!.appendChild(toast);
+    setTimeout(() => {
+      toast!.remove();
+      // Self-clean: remove the minimal host if it was created solely for this
+      // toast AND no real session overlay has replaced it (toastOnlyRoot still
+      // true — buildOverlay / removeOverlay both reset it).
+      if (toastOnlyRoot) {
+        root?.remove();
+        root = null;
+        toastOnlyRoot = false;
+      }
+    }, ms);
   }
 
   // ───── History (legacy pushHistoryTurn/renderHistory, content.js:431-475) ──
