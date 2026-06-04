@@ -94,10 +94,13 @@ export async function continueOnNewVideo(
       return;
     }
 
-    // ── 3. Rebind video listeners BEFORE the async caption fetch ────────────
-    // So a very short next video that fires `ended` mid-switch is not missed.
-    // The listeners stay in place; auto-next or stopSession will replace them.
-    app.bindCommonVideoListeners(video, sm.session!, {});
+    // ── 3. Update capture references BEFORE the async caption fetch ─────────
+    // Record the new video element so capture.videoEl is always current.
+    // NOTE: for the subtitle-first path, the proper onSeeked/onEndedBefore
+    // listeners are bound inside restart() itself (Fix #2) — binding an empty
+    // set here would clobber them.  For the WebRTC path, webrtc.continueOnNewVideo
+    // binds its own listeners internally.  So we intentionally skip the empty
+    // bindCommonVideoListeners call here.
     app.capture.videoEl = video;
     app.capture.bindVolumeDriftGuard(video);
 

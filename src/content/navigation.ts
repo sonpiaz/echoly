@@ -24,7 +24,12 @@ export type NavEvent =
 // How long (ms) to poll location.href for URL changes.
 const URL_POLL_MS = 500;
 // Debounce window (ms) before treating a new videoId as stable.
+// The poll-path uses the full 700ms to coalesce rapid playlist skips.
+// The yt-navigate-finish event path uses a much shorter debounce (~100ms)
+// since the event is single-fire per SPA navigation — 700ms adds unnecessary
+// dead time to every auto-next transition.
 const NAV_DEBOUNCE_MS = 700;
+const NAV_DEBOUNCE_YT_EVENT_MS = 100;
 // After `onEnded`: wait this long for a follow-up navigation before stopping.
 const PENDING_NEXT_TIMEOUT_MS = 8_000;
 
@@ -40,6 +45,8 @@ export class NavigationWatcher {
   #app: ContentApp;
   #pollTimer: ReturnType<typeof setInterval> | null = null;
   #debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Source that started the current debounce ('poll' uses long window; 'yt-event' uses short). */
+  #debounceSource: 'poll' | 'yt-event' = 'poll';
   #pendingNextTimer: ReturnType<typeof setTimeout> | null = null;
   #onEvent: ((e: NavEvent) => void) | null = null;
 
@@ -76,14 +83,16 @@ export class NavigationWatcher {
 
     // 500ms href poll — cross-platform baseline.
     this.#pollTimer = setInterval(() => {
-      this.#checkUrl();
+      this.#checkUrl('poll');
     }, URL_POLL_MS);
 
     // YouTube: also subscribe to yt-navigate-finish for lower latency.
     // Only install when the active adapter is YouTube (feature-detect by id).
     if (this.#app.adapter.id === "youtube") {
       const handler = (): void => {
-        this.#checkUrl();
+        // Use a short debounce (~100ms): yt-navigate-finish is single-fire per
+        // SPA navigation so we don't need the 700ms coalescing window.
+        this.#checkUrl('yt-event');
       };
       document.addEventListener("yt-navigate-finish", handler);
       this.#ytNavListener = () => {
@@ -127,7 +136,7 @@ export class NavigationWatcher {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  #checkUrl(): void {
+  #checkUrl(source: 'poll' | 'yt-event' = 'poll'): void {
     const currentUrl = location.href;
     if (currentUrl === this.#lastUrl) return;
 
@@ -144,12 +153,27 @@ export class NavigationWatcher {
       return;
     }
 
-    // Watch URL — debounce to let the URL settle (playlist skipping coalesces here).
+    // Watch URL — debounce to let the URL settle.
+    // poll-path: 700ms to coalesce rapid playlist skips.
+    // yt-event path: 100ms — single-fire per SPA nav, no coalescing needed.
+    const debounceDuration =
+      source === 'yt-event' ? NAV_DEBOUNCE_YT_EVENT_MS : NAV_DEBOUNCE_MS;
+
+    // If a yt-event fires while a poll debounce is in-flight, the yt-event wins
+    // (shorter window). If a poll fires while a yt-event debounce is in-flight,
+    // keep the shorter window.
+    const shouldReplace =
+      this.#debounceTimer === null ||
+      source === 'yt-event' ||
+      this.#debounceSource === 'poll';
+    if (!shouldReplace) return;
+
     this.#clearDebounce();
+    this.#debounceSource = source;
     this.#debounceTimer = setTimeout(() => {
       this.#debounceTimer = null;
       this.#handleStableUrl(location.href);
-    }, NAV_DEBOUNCE_MS);
+    }, debounceDuration);
   }
 
   #handleStableUrl(stableUrl: string): void {
@@ -166,10 +190,11 @@ export class NavigationWatcher {
     // Must have a valid id that differs from the last-known id.
     if (!newId || newId === this.#lastVideoId) return;
 
-    // B4: When no session is active and the adapter supports subtitle-first
-    // captions (e.g. YouTube), kick off an eager caption prefetch so that Start
-    // does not wait for the caption-fetch step.  The prefetch is cancellable:
-    // if the videoId changes again before it completes, we abort it.
+    // B4: Eager caption prefetch — kick off regardless of session state.
+    // • Idle (no session): prefetch so cold-start doesn't pay caption-fetch latency.
+    // • Active session (auto-next): prefetch IN PARALLEL before emitting continue,
+    //   so restart() consumes the cached result instead of fetching serially at the
+    //   worst possible time (while the video is trying to play).
     if (this.#app.sm.session == null) {
       // Update tracking so the next navigation starts fresh.
       this.#lastVideoId = newId;
@@ -180,13 +205,16 @@ export class NavigationWatcher {
       return;
     }
 
-    // Resolve the pending-next window (if any) — the nav replaces it.
+    // Active session — resolve the pending-next window (if any) first.
     this.#clearPendingNext();
     this.#pendingNext = false;
 
-    // Cancel any outstanding prefetch — a session is about to start and will
-    // call adapter.fetchCaptions itself.
-    this.#cancelPrefetch();
+    // Kick off the eager prefetch IN PARALLEL so restart() can consume it via
+    // getPrefetchedCaptions().  We pass `forActiveSession: true` so the guard
+    // inside #startPrefetch skips the "no session" check.
+    if (this.#app.adapter.capabilities?.subtitleFirst) {
+      this.#startPrefetch(newId, true);
+    }
 
     // Update tracking.
     this.#lastVideoId = newId;
@@ -214,16 +242,21 @@ export class NavigationWatcher {
    * in-flight for this video.  Each call gets its own AbortController; a
    * subsequent call for a different videoId aborts the previous one first so
    * rapid playlist skipping does not accumulate stale fetches.
+   *
+   * @param forActiveSession  When true, skip the "no session" guard so the
+   *   prefetch runs in parallel with the active-session auto-next transition.
+   *   restart() will consume the result via getPrefetchedCaptions().
    */
-  #startPrefetch(videoId: string): void {
+  #startPrefetch(videoId: string, forActiveSession = false): void {
     // Guard: don't re-fetch what we're already fetching.
     if (this.#prefetchingForId === videoId) return;
 
     // Abort any previous in-flight prefetch (different videoId).
     this.#cancelPrefetch();
 
-    // Guard: if a session started while the debounce was running, skip.
-    if (this.#app.sm.session != null) return;
+    // Guard: if a session started while the debounce was running, skip —
+    // UNLESS we're intentionally prefetching for the active-session auto-next.
+    if (!forActiveSession && this.#app.sm.session != null) return;
 
     const ac = new AbortController();
     this.#prefetchAbort = ac;
@@ -236,10 +269,13 @@ export class NavigationWatcher {
     void this.#app.adapter
       .fetchCaptions({ videoId, signal: ac.signal })
       .then((result) => {
-        // Bail out if cancelled or if a session has started in the meantime.
+        // Bail out if cancelled or videoId changed.
         if (ac.signal.aborted) return;
         if (this.#prefetchingForId !== videoId) return;
-        if (this.#app.sm.session != null) return;
+        // For idle prefetch, discard if a session started in the meantime
+        // (the session will fetch its own captions).  For active-session
+        // prefetch (forActiveSession), ALWAYS store — restart() will consume it.
+        if (!forActiveSession && this.#app.sm.session != null) return;
         if (result) {
           setPrefetchedCaptions(videoId, result);
         }

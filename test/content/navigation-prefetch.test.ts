@@ -186,7 +186,7 @@ describe("NavigationWatcher — B4 eager caption prefetch", () => {
     watcher.stop();
   });
 
-  it("does NOT start a prefetch when a session is active", async () => {
+  it("starts an eager prefetch even when a session is active (auto-next parallel fetch)", async () => {
     const fetchFn = vi.fn().mockResolvedValue(null);
     const adapter = makeAdapter({ fetchCaptionsFn: fetchFn });
     const app = makeApp(adapter, true /* session active */);
@@ -199,9 +199,11 @@ describe("NavigationWatcher — B4 eager caption prefetch", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    // When a session is active the watcher emits a "continue" event and
-    // should NOT call fetchCaptions for a prefetch.
-    expect(fetchFn).not.toHaveBeenCalled();
+    // When a session is active the watcher emits a "continue" event AND
+    // kicks off a parallel prefetch so restart() can consume the cached captions.
+    expect(events).toHaveLength(1);
+    expect((events[0] as { kind: string }).kind).toBe("continue");
+    expect(fetchFn).toHaveBeenCalledOnce();
 
     watcher.stop();
   });

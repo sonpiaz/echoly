@@ -442,6 +442,28 @@ export class SubtitleFirstPipeline {
       return { ok: false, error: "No playable video on this page." };
     }
 
+    // ── Pause/render/resume: mirror start() to stabilise currentTime ─────────
+    // Set _systemPaused SYNCHRONOUSLY before video.pause() so the DOM "pause"
+    // event arrives with the flag already true (guards onPause in index.ts).
+    const wasPlaying = !video.paused;
+    // Helper used by all early-exit paths that happen after video.pause().
+    const restorePlay = () => {
+      newSession._systemPaused = false;
+      if (wasPlaying && video.paused) {
+        try {
+          video.play().catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    newSession._systemPaused = true;
+    try {
+      video.pause();
+    } catch {
+      /* ignore */
+    }
+
     let captionResult;
     // B4: Consume the eager prefetch result if available (YouTube-only).
     const prefetchedRestart = adapter.id === "youtube" ? getPrefetchedCaptions(newVideoId) : null;
@@ -461,6 +483,7 @@ export class SubtitleFirstPipeline {
     }
 
     if (sm.isSessionStale(token) || newSession.stopFlag) {
+      restorePlay();
       return { ok: false, error: "Cancelled." };
     }
 
@@ -477,6 +500,7 @@ export class SubtitleFirstPipeline {
     }
 
     if (!captionResult?.captions.length) {
+      restorePlay();
       return { ok: false, error: "No captions available for this video." };
     }
 
@@ -507,6 +531,7 @@ export class SubtitleFirstPipeline {
       await this.#renderBatch(newSession, firstWaveStart, firstWaveEnd);
     } catch (err) {
       if (sm.isSessionStale(token) || newSession.stopFlag) {
+        restorePlay();
         return { ok: false, error: "Cancelled." };
       }
       // isPipelineToastError is a top-level static import.
@@ -520,14 +545,50 @@ export class SubtitleFirstPipeline {
           ...(err.ctaLabel ? { ctaLabel: err.ctaLabel } : {}),
         });
       }
+      restorePlay();
       return { ok: false, error: msg };
     }
 
     if (sm.isSessionStale(token) || newSession.stopFlag) {
+      restorePlay();
       return { ok: false, error: "Cancelled." };
     }
 
     newSession.renderCursor = firstWaveEnd;
+
+    // ── Bind seeked + ended listeners (mirror start() lines 277-285) ─────────
+    // These were missing from restart(), which meant post-auto-next seeks were
+    // broken and the final cue's end-tick was lost.
+    const onSeeked = () => this.#onSeek(newSession, video);
+    newSession._onSeeked = onSeeked;
+    this.app.bindCommonVideoListeners(video, newSession, {
+      onSeeked,
+      onEndedBefore: () => this.#playbackTick(newSession),
+    });
+
+    // Re-arm the session-expiry timers for the new video (mirror start() line 275).
+    this.app.startSessionTimer();
+
+    // ── Resume AudioContext BEFORE releasing the video (mirror start() ~293-298) ──
+    // If suspended, await resume so the first cue starts in lock-step with play.
+    if (audioCtx.state === "suspended") {
+      await Promise.race([
+        audioCtx.resume().catch(() => {}),
+        new Promise((r) => setTimeout(r, 400)),
+      ]);
+    }
+
+    // ── Clear system-pause flag + restore playback ────────────────────────────
+    // The flag was set synchronously at entry; clear it now so the onPause guard
+    // is restored to normal before play() fires the "play" DOM event.
+    newSession._systemPaused = false;
+    if (wasPlaying) {
+      try {
+        await video.play();
+      } catch {
+        /* ignore — user can press play manually */
+      }
+    }
 
     // ── Start playback driver (same as start()) ───────────────────────────────
     newSession.playbackTimer = setInterval(
