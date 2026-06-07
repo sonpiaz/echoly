@@ -54,17 +54,22 @@ describe("rtc-media-sync", () => {
     expect(session.remoteAudio!.play).toHaveBeenCalled();
   });
 
-  it("syncSourcePauseState sets videoPaused and notifies server", async () => {
-    const sm = { videoPaused: false, apiBase: "https://api.test" };
+  it("syncSourcePauseState does the media-plane work + notifies the server gate", async () => {
+    // Stage A: the pause STATE is now held as a lifecycle reason by the caller —
+    // syncSourcePauseState no longer writes sm.videoPaused (a derived getter). It
+    // still POSTs the server media-gate. It pushes the 'connection-lost' reason
+    // (via the optional lifecycle arg) ONLY on a non-ok response — here ok:true.
+    const sm = { apiBase: "https://api.test" };
     const session = makeSession();
-    // syncSourcePauseState is now async; the pause path fires notifyServerMediaGate
-    // fire-and-forget, so we await the call and flush microtasks.
-    await syncSourcePauseState(sm, session, true);
-    expect(sm.videoPaused).toBe(true);
+    const lifecycle = { pause: vi.fn() };
+    await syncSourcePauseState(sm, session, true, lifecycle);
+    expect(session.stream!.getAudioTracks()[0]!.enabled).toBe(false);
     expect(fetch).toHaveBeenCalledWith(
       "https://api.test/rtc/translate/rt_test/media-pause",
       expect.objectContaining({ method: "POST" }),
     );
+    // ok:true → no connection-lost reason pushed.
+    expect(lifecycle.pause).not.toHaveBeenCalled();
   });
 
   it("bindSourceVideoPlayback registers and unregisters listeners", () => {

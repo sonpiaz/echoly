@@ -10,6 +10,7 @@ import {
 import { post } from "@/shared/protocol";
 import type { ContentToBgMessage } from "@/shared/protocol";
 import type { HistoryTurn, Settings, StartSettings } from "@/shared/types";
+import type { LifecycleController } from "./lifecycle";
 
 interface BaseSession {
   token: number;
@@ -50,14 +51,10 @@ export interface SubtitleFirstSession extends BaseSession {
   stopFlag: boolean;
   _onSeeked?: () => void;
   /**
-   * True while the driver has issued its own video.pause() to wait for a cue's
-   * _buffer to become ready. Set synchronously BEFORE video.pause() so the
-   * "pause" DOM event arrives with the flag already set (guards onPause).
-   */
-  _systemPaused?: boolean;
-  /**
-   * Timestamp (performance.now()) when the current system-pause micro-wait began.
-   * Used to enforce SUBFIRST_BUFFER_WAIT_MAX_MS so we never freeze forever.
+   * Timestamp (performance.now()) when the current system-buffer micro-wait
+   * began. Used to enforce SUBFIRST_BUFFER_WAIT_MAX_MS so we never freeze
+   * forever. The micro-pause itself is now held as the controller's
+   * `system-buffer` reason (replaces the old per-session `_systemPaused` flag).
    */
   _bufferWaitStartedAt?: number;
   /**
@@ -89,19 +86,48 @@ export class SessionManager {
   settings: LiveSettings | null = null;
   apiBase: string = ECHOLY_PROXY_BASE;
 
+  /**
+   * The single owner of video.pause()/play() + the reason-stack. Set by
+   * ContentApp immediately after construction. `userPaused`/`videoPaused`/
+   * `connectionLost` are DERIVED getters over this controller's reason stack —
+   * there is no longer any boolean state here (back-compat for the ~9 readers).
+   */
+  lifecycle!: LifecycleController;
+
   history: HistoryTurn[] = [];
   currentTargetText = "";
   currentSourceText = "";
   translationUtteranceOpen = false;
   translationSegmentId: number | null = null;
-  /** True while the source <video> is paused — ignore live metadata updates. */
-  videoPaused = false;
-  /** Canonical "user paused the source video" flag (all tiers). Set in lockstep with
-   *  videoPaused for WebRTC; used by subtitle-first idle checks and overlay/emit/timer logic. */
-  userPaused = false;
-  /** Set when a WebRTC peer dies during pause (ICE timeout / media-gate 404). Triggers
-   *  a one-shot rebuild attempt on the next resume instead of resuming into dead audio. */
-  connectionLost = false;
+
+  /**
+   * DERIVED — "the source <video> is paused for a user-visible reason"
+   * (user || ad). Read by the WebRTC metadata gate + the Standard drift
+   * corrector closure (index.ts). No longer a settable field: every former
+   * writer routes through `lifecycle.pause(reason)`/`resume(reason)`.
+   */
+  get videoPaused(): boolean {
+    return this.lifecycle?.effectivePaused ?? false;
+  }
+
+  /**
+   * DERIVED — canonical "user-visible pause" flag (all tiers): user || ad.
+   * Read by the subtitle-first tick gate, the heartbeat billing freeze, and the
+   * WebRTC ICE handlers. Mirrors `videoPaused` (both collapse onto
+   * `lifecycle.effectivePaused`).
+   */
+  get userPaused(): boolean {
+    return this.lifecycle?.effectivePaused ?? false;
+  }
+
+  /**
+   * DERIVED — set when a WebRTC peer dies during a pause (ICE timeout /
+   * media-gate 404). Held as the controller's `connection-lost` reason; triggers
+   * a one-shot rebuild on the next resume instead of resuming into dead audio.
+   */
+  get connectionLost(): boolean {
+    return this.lifecycle?.isPausedFor("connection-lost") ?? false;
+  }
 
   captionPollTimer: ReturnType<typeof setInterval> | null = null;
   heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -180,6 +206,8 @@ export class SessionManager {
       fetch(url, {
         method: "POST",
         headers: { Authorization: "Bearer " + apiBearer, "Content-Type": "application/json" },
+        // Billing freeze: paused iff user || ad (NOT system-buffer / switching) —
+        // lifecycle.effectivePaused, surfaced via the userPaused getter.
         body: JSON.stringify({ paused: this.userPaused }),
       }).catch(() => {});
     }, HEARTBEAT_MS);
@@ -229,6 +257,12 @@ export class SessionManager {
    *  forward by the paused duration so the timer resumes from where it froze. */
   resumeSessionTimer(): void {
     if (this._onLimit === null) return;
+    // Guard against a resume WITHOUT a prior pause (e.g. the connection-lost
+    // recovery path resumes the dub but never called pauseSessionTimer). With
+    // _pausedAt === 0, `Date.now() - _pausedAt` would be the full epoch (~55,000
+    // years) and push the auto-stop deadline absurdly far out. No pause ⇒ nothing
+    // to resume — leave the live timers untouched.
+    if (this._pausedAt === 0) return;
     // Extend deadlines by the time spent paused.
     const pausedDuration = Date.now() - this._pausedAt;
     this._warningDeadline += pausedDuration;

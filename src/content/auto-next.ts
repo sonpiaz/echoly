@@ -52,47 +52,82 @@ export async function continueOnNewVideo(
   // myGen !== activeGen at the next async boundary and bails without calling
   // stopSession (the newer call owns the session).
   const myGen = ++activeGen;
+  console.info("[auto-next] continueOnNewVideo START", { newVideoId, gen: myGen });
 
   try {
     // ── 1. Switching state ───────────────────────────────────────────────────
-    sm.userPaused = false;
+    // Drive the lifecycle into `switching` (legal from dubbing/paused; a no-op if
+    // a soft-stop already parked us there). The rebuild below transitions
+    // switching → starting; success transitions starting → dubbing.
+    if (
+      app.lifecycle.state === "dubbing" ||
+      app.lifecycle.state === "paused"
+    ) {
+      app.lifecycle.transition("switching");
+    }
+    // Drop the user pause reason WITHOUT issuing a video.play() — the rebuild
+    // below owns playback of the NEW video (controller still points at the old
+    // one here). The connection-lost reason (if any) is also cleared since this
+    // path supersedes a resume-rebuild.
+    app.lifecycle.dropReason("user");
+    app.lifecycle.dropReason("connection-lost");
     overlay.setOverlayState("switching");
     overlay.setStatusText(STATUS_SWITCHING_VIDEO);
     sm.emitState({ running: true, paused: false, status: STATUS_SWITCHING_VIDEO });
 
-    // ── 2. Wait for the new video element to be ready ────────────────────────
-    // Poll up to ~9 s (200ms × 45) for:
+    // ── 2. Wait for the new video element to be ready (ad-aware) ──────────────
+    // Poll for:
     //   • readyState >= HAVE_FUTURE_DATA (3) — data is loaded and playing is possible
     //   • currentTime > 0 — the video has actually started loading frames
-    //   • not an ad — shouldIgnoreSourcePlaybackEvent suppresses ad-driven states
+    //   • not an ad — shouldIgnoreSourcePlaybackEvent is true while a YouTube ad plays
+    //
+    // The base budget is ~9s. BUT a pre-roll ad between videos can run 15–30s
+    // before the real content video is ready — during which the readiness probe
+    // is the AD clock and shouldIgnoreSourcePlaybackEvent() is true. So while an
+    // ad is playing we KEEP waiting (the ad isn't a load failure), bounded by an
+    // absolute upper cap (~60s) so a genuinely stuck load still fails cleanly.
     const MAX_WAIT_MS = 9000;
+    const AD_ABSOLUTE_CAP_MS = 60000;
     const POLL_INTERVAL_MS = 200;
     const waitStart = Date.now();
 
     let video: HTMLVideoElement | null = null;
     let ready = false;
-    while (Date.now() - waitStart < MAX_WAIT_MS) {
+    while (true) {
       // Bail if a newer auto-next has superseded this one.
       if (myGen !== activeGen) return;
+
+      const elapsed = Date.now() - waitStart;
+      const adPlaying = shouldIgnoreSourcePlaybackEvent(app.adapter);
 
       video = app.adapter.findVideo() ?? app.capture.findVideo();
       if (
         video &&
         video.readyState >= 3 /* HAVE_FUTURE_DATA */ &&
         video.currentTime > 0 &&
-        !shouldIgnoreSourcePlaybackEvent(app.adapter)
+        !adPlaying
       ) {
         ready = true;
         break;
       }
+
+      // Budget check: past the base budget, only keep waiting if an ad is still
+      // playing (a long pre-roll). The absolute cap guards against a hung load.
+      if (elapsed >= MAX_WAIT_MS && !adPlaying) break;
+      if (elapsed >= AD_ABSOLUTE_CAP_MS) break;
+
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     }
 
-    if (myGen !== activeGen) return;
+    if (myGen !== activeGen) { console.info("[auto-next] superseded after poll", { gen: myGen }); return; }
     if (!ready || !video) {
+      console.warn("[auto-next] new video NOT ready within poll budget → STOP", {
+        ready, hasVideo: !!video, elapsedMs: Date.now() - waitStart,
+      });
       app.stopSession(STOP_REASON.NEXT_VIDEO_LOAD_FAILED);
       return;
     }
+    console.info("[auto-next] new video ready", { readyState: video.readyState, currentTime: video.currentTime });
 
     // ── 3. Update capture references BEFORE the async caption fetch ─────────
     // Record the new video element so capture.videoEl is always current.
@@ -102,6 +137,9 @@ export async function continueOnNewVideo(
     // binds its own listeners internally.  So we intentionally skip the empty
     // bindCommonVideoListeners call here.
     app.capture.videoEl = video;
+    // The controller owns video.pause()/play() — point it at the NEW video so
+    // the rebuild's pause/resume route through the new element.
+    app.lifecycle.setVideo(video);
     app.capture.bindVolumeDriftGuard(video);
 
     if (myGen !== activeGen) return;
@@ -116,6 +154,15 @@ export async function continueOnNewVideo(
 
     const isSubtitleFirst = isSubtitleFirstSession(session);
     const liveProbe = app.capture.isLive(video);
+    console.info("[auto-next] dispatch", {
+      isSubtitleFirst, liveProbe, hasVideoId: !!app.adapter.getVideoId(location.href),
+    });
+
+    // switching → starting: the new video is ready; we're about to (re)build the
+    // dub pipeline on it. (No-op if a prior path already advanced the state.)
+    if (app.lifecycle.state === "switching") {
+      app.lifecycle.transition("starting");
+    }
 
     // Subtitle-first is eligible when:
     //   • adapter supports it,
@@ -135,6 +182,7 @@ export async function continueOnNewVideo(
       sm.emitState({ running: true, paused: false, status: STATUS_LOADING_NEXT });
 
       const r = await app.subtitleFirst.restart(settings, newVideoId);
+      console.info("[auto-next] subtitleFirst.restart result", r);
 
       if (myGen !== activeGen) return;
 
@@ -175,6 +223,14 @@ export async function continueOnNewVideo(
     // This block is now reachable: the generation guard does NOT depend on
     // sm.pageToken, so bumps inside restart()/continueOnNewVideo() do not
     // falsely suppress the success transition.
+    // Re-arm the AdWatcher on the NEW video — the soft-stop tore down the old
+    // one, and YouTube re-creates #movie_player across the SPA nav so the
+    // observer must re-attach (an ad can run on the next autoplay video).
+    app.startAdWatcher();
+    // starting → dubbing: the new video's dub is live.
+    if (app.lifecycle.state === "starting") {
+      app.lifecycle.transition("dubbing");
+    }
     overlay.setOverlayState("live");
     overlay.setStatusText("Translating");
     sm.emitState({ running: true, paused: false, status: "Translating" });

@@ -215,9 +215,24 @@ export interface PlatformAdapter {
    * YouTube pre/mid-roll). When implemented, `startSession` gates on this:
    * Translate pressed during an ad enters the "ad-wait" state and defers until
    * the ad ends, rather than translating the ad / mis-reporting "no captions".
-   * Adapters that cannot detect ads omit this (treated as "no ad detection").
+   * It is ALSO the Stage-C `AdWatcher` poll backstop. Adapters that cannot detect
+   * ads omit this (treated as "no ad detection").
    */
   isAdPlaying?(): boolean;
+
+  /**
+   * Returns the DOM element whose `class` attribute the platform flips when an
+   * ad starts / ends (YouTube: `#movie_player` — it gains/loses `ad-showing` /
+   * `ad-interrupting`). The Stage-C `AdWatcher` puts a `MutationObserver` on this
+   * element's `class` attribute so it can pause the dub the SAME microtask the ad
+   * starts (instant — no poll latency). `isAdPlaying()` stays the poll fallback.
+   *
+   * Returns `null` when the element is not present yet, OR for platforms with no
+   * observable ad signal (those are poll-only / have no ads — the AdWatcher just
+   * relies on its `isAdPlaying()` backstop). Optional: adapters that omit it are
+   * treated as "no observer target".
+   */
+  getAdSignalTarget?(): Element | null;
 
   /**
    * Register background-SW services (e.g. `webRequest` intercept for the

@@ -130,6 +130,17 @@ export const INITIAL_STATE: State = {
   ...DEFAULT_SETTINGS,
 };
 
+/** Background-internal hard-navigation continuation marker. Recorded by nav-stop
+ *  the moment a RUNNING session hard-navigates to another supported watch page
+ *  (playlist auto-advance / full reload), consumed by auto-start on the fresh
+ *  page's `complete` event to bypass Gate-4 and auto-continue the dub.
+ *  NOT part of the broadcast State / INITIAL_STATE — it never leaves the SW. */
+export interface ContinuationIntent {
+  tabId: number;
+  /** Date.now() when the intent was recorded. */
+  at: number;
+}
+
 /** Result of resolveApiMode — null when not signed in. */
 export interface ResolvedApiMode {
   apiBase: string;

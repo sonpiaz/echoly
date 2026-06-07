@@ -2,6 +2,7 @@
 
 import { MEDIA_GATE_TIMEOUT_MS } from "@/shared/constants";
 import type { Session } from "@/content/session-manager";
+import type { LifecycleController } from "@/content/lifecycle";
 
 export interface SourcePlaybackHandlers {
   onPause: () => void;
@@ -96,16 +97,24 @@ export async function notifyServerMediaGate(
 
 /** Client + server gate when the source video pauses or resumes.
  *
- * A3: Now async. On resume the media-gate POST is awaited with a
+ * A3: async. On resume the media-gate POST is awaited with a
  * AbortSignal.timeout(MEDIA_GATE_TIMEOUT_MS) bound — timeout/network errors are
- * soft-fails (proceed anyway). `connectionLost` is set ONLY on an explicit
- * non-ok HTTP response, exactly as before. */
+ * soft-fails (proceed anyway). The `connection-lost` lifecycle reason is pushed
+ * ONLY on an explicit non-ok HTTP response, exactly as the old
+ * `sm.connectionLost = true` did.
+ *
+ * Stage A: the source-pause STATE is now held as a lifecycle reason on the
+ * reason stack (pushed by the caller via lifecycle.pause('user')/resume('user'))
+ * — this function no longer writes sm.videoPaused (a derived getter). It still
+ * owns the media-plane (track toggling, remoteAudio, AudioContext) + server gate
+ * and, on a peer-death during the gate, marks the lifecycle `connection-lost`
+ * reason so the next resume rebuilds the peer instead of resuming dead audio. */
 export async function syncSourcePauseState(
-  sm: { videoPaused: boolean; apiBase: string; connectionLost?: boolean },
+  sm: { apiBase: string },
   session: Session,
   paused: boolean,
+  lifecycle?: Pick<LifecycleController, "pause">,
 ): Promise<void> {
-  sm.videoPaused = paused;
   await applyVideoPauseToSession(session, paused);
   if (session.rtcSessionId && session.apiBearer) {
     if (paused) {
@@ -116,7 +125,7 @@ export async function syncSourcePauseState(
         session.apiBearer,
         paused,
       ).then((ok) => {
-        if (!ok) sm.connectionLost = true;
+        if (!ok) lifecycle?.pause("connection-lost");
       });
     } else {
       // Resume path: await with timeout bound so we don't hang resume.
@@ -136,10 +145,10 @@ export async function syncSourcePauseState(
         });
         ok = res.ok;
       } catch {
-        // Timeout (AbortError) or network error → soft-fail, do NOT set connectionLost.
-        ok = true; // treat as success to avoid false connectionLost
+        // Timeout (AbortError) or network error → soft-fail, do NOT mark lost.
+        ok = true; // treat as success to avoid false connection-lost
       }
-      if (!ok) sm.connectionLost = true;
+      if (!ok) lifecycle?.pause("connection-lost");
     }
   }
 }

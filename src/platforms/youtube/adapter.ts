@@ -7,7 +7,7 @@ import type { PlatformAdapter, PlatformCapabilities, CaptionFetchResult } from "
 import { getYouTubeVideoId } from "./captions";
 import { fetchYouTubeCaptionsWithSettle, readPlayerResponseFromDom } from "./captions-fetch";
 import { installYoutubeCaptionCache } from "./caption-cache";
-import { isYouTubeAdPlaying } from "./ad-state";
+import { isYouTubeAdPlaying, getYouTubeAdSignalTarget } from "./ad-state";
 import { suppressYouTubeNativeCaptions } from "./native-captions";
 
 const YOUTUBE_CAPABILITIES: PlatformCapabilities = {
@@ -97,6 +97,12 @@ export const youtubeAdapter: PlatformAdapter = {
 
   isAdPlaying(): boolean {
     return isYouTubeAdPlaying();
+  },
+
+  getAdSignalTarget(): Element | null {
+    // #movie_player — the element YouTube flips `ad-showing`/`ad-interrupting`
+    // on. The AdWatcher observes its `class` attribute for instant ad detection.
+    return getYouTubeAdSignalTarget();
   },
 
   shouldIgnorePlaybackEvent(_ev: Event, _video: HTMLVideoElement): boolean {

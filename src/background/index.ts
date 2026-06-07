@@ -9,6 +9,7 @@ import { installAuthListener } from "./auth-listener";
 import { hydrateSignedIn } from "./hydrate-signed-in";
 import { SettingsClient } from "./settings-client";
 import { registerAutoStart } from "./auto-start";
+import { registerNavStop } from "./nav-stop";
 import { ECHOLY_PROXY_BASE } from "@/shared/constants";
 import type { ToBackgroundMessage } from "@/shared/protocol";
 import { installAllBackgroundServices } from "@/platforms/registry";
@@ -32,13 +33,15 @@ export function initBackground(): void {
   installAuthListener(store, auth, settingsClient);
 
   chrome.tabs.onRemoved.addListener((tabId) => {
-    if (tabId === store.state.tabId) void session.stop();
+    if (tabId === store.state.tabId) {
+      // Tab closed — clear any pending hard-nav continuation intent (the page is
+      // gone, there is nothing to continue onto) and tear the session down.
+      store.setContinuationIntent(null);
+      void session.stop();
+    }
   });
 
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (tabId !== store.state.tabId || !changeInfo.url) return;
-    void session.stop();
-  });
+  registerNavStop(store, session);
 
   registerAutoStart(store, session);
 

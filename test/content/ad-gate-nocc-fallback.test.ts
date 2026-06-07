@@ -142,10 +142,25 @@ vi.mock("@/content/auto-next", () => ({
   continueOnNewVideo: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
+// Stub the Stage-C AdWatcher so its 250ms poll setInterval doesn't run forever
+// under vi.runAllTimersAsync() (these tests cover the start ad-gate, not the
+// mid-session watcher — Stage C's own behavior is tested in ad-watcher.test.ts).
+vi.mock("@/content/ad-watcher", () => ({
+  AdWatcher: class {
+    start = vi.fn();
+    stop = vi.fn();
+    get adActive() { return false; }
+  },
+}));
+
 // ContentApp import MUST come AFTER all vi.mock() calls.
 import { ContentApp } from "@/content/index";
 import { STATUS_AD_WAIT } from "@/shared/product-copy";
-import { AD_WAIT_POLL_MS, DUB_LIVE_TTFA_CEILING_MS } from "@/shared/constants";
+import {
+  AD_WAIT_POLL_MS,
+  DUB_LIVE_TTFA_CEILING_MS,
+  DUB_STANDARD_RELEASE_FLOOR_MS,
+} from "@/shared/constants";
 import type { StartSettings } from "@/shared/types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -555,5 +570,67 @@ describe("No-CC live-dub fallback — ceiling exceeded", () => {
     // Sync must not have been started.
     expect(mockStandardDubSync.start).not.toHaveBeenCalled();
     expect(mockStandardDubSync.snapPlaybackStart).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E. Stage D — Standard-VOD shorter gate (DUB_STANDARD_RELEASE_FLOOR_MS)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The normal Standard-VOD path (caption-driven, video paused on SF6) now releases
+// video.play() as soon as waitForFirstDub() resolves OR the short release-floor
+// elapses — whichever is FIRST — then lets bindStandardDubPlaybackSync ramp the
+// playbackRate to catch up. The full DUB_TTFA_GATE_MS stays only as the absolute
+// cap inside waitForFirstDub().
+
+describe("Stage D — Standard-VOD shorter release gate", () => {
+  it("releases video.play() + starts dub sync after the floor even when the first dub is slow", async () => {
+    const video = makeVideo(false); // playing → SF6 pauses it
+    mockCaptureInstance.findVideo.mockReturnValue(video);
+    mockCaptureInstance.isLive.mockReturnValue(false);
+
+    const fakeAudio = {
+      play: vi.fn().mockResolvedValue(undefined),
+      pause: vi.fn(),
+    } as unknown as HTMLAudioElement;
+    const session = makeBaseSession(1, fakeAudio);
+    mockWebRtcPipeline.buildSession.mockResolvedValue(session);
+
+    // waitForFirstDub is SLOW: resolves only after well past the release floor.
+    // The release floor (1500ms) must win the race so play() is issued early.
+    let resolveFirstDub: () => void = () => {};
+    mockStandardDubSync.waitForFirstDub.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        resolveFirstDub = () => resolve(true);
+      }),
+    );
+
+    const app = new ContentApp();
+    // Normal Standard-VOD path: NO forceWebRtcStandard → video is paused (SF6).
+    const promise = app.startWebRtcSession(BASE_SETTINGS);
+
+    // Let buildSession + waitForPCConnected + the SF6 pause settle.
+    await flushMicrotasks();
+    // SF6 paused the source video (controller-issued).
+    expect(video.pause).toHaveBeenCalled();
+
+    // Before the floor elapses, the dub sync has NOT started (still waiting).
+    await vi.advanceTimersByTimeAsync(DUB_STANDARD_RELEASE_FLOOR_MS - 200);
+    expect(mockStandardDubSync.start).not.toHaveBeenCalled();
+
+    // Cross the release floor — waitForFirstDub is STILL unresolved, but the floor
+    // wins the race → resume('system-buffer') issues video.play() + sync starts.
+    await vi.advanceTimersByTimeAsync(400);
+    await flushMicrotasks();
+
+    expect(video.play).toHaveBeenCalled();                  // released early on the floor
+    expect(mockStandardDubSync.snapPlaybackStart).toHaveBeenCalledTimes(1);
+    expect(mockStandardDubSync.start).toHaveBeenCalledTimes(1); // ramp begins to catch up
+
+    // Settle: resolve the slow dub + drain timers.
+    resolveFirstDub();
+    await vi.runAllTimersAsync();
+    const result = await promise;
+    expect(result.ok).toBe(true);
   });
 });

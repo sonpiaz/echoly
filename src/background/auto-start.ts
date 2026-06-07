@@ -24,6 +24,11 @@ import type { SessionCoordinator } from "./session-coordinator";
 
 const DEBOUNCE_MS = 1500;
 
+/** A hard-nav continuation intent is honoured only if the fresh `complete` lands
+ *  within this window of the nav (loading→complete is ~1s; 12s is generous slack
+ *  for a slow playlist load while still expiring a stale/abandoned intent). */
+const CONTINUATION_WINDOW_MS = 12000;
+
 /** Per-tab "last fired" timestamps. Module-scoped; the SW recycles wipe these
  *  naturally (which is correct — fresh SW boot = fresh debounce). */
 const lastFireAt = new Map<number, number>();
@@ -62,8 +67,21 @@ export function registerAutoStart(
     if (!host) return;
     // Gate 3 — signed in (Advanced settings are server-owned).
     if (store.state.signedInUser === null) return;
-    // Gate 4 — host opted in.
-    if (store.state.advanced.autoStartHosts[host] !== true) return;
+    // Hard-nav continuation: a running dub that hard-navigated to another watch
+    // page (playlist auto-advance) recorded an intent in nav-stop. PEEK it here —
+    // do NOT clear yet (several gates below early-return; clearing now would lose
+    // it on an event that never starts). A fresh same-tab intent bypasses Gate-4
+    // so the dub follows the playlist even on a host that never opted into
+    // auto-start. Gates 1/2/3/5 + the debounce still apply.
+    const intent = store.getContinuationIntent();
+    const isContinuation =
+      intent !== null &&
+      intent.tabId === tabId &&
+      Date.now() - intent.at < CONTINUATION_WINDOW_MS;
+    // Gate 4 — host opted in (bypassed for a fresh continuation).
+    if (!isContinuation && store.state.advanced.autoStartHosts[host] !== true) {
+      return;
+    }
     // Gate 5 — nothing already running/connecting.
     if (store.state.running || store.state.connecting) return;
     // Per-tab debounce. First event ever on a tab always passes; subsequent
@@ -73,6 +91,11 @@ export function registerAutoStart(
     if (last !== undefined && now - last < DEBOUNCE_MS) return;
     lastFireAt.set(tabId, now);
 
+    // CONSUME the intent only now — every gate + the debounce have passed and we
+    // are committed to start. Clearing here (and only here) makes a continuation
+    // fire exactly once: a second `complete` for the same tab finds no intent and
+    // is governed by normal Gate-4. Earlier gates never consume it.
+    store.setContinuationIntent(null);
     void session.start({});
   };
   chrome.tabs.onUpdated.addListener(listener);

@@ -72,6 +72,9 @@ export function handleContentEvent(
     return;
   }
   if (message.type === "CONTENT_STOP_REQUEST") {
+    // On-page Stop is a deliberate user stop — clear any pending hard-nav
+    // continuation intent so the dub does NOT auto-resume on the next page.
+    deps.store.setContinuationIntent(null);
     void deps.session.stop();
     return;
   }
@@ -172,6 +175,9 @@ async function handlePopupMessage(
     case "START":
       return session.start(message.settings);
     case "STOP":
+      // Popup Stop is a deliberate user stop — clear any pending hard-nav
+      // continuation intent so the dub does NOT auto-resume on the next page.
+      store.setContinuationIntent(null);
       return session.stop();
     case "UPDATE_SETTINGS":
       return session.updateSettings(message.settings);

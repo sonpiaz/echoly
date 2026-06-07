@@ -1,43 +1,48 @@
 // Pause/Resume controller — per-tier handling when the source <video> pauses/plays.
 //
-// Called by content/index.ts onPause / onPlay (after the ad guard and _systemPaused
-// guard). Owns the canonical userPaused flag, overlay/emit transitions, and the
-// session-limit timer freeze/thaw. Does NOT tear down the session.
+// Called by content/index.ts onPause / onPlay (after the self-issued + ad guards).
+// Routes the user pause/resume through the LifecycleController's reason stack
+// (the single owner of video.pause()/play()), drives the tier-specific dub
+// freeze/thaw, overlay/emit transitions, and the session-limit timer freeze/thaw.
+// Does NOT tear down the session.
 
 import { STATUS_PAUSED_VIDEO } from "@/shared/product-copy";
-import {
-  isSubtitleFirstSession,
-  isWebRtcSession,
-} from "./session-manager";
+import { isWebRtcSession } from "./session-manager";
 import { STOP_REASON } from "./stop-reasons";
 import { syncSourcePauseState } from "@/lib/rtc-media-sync";
 import type { ContentApp } from "./index";
 
 /**
  * The source <video> was paused by the user.
- * Freezes the dub (tier-specific), flips overlay to paused, and freezes the
- * session-limit timer. Safe to call when no session is active (no-op).
+ * Routes through `lifecycle.pause('user')` (the controller issues the actual
+ * video.pause()), freezes the dub (tier-specific), flips the overlay to paused,
+ * and freezes the session-limit timer. Safe to call when no session is active
+ * (no-op).
  */
 export function pauseSession(app: ContentApp): void {
   const sess = app.sm.session;
   if (!sess) return;
-  // Idempotency: if already user-paused, nothing to do.
-  if (app.sm.userPaused) return;
+  // Idempotency: if the user reason is already held, nothing to do.
+  if (app.lifecycle.isPausedFor("user")) return;
 
-  app.sm.userPaused = true;
+  // Push the 'user' reason → controller calls video.pause() iff the stack was
+  // empty (e.g. not already ad-paused). effectivePaused → true → the derived
+  // sm.userPaused/videoPaused getters now read paused.
+  app.lifecycle.pause("user");
 
   if (isWebRtcSession(sess)) {
     // Disable sender tracks + pause remoteAudio + suspend AudioContext +
     // POST media-pause to server (fire-and-forget; pause path is not awaited).
-    // On a non-ok server response, syncSourcePauseState sets sm.connectionLost = true.
-    void syncSourcePauseState(app.sm, sess, true);
+    // On a non-ok server response, syncSourcePauseState marks the lifecycle
+    // 'connection-lost' reason so the next resume rebuilds the peer.
+    void syncSourcePauseState(app.sm, sess, true, app.lifecycle);
     if (sess.pipeline === "standard") {
       // Quiesce dub-sync so it doesn't apply a stale catch-up rate on resume.
       app.standardDubSync?.stop();
     }
   }
   // subtitle-first: the 250ms #playbackTick + #runRollingRenderer already idle
-  // when sm.userPaused is true — no extra action needed.
+  // when effectivePaused (sm.userPaused) is true — no extra action needed.
 
   app.overlay.setOverlayState("paused");
   app.overlay.setStatusText(STATUS_PAUSED_VIDEO);
@@ -49,7 +54,12 @@ export function pauseSession(app: ContentApp): void {
  * The source <video> started playing again.
  * Rebuilds the peer if it was lost during the pause, re-enables dub audio
  * (tier-specific), flips overlay back to live, and thaws the session-limit timer.
- * Safe to call when no session is active (no-op).
+ * Routes the resume through `lifecycle.resume('user')` (the controller issues the
+ * actual video.play()). Safe to call when no session is active (no-op).
+ *
+ * Returns the play() promise from the underlying lifecycle.resume so the caller
+ * can await it; the value is not depended on by the onPlay handler (fire-and-
+ * forget) but is awaitable for symmetry with the dub-start lock-step (Stage D).
  *
  * NON-BLOCKING by design. An earlier version held the video on resume behind an
  * awaited server media-gate POST + a dub-buffer gate (waitForFirstDub) + a fixed
@@ -61,39 +71,45 @@ export function pauseSession(app: ContentApp): void {
  * ticks again after a pause (the one genuine fix worth keeping). Subtitle-first
  * resumes on its own 250ms #playbackTick.
  */
-export function resumeSession(app: ContentApp): void {
+export function resumeSession(app: ContentApp): Promise<void> {
   const sess = app.sm.session;
-  if (!sess) return;
-  // Idempotency: if not user-paused, nothing to do.
-  if (!app.sm.userPaused) return;
+  if (!sess) return Promise.resolve();
+  // Idempotency: if the user reason is not held, nothing to do.
+  if (!app.lifecycle.isPausedFor("user")) return Promise.resolve();
 
   // ── Peer-death recovery (WebRTC only) — unchanged ──────────────────────────
-  if (app.sm.connectionLost && isWebRtcSession(sess)) {
+  if (app.lifecycle.isPausedFor("connection-lost") && isWebRtcSession(sess)) {
     const settings = app.sm.settings;
     if (!settings) {
       app.stopSession(STOP_REASON.CONNECTION_LOST);
-      return;
+      return Promise.resolve();
     }
     void app.webrtc.continueOnNewVideo(settings).then((result) => {
       if (!result.ok) {
         app.stopSession(STOP_REASON.CONNECTION_LOST);
         return;
       }
-      app.sm.connectionLost = false;
-      app.sm.userPaused = false;
+      // Rebuilt OK — pop both the connection-lost and user reasons. resume('user')
+      // (popped last) issues the controller's video.play() since the stack empties.
+      void app.lifecycle.resume("connection-lost");
+      void app.lifecycle.resume("user").catch(() => {});
       app.sm.emitState({ running: true, paused: false, status: "Translating" });
       app.sm.resumeSessionTimer();
     });
-    return;
+    return Promise.resolve();
   }
 
-  app.sm.userPaused = false;
+  // Pop the 'user' reason → controller calls video.play() iff the stack becomes
+  // empty. Returns the play() promise (may reject on autoplay-block — fire-and-
+  // forget here; the overlay already reflects live).
+  const playPromise = app.lifecycle.resume("user");
+  playPromise.catch(() => {});
 
   if (isWebRtcSession(sess)) {
     // Fire-and-forget: re-enable sender tracks + remoteAudio + AudioContext +
     // media-resume POST. NOT awaited — awaiting it froze the video on resume.
     // The server gate reopens in the background; audio resumes as soon as it does.
-    void syncSourcePauseState(app.sm, sess, false);
+    void syncSourcePauseState(app.sm, sess, false, app.lifecycle);
     if (sess.pipeline === "standard") {
       // Re-anchor + restart the drift corrector. snapPlaybackStart() resets
       // stopped=false (the real bug fix), so the engine ticks again and smooths
@@ -103,11 +119,12 @@ export function resumeSession(app: ContentApp): void {
     }
   }
   // subtitle-first: the 250ms #playbackTick + #runRollingRenderer resume naturally
-  // once userPaused is false; #playbackTick step 4 micro-pauses ONLY if the due
+  // once effectivePaused is false; #playbackTick micro-pauses ONLY if the due
   // cue is genuinely un-buffered (same fallback as before). No proactive re-pause.
 
   app.overlay.setOverlayState("live");
   app.overlay.setStatusText("Translating");
   app.sm.emitState({ running: true, paused: false, status: "Translating" });
   app.sm.resumeSessionTimer();
+  return playPromise;
 }

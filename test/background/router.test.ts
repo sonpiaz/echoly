@@ -101,6 +101,31 @@ describe("routeMessage — popup dispatch reaches the right handler", () => {
   });
 });
 
+// ── Hard-nav continuation intent is cleared on a genuine user Stop ────────────
+describe("routeMessage / handleContentEvent — user Stop clears continuation intent", () => {
+  let deps: RouterDeps;
+  beforeEach(() => {
+    resetChrome();
+    deps = buildDeps();
+    // Spy stop so the real teardown / chrome relay is never reached.
+    vi.spyOn(deps.session, "stop").mockResolvedValue({ ok: true } as never);
+  });
+
+  it("popup STOP clears a pending continuation intent before stopping", () => {
+    deps.store.setContinuationIntent({ tabId: 7, at: Date.now() });
+    route(deps, { type: "STOP" }, POPUP_SENDER);
+    expect(deps.store.getContinuationIntent()).toBeNull();
+    expect(deps.session.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("on-page CONTENT_STOP_REQUEST clears a pending continuation intent before stopping", () => {
+    deps.store.setContinuationIntent({ tabId: 7, at: Date.now() });
+    handleContentEvent(deps, { type: "CONTENT_STOP_REQUEST" });
+    expect(deps.store.getContinuationIntent()).toBeNull();
+    expect(deps.session.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("handleContentEvent — UPDATE_SETTINGS", () => {
   it("forwards settings patch to session coordinator", () => {
     const auth = new EcholyAuth();

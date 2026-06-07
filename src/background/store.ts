@@ -19,6 +19,7 @@ import type {
   Settings,
   SignedInUser,
   ApiMode,
+  ContinuationIntent,
 } from "@/shared/types";
 import { INITIAL_STATE } from "@/shared/types";
 import {
@@ -66,6 +67,13 @@ export class Store {
   readonly state: State = { ...INITIAL_STATE };
 
   private lastBroadcastAt = 0;
+
+  /** Hard-navigation continuation marker (bg-internal, NOT broadcast). Set by
+   *  nav-stop when a running dub hard-navigates to another supported watch page;
+   *  consumed by auto-start on the fresh page's `complete`. PEEK + set(null) — no
+   *  read-and-clear `take()`: several auto-start gates early-return, so the intent
+   *  must only be cleared once we're committed to `session.start()`. */
+  private continuationIntent: ContinuationIntent | null = null;
 
   constructor(private readonly auth: EcholyAuth) {}
 
@@ -340,5 +348,18 @@ export class Store {
   setVolumes(originalVolume: number, voiceVolume: number): void {
     this.state.originalVolume = originalVolume;
     this.state.voiceVolume = voiceVolume;
+  }
+
+  /** PEEK the pending hard-nav continuation intent (does NOT clear). auto-start
+   *  reads this for its Gate-4 bypass decision; it only clears (via
+   *  setContinuationIntent(null)) once committed to a start. */
+  getContinuationIntent(): ContinuationIntent | null {
+    return this.continuationIntent;
+  }
+
+  /** Set (nav-stop on a running hard-nav to a watch page) or clear (null) the
+   *  continuation intent. Clearing happens on consume, user Stop, and tab close. */
+  setContinuationIntent(intent: ContinuationIntent | null): void {
+    this.continuationIntent = intent;
   }
 }

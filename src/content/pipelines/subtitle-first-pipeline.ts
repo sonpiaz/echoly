@@ -68,6 +68,9 @@ export class SubtitleFirstPipeline {
     if (!videoId) return { ok: false, error: "Could not detect video id for this page." };
 
     capture.videoEl = video;
+    // The controller owns video.pause()/play() — register this video so the
+    // start system-buffer pause/release below routes through it.
+    this.app.lifecycle.setVideo(video);
     capture.bindVolumeDriftGuard(video);
 
     overlay.buildOverlay(
@@ -127,21 +130,15 @@ export class SubtitleFirstPipeline {
     sm.apiBase = sm.settings.apiBase || sm.apiBase;
 
     const wasPlaying = !video.paused;
+    // Release the start system-buffer pause on any early-exit path. resume()
+    // plays iff the reason stack is now empty (idempotent if already cleared).
     const restorePlay = () => {
-      if (wasPlaying && video.paused) {
-        try {
-          video.play().catch(() => {});
-        } catch {
-          /* ignore */
-        }
-      }
+      if (wasPlaying) void this.app.lifecycle.resume("system-buffer");
     };
 
-    try {
-      video.pause();
-    } catch {
-      /* ignore */
-    }
+    // Controller-owned system-buffer pause held until video.play() is released
+    // after the first cue renders (the user-visible "frozen video" start window).
+    this.app.lifecycle.pause("system-buffer");
 
     let captionResult;
     // B4: Consume the eager prefetch result if available (YouTube-only).
@@ -228,8 +225,21 @@ export class SubtitleFirstPipeline {
 
     const currentTime = video.currentTime;
     const lookaheadSec = SUBFIRST_LOOKAHEAD_MS / 1000;
-    let firstWaveStart = sentences.findIndex((s) => s.start >= currentTime);
-    if (firstWaveStart === -1) firstWaveStart = sentences.length;
+    // The first PLAYABLE cue for currentTime (covering cue replayed from its
+    // start, else the next cue) — shared with restart() + #onSeek so "where do we
+    // start" is identical everywhere. null ⇒ Started AFTER the last caption.
+    const firstPlayable = this.#firstPlayableCueAt(newSession, currentTime);
+    if (!firstPlayable) {
+      // Edge (SOLUTION §3.5): nothing playable remains — surface the no-captions /
+      // press-play path rather than leaving a silent dead session.
+      this.#teardownAudio(newSession);
+      sm.session = null;
+      restorePlay();
+      overlay.removeOverlay();
+      overlay.showToast(TOAST_PRESS_PLAY, 6000);
+      return { ok: false, error: "No captions remaining at this position." };
+    }
+    const firstWaveStart = firstPlayable.index;
     let lookaheadEnd = sentences.findIndex((s) => s.start > currentTime + lookaheadSec);
     if (lookaheadEnd === -1) lookaheadEnd = sentences.length;
     let firstWaveEnd = Math.min(lookaheadEnd, firstWaveStart + SUBFIRST_PREBUFFER_COUNT);
@@ -297,8 +307,26 @@ export class SubtitleFirstPipeline {
       ]);
     }
 
+    // Lock-step release (SOLUTION §3.3 — critic GAP-6): release video.play() via
+    // the controller (resume returns the RAW play() promise) and ONLY on its
+    // successful resolve start line-1's source — in this same microtask, BEFORE
+    // the first 250ms #playbackTick interval fires. This guarantees line-1 plays
+    // and closes the play-before-sound tail without ever starting audio over a
+    // still-frozen video. On play() REJECT (autoplay-block) do NOT start the
+    // source → press-play toast (the user pressing play later re-drives the tick).
     try {
-      await video.play();
+      await this.app.lifecycle.resume("system-buffer");
+      // play() resolved → the video is moving. Start line-1 immediately IF it is
+      // actually DUE now and its buffer decoded; otherwise the 250ms interval (or
+      // the post-play micro-pause stall net) picks it up. Gating on #sentenceDueAt
+      // means we don't fire early when there's a gap before the first caption
+      // (Start at t=0, first cue at t=10 → not due → no premature audio). Never
+      // double-start (currentSource guard).
+      const line1 = firstPlayable.cue;
+      const due = this.#sentenceDueAt(newSession, video.currentTime);
+      if (!newSession.currentSource && due === line1 && line1._buffer) {
+        this.#startCue(newSession, line1);
+      }
     } catch {
       overlay.setStatusText(TOAST_PRESS_PLAY);
       overlay.showToast(TOAST_PRESS_PLAY, 6000);
@@ -314,7 +342,9 @@ export class SubtitleFirstPipeline {
       250,
     );
 
-    // Fire once immediately so the first cue starts without waiting 250ms.
+    // Fire once immediately so the first cue starts without waiting 250ms (a
+    // no-op for line-1 which the lock-step already started; covers line-2+ and
+    // the autoplay-block / un-buffered-line-1 paths).
     this.#playbackTick(newSession);
 
     void this.#runRollingRenderer(newSession, video);
@@ -425,7 +455,6 @@ export class SubtitleFirstPipeline {
       renderCursor: 0,
       rollingInFlight: false,
       stopFlag: false,
-      _systemPaused: false,
       _bufferWaitStartedAt: undefined,
     };
 
@@ -441,28 +470,20 @@ export class SubtitleFirstPipeline {
       sm.session = null;
       return { ok: false, error: "No playable video on this page." };
     }
+    // The controller owns video.pause()/play() — point it at the new video so
+    // the restart system-buffer pause/release below routes through it.
+    this.app.lifecycle.setVideo(video);
 
     // ── Pause/render/resume: mirror start() to stabilise currentTime ─────────
-    // Set _systemPaused SYNCHRONOUSLY before video.pause() so the DOM "pause"
-    // event arrives with the flag already true (guards onPause in index.ts).
+    // The controller's system-buffer pause sets its synchronous #selfIssued flag
+    // BEFORE video.pause() so the DOM "pause" event no-ops the onPause handler
+    // (replaces the old _systemPaused-set-before-pause invariant).
     const wasPlaying = !video.paused;
-    // Helper used by all early-exit paths that happen after video.pause().
+    // Helper used by all early-exit paths that happen after the pause.
     const restorePlay = () => {
-      newSession._systemPaused = false;
-      if (wasPlaying && video.paused) {
-        try {
-          video.play().catch(() => {});
-        } catch {
-          /* ignore */
-        }
-      }
+      if (wasPlaying) void this.app.lifecycle.resume("system-buffer");
     };
-    newSession._systemPaused = true;
-    try {
-      video.pause();
-    } catch {
-      /* ignore */
-    }
+    this.app.lifecycle.pause("system-buffer");
 
     let captionResult;
     // B4: Consume the eager prefetch result if available (YouTube-only).
@@ -518,8 +539,16 @@ export class SubtitleFirstPipeline {
 
     const currentTime = video.currentTime;
     const lookaheadSec = SUBFIRST_LOOKAHEAD_MS / 1000;
-    let firstWaveStart = sentences.findIndex((s) => s.start >= currentTime);
-    if (firstWaveStart === -1) firstWaveStart = sentences.length;
+    // Same #firstPlayableCueAt anchor as start() (covering cue replayed from its
+    // start, else next). null ⇒ nothing playable for this position — bail cleanly
+    // (auto-next continuation: no toast, just don't leave a silent session).
+    const firstPlayable = this.#firstPlayableCueAt(newSession, currentTime);
+    if (!firstPlayable) {
+      restorePlay();
+      sm.session = null;
+      return { ok: false, error: "No captions remaining at this position." };
+    }
+    const firstWaveStart = firstPlayable.index;
     let lookaheadEnd = sentences.findIndex((s) => s.start > currentTime + lookaheadSec);
     if (lookaheadEnd === -1) lookaheadEnd = sentences.length;
     let firstWaveEnd = Math.min(lookaheadEnd, firstWaveStart + SUBFIRST_PREBUFFER_COUNT);
@@ -578,16 +607,34 @@ export class SubtitleFirstPipeline {
       ]);
     }
 
-    // ── Clear system-pause flag + restore playback ────────────────────────────
-    // The flag was set synchronously at entry; clear it now so the onPause guard
-    // is restored to normal before play() fires the "play" DOM event.
-    newSession._systemPaused = false;
+    // ── Release the restart system-buffer pause + restore playback ────────────
+    // resume('system-buffer') pops the reason and (iff the stack is now empty)
+    // issues the controller's video.play(); the #selfIssued guard no-ops the
+    // resulting "play" DOM event. Only restore play if the video was playing
+    // before the restart (preserve a deliberate user pause).
+    //
+    // Lock-step (SOLUTION §3.3 — same as start()): on the play() promise
+    // resolving, start line-1's source immediately in this microtask (before the
+    // first interval tick) so the first dubbed line of the next video is never
+    // swallowed and never plays over a still-frozen frame.
     if (wasPlaying) {
       try {
-        await video.play();
+        await this.app.lifecycle.resume("system-buffer");
+        const line1 = firstPlayable.cue;
+        const due = this.#sentenceDueAt(newSession, video.currentTime);
+        if (!newSession.currentSource && due === line1 && line1._buffer) {
+          this.#startCue(newSession, line1);
+        }
       } catch {
-        /* ignore — user can press play manually */
+        // play() rejected (autoplay-block) — surface the press-play toast, same as
+        // start(). Previously restart() swallowed this silently, leaving the user
+        // with a frozen video + a paused dub and no hint to press play.
+        this.app.overlay.setStatusText(TOAST_PRESS_PLAY);
+        this.app.overlay.showToast(TOAST_PRESS_PLAY, 6000);
       }
+    } else {
+      // Video was paused going in — drop the reason without playing.
+      this.app.lifecycle.dropReason("system-buffer");
     }
 
     // ── Start playback driver (same as start()) ───────────────────────────────
@@ -595,7 +642,8 @@ export class SubtitleFirstPipeline {
       () => this.#playbackTick(newSession),
       250,
     );
-    // Fire once immediately so the first cue starts without waiting 250ms.
+    // Fire once immediately so the first cue starts without waiting 250ms
+    // (no-op for line-1 if the lock-step already started it).
     this.#playbackTick(newSession);
     void this.#runRollingRenderer(newSession, video);
 
@@ -688,34 +736,59 @@ export class SubtitleFirstPipeline {
     return null;
   }
 
-  /** System-pause: flag set SYNCHRONOUSLY before video.pause() so the DOM "pause"
-   *  event arrives with _systemPaused already true (guards onPause in index.ts). */
+  /**
+   * The first PLAYABLE cue for time `t` (SOLUTION §3.1). The single source of
+   * truth used by start(), restart(), AND #onSeek so the "which line do we start
+   * on" decision is identical at all three sites.
+   *
+   * Selection (in order):
+   *   1. The cue COVERING `t` (s.start ≤ t ≤ s.end) when one exists → replay it
+   *      from its start so the line the user Started on is never swallowed.
+   *   2. Else the first cue with start ≥ t (the next upcoming line).
+   *
+   * Returns the chosen cue + its index, or `null` when nothing is playable (every
+   * cue ends before `t` — Start AFTER the last caption). Never points past the
+   * last cue while a playable cue (end ≥ t) still exists.
+   */
+  #firstPlayableCueAt(
+    s: SubtitleFirstSession,
+    t: number,
+  ): { index: number; cue: (typeof s.sentences)[number] } | null {
+    const sentences = s.sentences;
+    for (let i = 0; i < sentences.length; i++) {
+      const cue = sentences[i]!;
+      // (1) Covering cue — t falls inside [start, end]. Replay from its start.
+      if (cue.start <= t && t <= cue.end) return { index: i, cue };
+      // (2) First cue that starts at or after t (no covering cue exists before it,
+      //     since the loop is in start order and covering cues are caught above).
+      if (cue.start >= t) return { index: i, cue };
+    }
+    // Every cue ends before t → nothing playable (Started past the last caption).
+    return null;
+  }
+
+  /** System-buffer micro-pause: held as the controller's 'system-buffer' reason.
+   *  The controller sets its synchronous #selfIssued flag before video.pause() so
+   *  the DOM "pause" event no-ops the onPause handler (replaces _systemPaused). */
   #enterSystemPause(s: SubtitleFirstSession): void {
-    s._systemPaused = true;
+    // Idempotent: already waiting on this reason → just refresh the cap timer.
     s._bufferWaitStartedAt = performance.now();
     // C2: emit "buffering" overlay state so the branded spinner is shown during
     // the micro-pause (matches the clock-RUNNING branch in overlay.ts).
     this.app.overlay.setOverlayState("buffering");
     this.app.overlay.setStatusText(STATUS_BUFFERING);
-    try {
-      this.app.capture.videoEl?.pause();
-    } catch {
-      /* ignore */
-    }
+    this.app.lifecycle.pause("system-buffer");
   }
 
-  /** Resume from system-pause: clear flags, restore status, play video. */
+  /** Resume from the system-buffer micro-pause: pop the reason (controller plays
+   *  the video iff no other reason — e.g. a concurrent user pause — is held),
+   *  clear the cap timer, restore status. */
   #resumeSystemPause(s: SubtitleFirstSession): void {
-    s._systemPaused = false;
     s._bufferWaitStartedAt = undefined;
     // C2: restore "live" state when the micro-pause ends.
     this.app.overlay.setOverlayState("live");
     this.app.overlay.setStatusText("Translating");
-    try {
-      this.app.capture.videoEl?.play().catch(() => {});
-    } catch {
-      /* ignore */
-    }
+    void this.app.lifecycle.resume("system-buffer");
   }
 
   /**
@@ -741,7 +814,15 @@ export class SubtitleFirstPipeline {
     // ── Step 1: SYSTEM-PAUSE RESUME CHECK ──────────────────────────────────
     // Runs BEFORE the external-pause guard so the tick can resume the video
     // the moment the buffer is ready (≤250ms latency — no separate waiter).
-    if (s._systemPaused) {
+    // The micro-pause is the controller's 'system-buffer' reason (was _systemPaused).
+    // `justResumedSystemBuffer` records whether THIS tick popped the system-buffer
+    // reason — in that case video.paused may still read true for a beat while the
+    // controller's play() promise resolves, yet we MUST fall through and start the
+    // cue (Stage-D lock step). The autoplay-block guard below uses it to tell that
+    // legitimate fall-through apart from a genuinely frozen video.
+    let justResumedSystemBuffer = false;
+    const wasSystemPaused = this.app.lifecycle.isPausedFor("system-buffer");
+    if (wasSystemPaused) {
       const due = this.#sentenceDueAt(s, video.currentTime);
       if (!due) {
         // Nothing to wait for any more — resume and fall through.
@@ -771,19 +852,32 @@ export class SubtitleFirstPipeline {
       // After resumeSystemPause the video is no longer paused (or will be
       // shortly after the play() promise resolves). Fall through to step 3
       // so the cue starts immediately without waiting for the next 250ms tick.
+      // (If we early-returned above, the reason is still held → this is false.)
+      justResumedSystemBuffer = !this.app.lifecycle.isPausedFor("system-buffer");
     }
 
-    // ── Step 2: EXTERNAL pause (user) — idle on canonical userPaused flag ──
+    // ── Step 2: EXTERNAL pause (user) — idle on canonical effectivePaused flag ──
     // When the user has genuinely paused the source video, stop any in-flight
     // clip so the voice goes silent immediately; next tick picks up naturally.
-    // NOTE: system-pause (_systemPaused) was already handled in Step 1; it may
+    // NOTE: the system-buffer micro-pause was already handled in Step 1; it may
     // have left video.paused===true momentarily while the buffer loads. We key
-    // off sm.userPaused (canonical) rather than video.paused so a system-pause
-    // never silences the dub prematurely.
+    // off sm.userPaused (= lifecycle.effectivePaused) rather than video.paused so a
+    // system-buffer pause never silences the dub prematurely.
     if (sm.userPaused) {
       if (s.currentSource) this.#stopCurrent(s);
       return;
     }
+
+    // ── Step 2b: AUTOPLAY-BLOCK / external freeze guard (Stage D) ───────────
+    // The video can be paused with NO pause reason held — e.g. the controller's
+    // start/restart play() REJECTED (autoplay-block) so the lock-step did NOT
+    // start line-1. Starting a cue now would play the dub OVER a frozen frame
+    // (the A/V desync we're avoiding). Idle until the video is actually moving
+    // (the user presses play → onPlay → resumeSession; the tick then advances).
+    // EXCEPTION: a tick that JUST popped the system-buffer reason this pass —
+    // video.paused may still read true for a beat while the play() promise
+    // resolves, and we MUST fall through to start the buffered cue in lock-step.
+    if (video.paused && !justResumedSystemBuffer) return;
 
     // ── Step 3: AudioContext health + guard ────────────────────────────────
     // Chrome auto-suspends the AudioContext when the tab is backgrounded.
@@ -810,21 +904,58 @@ export class SubtitleFirstPipeline {
     // wait for the render pump. Loop (not recursion) so a long forward seek over
     // many stale cues can't blow the stack.
     let due = this.#sentenceDueAt(s, t);
-    while (due && !due._buffer) {
+    while (due) {
       const dueIdx = s.sentences.indexOf(due);
-      if (t - due.end > SUBFIRST_DRIFT_SKIP_SEC || dueIdx < s.renderCursor) {
-        due._played = true; // skip — no audio will ever come for this cue
+      // TIME-stale: skip regardless of whether a buffer was decoded. A forward
+      // seek can leave earlier cues already buffered (the rolling renderer
+      // fetched them before the seek) whose end is now well behind the new
+      // playhead — playing such a cue at the wrong video position is the
+      // seek-desync bug. The old `while (due && !due._buffer)` guard only skipped
+      // UNbuffered stale cues, so a buffered stale one slipped through to
+      // #startCue and played out of sync. The time check is buffer-agnostic.
+      if (t - due.end > SUBFIRST_DRIFT_SKIP_SEC) {
+        due._played = true; // skip — its audio is irrelevant at the new position
         due = this.#sentenceDueAt(s, t);
         continue;
       }
-      // Not-yet-rendered cue → system-pause and wait for the render pump.
-      this.#enterSystemPause(s);
-      return;
+      if (!due._buffer) {
+        // No audio decoded for this cue yet. Two sub-cases:
+        if (dueIdx < s.renderCursor) {
+          // The renderer already PROCESSED this cue but produced no audio
+          // (empty/failed MP3) — its _buffer will NEVER arrive. Skip it (this was
+          // the live "stuck on Buffering…" hang). NOT applied to buffered cues:
+          // a buffered cue with index < renderCursor is the NORMAL ready state.
+          due._played = true;
+          due = this.#sentenceDueAt(s, t);
+          continue;
+        }
+        // Recent, not-yet-rendered cue → system-pause and wait for the render pump.
+        this.#enterSystemPause(s);
+        return;
+      }
+      break; // not stale, buffer ready → start it
     }
     if (!due) return; // nothing playable is due this tick
-    // The while-loop only exits with a truthy due._buffer (or due === null, handled
-    // above); the local narrows the optional type for src.buffer.
-    const buffer = due._buffer;
+    // The loop only breaks with a truthy due._buffer (or due === null, handled
+    // above); #startCue narrows the optional type for src.buffer.
+    this.#startCue(s, due);
+  }
+
+  /**
+   * Create an AudioBufferSourceNode for `cue`, start it, mark it `_played`, set it
+   * as the current source, show its subtitle, and chain its onended into the next
+   * tick. Extracted from #playbackTick step-4 (critic GAP-6) so the dub-start
+   * lock-step (start()/restart()) can play LINE-1 in the SAME microtask the
+   * controller's video.play() promise resolves — never starting audio over a
+   * still-frozen video. The 250ms interval + onended chain own line-2+.
+   *
+   * No-op (returns) when the cue has no decoded _buffer. Safe to call once per
+   * cue: the caller (tick loop / lock-step) guarantees a playable buffer; the
+   * _played mark preserves the play-once invariant ("dup TTS ở cuối" fix).
+   */
+  #startCue(s: SubtitleFirstSession, cue: (typeof s.sentences)[number]): void {
+    if (!s.audioCtx || s.audioCtx.state === "closed" || !s.outputGain) return;
+    const buffer = cue._buffer;
     if (!buffer) return;
 
     const src = s.audioCtx.createBufferSource();
@@ -841,12 +972,13 @@ export class SubtitleFirstPipeline {
     // Mark played AT src.start() time (NOT deferred to onended) to preserve the
     // play-once invariant ("dup TTS ở cuối" fix). The micro-pause removes the
     // starvation so we don't need to defer here.
-    due._played = true;
+    cue._played = true;
     s.currentSource = src;
-    s.currentPlayingIdx = s.sentences.indexOf(due);
+    const idx = s.sentences.indexOf(cue);
+    s.currentPlayingIdx = idx;
     // Show the translated text for THIS cue at the moment its dub starts, so the
     // subtitle and the voice stay in lock-step (no "audio leads text" lag).
-    this.#showCue(s, s.sentences.indexOf(due));
+    this.#showCue(s, idx);
 
     src.onended = () => {
       if (s.currentSource !== src) return;
@@ -881,22 +1013,56 @@ export class SubtitleFirstPipeline {
   }
 
   /**
+   * Re-anchor the playback driver to the current content `currentTime`. Stage C
+   * (ad-end): YouTube uses ONE <video> for ad+content, so when an ad ends the
+   * playhead jumps back to the content clock — a single clean re-anchor replays
+   * the covering cue and refetches missing buffers. This is the SAME mechanism as
+   * a user seek, exposed publicly so the AdWatcher's onAdEnd can call it once
+   * AFTER the ad reason has been popped (so the `#onSeek` ad-gate no longer fires).
+   */
+  reAnchor(s: SubtitleFirstSession, video: HTMLVideoElement): void {
+    this.#onSeek(s, video);
+  }
+
+  /**
    * Seek handler — resets _played flags for cues at/after the new position so
    * they can replay, rewinds renderCursor so the pump refetches missing buffers,
    * and stops the current source.
+   *
+   * Stage C: NO-OP while an ad is active. YouTube fires `seeked` on BOTH the
+   * ad-in and ad-out boundaries (single <video> swap between ad and content) —
+   * those are NOT user seeks; honoring them would reset `_played`/renderCursor
+   * against the AD clock and corrupt the bookkeeping. The clean re-anchor against
+   * the restored CONTENT time happens once on ad-end via reAnchor() (after the
+   * 'ad' reason is popped, so this gate is clear by then).
    */
   #onSeek(s: SubtitleFirstSession, video: HTMLVideoElement): void {
+    if (this.app.lifecycle.isPausedFor("ad")) return;
     const newT = video.currentTime;
-    // First cue that starts at or after the new position.
-    const firstIdx = s.sentences.findIndex((x) => x.start >= newT);
-    // Allow replay of cues the user seeked back into.
-    for (const x of s.sentences) {
-      if (x.start >= newT) x._played = false;
-    }
-    // Rewind render cursor so the pump refetches any buffers that were evicted or
-    // never fetched for the re-entered range.
-    if (firstIdx !== -1) {
-      s.renderCursor = Math.min(s.renderCursor, firstIdx);
+    // The anchor is the cue #firstPlayableCueAt would start on: the cue COVERING
+    // newT (start ≤ newT ≤ end) when one exists, else the next cue. (GAP-7) The
+    // reset loop MUST key off the ANCHOR cue's start — NOT newT — so that on a
+    // mid-cue seek-back the covering cue (whose start is < newT) is itself reset
+    // to unplayed and actually replays. Keying off newT would leave the covering
+    // cue `_played` and #firstPlayableCueAt would then start on a swallowed line.
+    const anchor = this.#firstPlayableCueAt(s, newT);
+    if (anchor) {
+      const anchorStart = anchor.cue.start;
+      // Allow replay of the anchor cue and every cue after it.
+      for (const x of s.sentences) {
+        if (x.start >= anchorStart) x._played = false;
+      }
+      // Re-TARGET the render cursor to the seek anchor so the rolling renderer
+      // fetches the cues at the NEW position. Must be a plain assignment, NOT
+      // Math.min(): on a FORWARD seek anchor.index > renderCursor, so min() is a
+      // no-op — the cursor stays at the old (lower) position, the render pump keeps
+      // grinding the OLD region and never reaches the seek target, so #playbackTick
+      // micro-pauses, hits the 8s stall-cap and skips forward cue-by-cue → the dub
+      // goes SILENT ("click sang đoạn khác → không tiếp tục dịch"). Assigning the
+      // anchor index re-targets the pump in BOTH directions; for a BACKWARD seek
+      // anchor.index ≤ renderCursor so this is identical to the old min(), and the
+      // renderer's firstMissing scan still skips cues that already hold a _buffer.
+      s.renderCursor = anchor.index;
     }
     this.#stopCurrent(s);
     // Play the cue at the new position promptly rather than waiting for the next tick.
@@ -931,17 +1097,14 @@ export class SubtitleFirstPipeline {
       // — otherwise the dub keeps being produced and the UI looks like it is still
       // translating even though playback is suspended.
       //
-      // IMPORTANT: during a system-pause (the driver issued video.pause() to wait
-      // for a cue's _buffer), video.paused IS true but we MUST keep rendering so
-      // the buffer actually gets produced. `sm.userPaused` is the canonical "user
-      // paused" flag (all tiers); `_systemPaused` is the driver-issued micro-pause.
-      // Idle only on a genuine user pause (sm.userPaused), never on a system-pause —
-      // so the buffer pump continues even when the video element is technically paused.
-      const sfSess = sm.session;
-      const isSystemPaused =
-        sfSess != null &&
-        sfSess.kind === "subtitle-first" &&
-        (sfSess as import("../session-manager").SubtitleFirstSession)._systemPaused === true;
+      // IMPORTANT: during a system-buffer micro-pause (the controller issued
+      // video.pause() to wait for a cue's _buffer), video.paused IS true but we
+      // MUST keep rendering so the buffer actually gets produced. `sm.userPaused`
+      // (= lifecycle.effectivePaused) is the canonical user-visible pause flag;
+      // the 'system-buffer' reason is the driver-issued micro-pause. Idle only on
+      // a genuine user pause, never on a system-buffer pause — so the buffer pump
+      // continues even when the video element is technically paused.
+      const isSystemPaused = this.app.lifecycle.isPausedFor("system-buffer");
       if (sm.userPaused || (video.paused && !isSystemPaused)) continue;
 
       const t = video.currentTime;

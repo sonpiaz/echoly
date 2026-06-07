@@ -108,6 +108,7 @@ vi.mock("@/content/pipelines/subtitle-first-pipeline", () => ({
 import { SessionManager } from "@/content/session-manager";
 import type { WebRtcSession, SubtitleFirstSession } from "@/content/session-manager";
 import { pauseSession, resumeSession } from "@/content/pause-controller";
+import { LifecycleController } from "@/content/lifecycle";
 import type { ContentApp } from "@/content/index";
 import { NavigationWatcher } from "@/content/navigation";
 import { STOP_REASON } from "@/content/stop-reasons";
@@ -155,14 +156,17 @@ function makeWebRtcSession(token: number): WebRtcSession {
   };
 }
 
-/** Minimal ContentApp-like facade for pause-controller tests. */
+/** Minimal ContentApp-like facade for pause-controller tests.
+ *  userPaused/videoPaused/connectionLost are now DERIVED getters over the
+ *  LifecycleController's reason stack — tests drive pause state through
+ *  `lifecycle.pause(reason)`/`resume(reason)`, not by writing the flags. */
 function makeFakeApp(sess: WebRtcSession | SubtitleFirstSession | null) {
   const sm = new SessionManager();
+  const lifecycle = new LifecycleController();
+  sm.lifecycle = lifecycle;
   sm.session = sess;
   if (sess) {
     sm.pageToken = sess.token;
-    sm.userPaused = false;
-    sm.connectionLost = false;
   }
   const overlay = {
     setOverlayState: vi.fn(),
@@ -185,6 +189,7 @@ function makeFakeApp(sess: WebRtcSession | SubtitleFirstSession | null) {
   // Use `unknown` intermediary so the partial fake satisfies the ContentApp parameter type.
   const asApp = {
     sm,
+    lifecycle,
     overlay,
     standardDubSync,
     webrtc,
@@ -192,7 +197,7 @@ function makeFakeApp(sess: WebRtcSession | SubtitleFirstSession | null) {
     subtitleFirst,
     stopSession,
   } as unknown as ContentApp;
-  return Object.assign(asApp, { sm, overlay, standardDubSync, webrtc, capture, subtitleFirst, stopSession });
+  return Object.assign(asApp, { sm, lifecycle, overlay, standardDubSync, webrtc, capture, subtitleFirst, stopSession });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,7 +316,7 @@ describe("pause-controller — resumeSession", () => {
   it("sets sm.userPaused=false and emits live state for WebRTC", async () => {
     const sess = makeWebRtcSession(1);
     const app = makeFakeApp(sess);
-    app.sm.userPaused = true; // simulate already paused
+    app.lifecycle.pause("user"); // simulate already paused
     const emitSpy = vi.spyOn(app.sm, "emitState");
     await resumeSession(app);
 
@@ -327,7 +332,7 @@ describe("pause-controller — resumeSession", () => {
     const sess = makeWebRtcSession(2);
     (sess as unknown as { pipeline: string }).pipeline = "standard";
     const app = makeFakeApp(sess);
-    app.sm.userPaused = true;
+    app.lifecycle.pause("user");
     await resumeSession(app);
 
     expect(app.standardDubSync.snapPlaybackStart).toHaveBeenCalledTimes(1);
@@ -337,7 +342,7 @@ describe("pause-controller — resumeSession", () => {
   it("is idempotent — no-op when not paused", async () => {
     const sess = makeWebRtcSession(3);
     const app = makeFakeApp(sess);
-    app.sm.userPaused = false;
+    // not paused (default state — no reason on the stack)
     await resumeSession(app);
 
     expect(app.overlay.setOverlayState).not.toHaveBeenCalled();
@@ -346,8 +351,8 @@ describe("pause-controller — resumeSession", () => {
   it("connectionLost=true → attempts webrtc.continueOnNewVideo rebuild (ok → live)", async () => {
     const sess = makeWebRtcSession(4);
     const app = makeFakeApp(sess);
-    app.sm.userPaused = true;
-    app.sm.connectionLost = true;
+    app.lifecycle.pause("user");
+    app.lifecycle.pause("connection-lost");
     app.sm.settings = {
       apiBearer: "b",
       targetLanguage: "vi",
@@ -367,8 +372,8 @@ describe("pause-controller — resumeSession", () => {
   it("connectionLost=true → continueOnNewVideo fails → stopSession(CONNECTION_LOST)", async () => {
     const sess = makeWebRtcSession(5);
     const app = makeFakeApp(sess);
-    app.sm.userPaused = true;
-    app.sm.connectionLost = true;
+    app.lifecycle.pause("user");
+    app.lifecycle.pause("connection-lost");
     app.sm.settings = {
       apiBearer: "b",
       targetLanguage: "vi",
@@ -387,7 +392,7 @@ describe("pause-controller — resumeSession", () => {
     const sess = makeWebRtcSession(10);
     (sess as unknown as { pipeline: string }).pipeline = "standard";
     const app = makeFakeApp(sess);
-    app.sm.userPaused = true;
+    app.lifecycle.pause("user");
 
     const fakeVideo = {
       paused: false,
@@ -416,7 +421,7 @@ describe("pause-controller — resumeSession", () => {
     const sess = makeWebRtcSession(12);
     expect(sess.pipeline).toBe("realtime");
     const app = makeFakeApp(sess);
-    app.sm.userPaused = true;
+    app.lifecycle.pause("user");
 
     const fakeVideo = {
       paused: false,
@@ -435,9 +440,9 @@ describe("pause-controller — resumeSession", () => {
   });
 
   it("subtitle-first resume: no proactive micro-pause — just clears userPaused + goes live", () => {
-    const sess = { kind: "subtitle-first", _systemPaused: false } as unknown as ReturnType<typeof makeWebRtcSession>;
+    const sess = { kind: "subtitle-first" } as unknown as ReturnType<typeof makeWebRtcSession>;
     const app = makeFakeApp(sess);
-    app.sm.userPaused = true;
+    app.lifecycle.pause("user");
 
     resumeSession(app);
 
@@ -659,22 +664,61 @@ describe("NavigationWatcher", () => {
     watcher.stop();
   });
 
-  it("notifyEnded with no nav in 8s → emits {stop, VIDEO_ENDED}", async () => {
+  it("notifyEnded keeps the session alive for ~45s then emits {stop, VIDEO_ENDED} if no nav", async () => {
+    // Stage B: `ended` is NO LONGER an 8s teardown. notifyEnded arms a LONG
+    // terminal-idle window (~45s) and ONLY stops if no navigation arrives AND a
+    // session is still alive. The session must NOT be torn down early.
     const app = makeWatcherApp();
     const watcher = new NavigationWatcher(app);
     const events: import("@/content/navigation").NavEvent[] = [];
     watcher.start((e) => events.push(e));
 
     watcher.notifyEnded();
-    await vi.advanceTimersByTimeAsync(7999);
+    // Well past the OLD 8s window — the session must STILL be alive (no stop).
+    await vi.advanceTimersByTimeAsync(9000);
     expect(events).toHaveLength(0);
+    // Just before the 45s terminal-idle deadline — still alive.
+    await vi.advanceTimersByTimeAsync(35_999);
+    expect(events).toHaveLength(0);
+    // Terminal-idle deadline crosses 45s with no navigation → terminal stop.
     await vi.advanceTimersByTimeAsync(5);
     expect(events).toHaveLength(1);
     expect(events[0]).toEqual({ kind: "stop", reason: STOP_REASON.VIDEO_ENDED });
     watcher.stop();
   });
 
-  it("notifyEnded then a qualifying nav cancels pending-next (no double stop)", async () => {
+  it("video-end then auto-advance: session stays alive, {continue} fires WITHOUT depending on 'ended'", async () => {
+    // The core Stage-B acceptance case (SOLUTION §1 + §7.1). The source video
+    // reports `ended`, then YouTube autoplays the next video (URL flips). The
+    // watcher must keep the session alive and emit {continue} for the new
+    // videoId — NOT a {stop} — even though the 8s legacy window is long gone.
+    const app = makeWatcherApp("https://www.youtube.com/watch?v=abc123");
+    const watcher = new NavigationWatcher(app);
+    const events: import("@/content/navigation").NavEvent[] = [];
+    watcher.start((e) => events.push(e));
+
+    // 1) Video ends — watcher arms the long terminal-idle window, stays alive.
+    watcher.notifyEnded();
+    // Let plenty of time pass (past the old 8s window) BEFORE the navigation.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(events).toHaveLength(0); // session still alive, no stop
+
+    // 2) YouTube auto-advances to the next video (URL flips, no further 'ended').
+    setHref("https://www.youtube.com/watch?v=next777");
+    // Poll fires at +500ms → 700ms debounce → settles at +1200ms.
+    await vi.advanceTimersByTimeAsync(1300);
+
+    // The auto-advance is detected by URL change alone → {continue}, no stop.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({ kind: "continue", videoId: "next777" });
+
+    // 3) The terminal-idle timer must NOT fire a late stop — it was resolved.
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(events).toHaveLength(1);
+    watcher.stop();
+  });
+
+  it("notifyEnded then a qualifying nav cancels the terminal-idle window (no double stop)", async () => {
     const app = makeWatcherApp("https://www.youtube.com/watch?v=abc123");
     const watcher = new NavigationWatcher(app);
     const events: import("@/content/navigation").NavEvent[] = [];
@@ -742,6 +786,10 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
 
   it("overlay transitions to 'live' even when restart() bumps sm.pageToken internally", async () => {
     const app = new ContentApp();
+    // Stub the Stage-C AdWatcher arm so its 250ms poll setInterval doesn't run
+    // forever under vi.runAllTimersAsync() (the watcher is re-armed on the
+    // auto-next success path; its own behavior is tested in ad-watcher.test.ts).
+    app.startAdWatcher = vi.fn();
 
     // Set up a running subtitle-first session
     const sfSess: SubtitleFirstSession = {
@@ -811,6 +859,122 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
     expect(app.overlay.setOverlayState).toHaveBeenCalledWith("live");
     expect(app.overlay.setStatusText).toHaveBeenCalledWith("Translating");
   });
+
+  it("ad-aware ready-poll: a long pre-roll between videos does NOT fail as NEXT_VIDEO_LOAD_FAILED", async () => {
+    const app = new ContentApp();
+    // Stub the AdWatcher arm — see note above (avoids a perpetual poll interval).
+    app.startAdWatcher = vi.fn();
+
+    const sfSess: SubtitleFirstSession = {
+      kind: "subtitle-first",
+      token: 1,
+      pc: null,
+      dc: null,
+      stream: null,
+      remoteAudio: null,
+      audioCtx: { state: "running" } as AudioContext,
+      outputGain: null,
+      rtcSessionId: null,
+      apiBearer: "b",
+      abortController: new AbortController(),
+      sentences: [],
+      translations: [],
+      currentSource: null,
+      currentPlayingIdx: null,
+      playbackTimer: null,
+      renderCursor: 0,
+      rollingInFlight: false,
+      stopFlag: false,
+    };
+    app.sm.session = sfSess;
+    app.sm.pageToken = 1;
+    app.sm.settings = {
+      apiBearer: "b",
+      targetLanguage: "vi",
+      tier: "standard",
+    } as unknown as Parameters<typeof pauseSession>[0]["sm"]["settings"];
+
+    // The video is "ready" by readyState/currentTime the whole time, but an AD is
+    // playing for the first ~14s (shouldIgnorePlaybackEvent → true). The poll must
+    // KEEP waiting (not fail at 9s) until the ad clears, then succeed.
+    const readyVideo = document.createElement("video");
+    Object.defineProperty(readyVideo, "readyState", { value: 3, configurable: true });
+    Object.defineProperty(readyVideo, "currentTime", { value: 1, configurable: true });
+
+    let adPlaying = true;
+    app.adapter = {
+      id: "youtube",
+      capabilities: { subtitleFirst: true, audioCapture: true },
+      isWatchUrl: () => true,
+      getVideoId: () => "next-video",
+      findVideo: () => readyVideo,
+      // shouldIgnorePlaybackEvent gates shouldIgnoreSourcePlaybackEvent → "ad".
+      shouldIgnorePlaybackEvent: () => adPlaying,
+    } as unknown as typeof app.adapter;
+
+    app.capture.isLive = vi.fn().mockReturnValue(false);
+    app.capture.bindVolumeDriftGuard = vi.fn();
+    app.capture.findVideo = vi.fn().mockReturnValue(readyVideo);
+    app.bindCommonVideoListeners = vi.fn();
+
+    (app.subtitleFirst.restart as Mock).mockResolvedValue({ ok: true });
+
+    // Clear the ad ~14s in — PAST the 9s base budget, so the OLD logic would have
+    // failed. The ad-aware loop keeps polling because adPlaying is still true.
+    setTimeout(() => {
+      adPlaying = false;
+    }, 14_000);
+
+    const { continueOnNewVideo } = await import("@/content/auto-next");
+    const promise = continueOnNewVideo(app, "next-video");
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // Did NOT fail — restart ran and the overlay went live.
+    expect(app.subtitleFirst.restart).toHaveBeenCalledTimes(1);
+    expect(app.overlay.setOverlayState).toHaveBeenCalledWith("live");
+    expect(app.overlay.setOverlayState).not.toHaveBeenCalledWith("idle");
+  });
+
+  it("ad-aware ready-poll: a video that never becomes ready DOES fail at the absolute cap", async () => {
+    const app = new ContentApp();
+
+    const sfSess: SubtitleFirstSession = {
+      kind: "subtitle-first",
+      token: 1,
+      pc: null, dc: null, stream: null, remoteAudio: null,
+      audioCtx: { state: "running" } as AudioContext,
+      outputGain: null, rtcSessionId: null, apiBearer: "b",
+      abortController: new AbortController(),
+      sentences: [], translations: [], currentSource: null, currentPlayingIdx: null,
+      playbackTimer: null, renderCursor: 0, rollingInFlight: false, stopFlag: false,
+    };
+    app.sm.session = sfSess;
+    app.sm.pageToken = 1;
+    app.sm.settings = {
+      apiBearer: "b", targetLanguage: "vi", tier: "standard",
+    } as unknown as Parameters<typeof pauseSession>[0]["sm"]["settings"];
+
+    // Ad never clears AND no playable video → must fail at the ~60s absolute cap.
+    app.adapter = {
+      id: "youtube",
+      capabilities: { subtitleFirst: true, audioCapture: true },
+      isWatchUrl: () => true,
+      getVideoId: () => "next-video",
+      findVideo: () => null,
+      shouldIgnorePlaybackEvent: () => true, // ad forever
+    } as unknown as typeof app.adapter;
+    app.capture.isLive = vi.fn().mockReturnValue(false);
+    app.capture.findVideo = vi.fn().mockReturnValue(null);
+    const stopSpy = vi.spyOn(app, "stopSession");
+
+    const { continueOnNewVideo } = await import("@/content/auto-next");
+    const promise = continueOnNewVideo(app, "next-video");
+    await vi.runAllTimersAsync();
+    await promise;
+
+    expect(stopSpy).toHaveBeenCalledWith(STOP_REASON.NEXT_VIDEO_LOAD_FAILED);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -841,6 +1005,8 @@ describe("SubtitleFirstPipeline.restart — old driver eviction", () => {
     >("@/content/pipelines/subtitle-first-pipeline");
 
     const sm = new SessionManager();
+    const lifecycle = new LifecycleController();
+    sm.lifecycle = lifecycle;
     const overlay = {
       setStatusText: vi.fn(),
       setOverlayState: vi.fn(),
@@ -865,7 +1031,7 @@ describe("SubtitleFirstPipeline.restart — old driver eviction", () => {
       getVideoTitle: () => null,
     };
     const capture = { findVideo: vi.fn().mockReturnValue(null), videoEl: null };
-    const fakeApp = { sm, overlay, adapter, capture } as unknown as ContentApp;
+    const fakeApp = { sm, lifecycle, overlay, adapter, capture } as unknown as ContentApp;
 
     const pipeline = new RealSFP(fakeApp);
 

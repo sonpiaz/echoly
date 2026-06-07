@@ -8,7 +8,7 @@ export { ECHOLY_API_ORIGIN, ECHOLY_WEB_ORIGIN };
 export const CONTENT_SCRIPT_PATH = "content-scripts/content.js";
 export const CONTENT_CSS_PATH = "content-scripts/content.css";
 
-export const ECHOLY_VERSION = "0.6.3";
+export const ECHOLY_VERSION = "0.6.4-dub-e2e";
 export const CONTENT_GLOBAL_KEY = "__echolyContentVersion";
 
 /** Signed-in API base (all provider traffic via Echoly server). */
@@ -58,8 +58,13 @@ export const DUB_SYNC_POLL_MS = 500;
 export const DUB_SYNC_SLOW_RATE = 0.96;
 export const DUB_SYNC_HARD_SLOW_RATE = 0.92;
 export const DUB_SYNC_CATCHUP_RATE = 1.02;
-/** Max wait for first Standard dub before video.play (VOD). */
+/** Max wait for first Standard dub before video.play (VOD) — the ABSOLUTE cap. */
 export const DUB_TTFA_GATE_MS = 8_000;
+/** Standard-VOD shorter release floor (SOLUTION §3.4): release video.play() as
+ *  soon as the first dub resolves OR this floor elapses — whichever is first —
+ *  then let bindStandardDubPlaybackSync ramp playbackRate to catch up. Keeps the
+ *  user-visible start freeze short instead of the full DUB_TTFA_GATE_MS. */
+export const DUB_STANDARD_RELEASE_FLOOR_MS = 1_500;
 /** No-CC live-dub fallback: ceiling to wait for first remote audio before
  *  tearing down with an error. NOT a video-release gate — the video plays
  *  immediately (live-style) and dub trails by its natural lag. */

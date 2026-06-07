@@ -17,6 +17,7 @@
 
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { SubtitleFirstPipeline } from "@/content/pipelines/subtitle-first-pipeline";
+import { LifecycleController } from "@/content/lifecycle";
 import { STOP_REASON } from "@/content/stop-reasons";
 import type { PlatformAdapter, PlatformCapabilities } from "@/shared/platform-ports";
 import type { StartSettings } from "@/shared/types";
@@ -116,6 +117,7 @@ function makeAdapter(
 // We stub out startWebRtcStandard and stopSession with spies.
 
 function makeApp(adapter: PlatformAdapter) {
+  const lifecycle = new LifecycleController();
   let pageToken = 0;
   let sessionRef: unknown = null;
 
@@ -124,7 +126,9 @@ function makeApp(adapter: PlatformAdapter) {
     settings: null as unknown,
     apiBase: "https://api.echolyhq.com",
     pageToken: 0,
-    videoPaused: false,
+    lifecycle,
+    // Derived (mirror the real SessionManager getter).
+    get videoPaused(): boolean { return lifecycle.effectivePaused; },
     nextToken() {
       pageToken += 1;
       this.pageToken = pageToken;
@@ -178,6 +182,7 @@ function makeApp(adapter: PlatformAdapter) {
 
   const app = {
     sm,
+    lifecycle,
     overlay,
     capture,
     callbacks,

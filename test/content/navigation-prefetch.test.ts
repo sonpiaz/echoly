@@ -292,3 +292,83 @@ describe("NavigationWatcher — B4 eager caption prefetch", () => {
     watcher.stop();
   });
 });
+
+// ─── notifyEnded() terminal-idle race (post-URL-change 'ended') ───────────────
+//
+// If 'ended' fires AFTER the URL already advanced (a NEW session is in flight),
+// the 45s terminal-idle timer must NOT emit VIDEO_ENDED against the new session.
+// The timer is gated on the session identity (pageToken / session.token) captured
+// at notifyEnded() entry; a changed identity makes it silently discard.
+
+describe("NavigationWatcher — notifyEnded terminal-idle session-identity race", () => {
+  const TERMINAL_IDLE_MS = 45_000;
+
+  function makeAppWithSession(opts: {
+    pageToken: number;
+    sessionToken: number | null;
+  }): { app: ContentApp; sm: { pageToken: number; session: { token: number } | null } } {
+    const sm = {
+      pageToken: opts.pageToken,
+      session: opts.sessionToken == null ? null : { token: opts.sessionToken },
+    };
+    const adapter = makeAdapter({});
+    const app = {
+      sm,
+      adapter,
+      stopSession: vi.fn(),
+    } as unknown as ContentApp;
+    return { app, sm };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setHref("https://www.youtube.com/watch?v=v-old");
+    (globalThis as { chrome?: unknown }).chrome = {
+      runtime: { id: "test", sendMessage: vi.fn().mockResolvedValue(undefined) },
+    };
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    (globalThis as { chrome?: unknown }).chrome = undefined;
+  });
+
+  it("a NEW session starting after 'ended' (pageToken bumped) → the stale 45s timer does NOT emit {stop}", () => {
+    const { app, sm } = makeAppWithSession({ pageToken: 5, sessionToken: 5 });
+    const emitted: ({ kind: "continue" } | { kind: "stop"; reason: string })[] = [];
+    const watcher = new NavigationWatcher(app);
+    watcher.start((e) => emitted.push(e as never));
+
+    // Old video ends → arm the 45s terminal-idle window for session token 5.
+    watcher.notifyEnded();
+
+    // A NEW session starts before the window expires: stopSession bumped pageToken,
+    // a fresh session has a new token. The page is still on a watch URL (same kind).
+    sm.pageToken = 6;
+    sm.session = { token: 6 };
+
+    // The 45s timer fires — but the captured identity (pt=5, st=5) no longer matches.
+    vi.advanceTimersByTime(TERMINAL_IDLE_MS + 10);
+
+    // No {stop} emitted → the new session is NOT killed by the stale 'ended'.
+    expect(emitted.some((e) => e.kind === "stop")).toBe(false);
+
+    watcher.stop();
+  });
+
+  it("the SAME session still present at expiry (no navigation) → the timer DOES emit {stop, VIDEO_ENDED}", () => {
+    const { app } = makeAppWithSession({ pageToken: 5, sessionToken: 5 });
+    const emitted: ({ kind: "continue" } | { kind: "stop"; reason: string })[] = [];
+    const watcher = new NavigationWatcher(app);
+    watcher.start((e) => emitted.push(e as never));
+
+    watcher.notifyEnded();
+    // No navigation, same session/pageToken, still on the watch URL with the SAME id.
+    vi.advanceTimersByTime(TERMINAL_IDLE_MS + 10);
+
+    const stop = emitted.find((e) => e.kind === "stop") as { kind: "stop"; reason: string } | undefined;
+    expect(stop?.reason).toBe("video-ended");
+
+    watcher.stop();
+  });
+});

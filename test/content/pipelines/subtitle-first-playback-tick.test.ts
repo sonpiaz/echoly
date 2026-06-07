@@ -16,6 +16,7 @@
 
 import { beforeEach, describe, it, expect, vi, afterEach } from "vitest";
 import { SubtitleFirstPipeline } from "@/content/pipelines/subtitle-first-pipeline";
+import { LifecycleController } from "@/content/lifecycle";
 import type { SubtitleFirstSession } from "@/content/session-manager";
 import type { CaptionSentence } from "@/lib/caption-utils";
 import type { PlatformAdapter } from "@/shared/platform-ports";
@@ -114,6 +115,11 @@ function makePipeline(captions: { start: number; end: number; text: string }[], 
   const audioCtxMock = makeAudioCtxMock();
   (window as unknown as { AudioContext: unknown }).AudioContext = vi.fn(() => audioCtxMock);
 
+  // Real LifecycleController — the subtitle-first pipeline now holds the
+  // system-buffer micro-pause as the controller's 'system-buffer' reason and
+  // routes video.pause()/play() through it (replaces the old _systemPaused flag).
+  const lifecycle = new LifecycleController();
+
   let pageToken = 0;
   let sessionRef: SubtitleFirstSession | null = null;
 
@@ -122,7 +128,11 @@ function makePipeline(captions: { start: number; end: number; text: string }[], 
     set session(s: SubtitleFirstSession | null) { sessionRef = s; },
     settings: null as StartSettings | null,
     apiBase: "https://api.echolyhq.com",
-    pageToken, videoPaused: false,
+    lifecycle,
+    pageToken,
+    // Derived (mirror the real SessionManager getters).
+    get videoPaused(): boolean { return lifecycle.effectivePaused; },
+    get userPaused(): boolean { return lifecycle.effectivePaused; },
     nextToken() { pageToken += 1; this.pageToken = pageToken; return pageToken; },
     isSessionStale(tok: number) { return tok !== this.pageToken && this.session?.token !== tok; },
     emitState: vi.fn(),
@@ -145,7 +155,7 @@ function makePipeline(captions: { start: number; end: number; text: string }[], 
   };
 
   const app = {
-    sm, overlay, capture, callbacks: {},
+    sm, lifecycle, overlay, capture, callbacks: {},
     adapter: {
       id: "generic",
       capabilities: { audioCapture: true, subtitleFirst: true, isSpa: false, hasNativeCaptions: false, hasAdOverlays: false },
@@ -162,7 +172,7 @@ function makePipeline(captions: { start: number; end: number; text: string }[], 
   };
 
   const pipeline = new SubtitleFirstPipeline(app as never);
-  return { pipeline, sm, overlay, fakeVideo, audioCtxMock };
+  return { pipeline, sm, lifecycle, overlay, fakeVideo, audioCtxMock };
 }
 
 /**
@@ -219,7 +229,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
   it("AC#2: un-buffered cue at playhead → video.pause() + _systemPaused=true, NOT _played", async () => {
     const captions = [{ start: 10, end: 13, text: "hello" }];
     const fakeVideo = makeFakeVideo(0);
-    const { pipeline, sm, audioCtxMock } = makePipeline(captions, fakeVideo);
+    const { pipeline, sm, lifecycle, audioCtxMock } = makePipeline(captions, fakeVideo);
 
     // byteLength=0 → pipeline skips decodeAudioData → _buffer stays undefined.
     const sess = await doStart(pipeline, sm, [{ text: "tr", audioMp3: new ArrayBuffer(0) }]);
@@ -228,7 +238,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     // Verify _buffer is absent.
     expect(sent._buffer).toBeUndefined();
     // Initial tick was at t=0 — cue start=10 > 0+0.15, so nothing happened.
-    expect(sess._systemPaused).toBeFalsy();
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false);
 
     // Simulate the renderer being BEHIND: cue 0 not yet rendered (renderCursor=0).
     // This is the only case that should micro-pause — a cue the render pump hasn't
@@ -244,7 +254,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     await vi.advanceTimersByTimeAsync(250);
 
     expect(fakeVideo.pause).toHaveBeenCalled();
-    expect(sess._systemPaused).toBe(true);
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(true);
     expect(sent._played).toBeFalsy();
     expect(audioCtxMock._sources.length).toBe(0);
 
@@ -264,7 +274,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
       { start: 16, end: 19, text: "next." },
     ];
     const fakeVideo = makeFakeVideo(0);
-    const { pipeline, sm, audioCtxMock } = makePipeline(captions, fakeVideo);
+    const { pipeline, sm, lifecycle, audioCtxMock } = makePipeline(captions, fakeVideo);
 
     // Cue 0: empty MP3 → _buffer stays undefined but renderCursor still advances
     // past it. Cue 1: real audio.
@@ -285,7 +295,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     // Several ticks: cue 0 must be skipped immediately, never entering system-pause.
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(sess._systemPaused).toBeFalsy();                               // NO hang
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false);                               // NO hang
     expect(vi.mocked(fakeVideo.pause).mock.calls.length).toBe(pausesAfterStart); // no micro-pause
     expect(s0._played).toBe(true);                                       // skipped
     expect(audioCtxMock._sources.length).toBe(0);                        // no audio to play yet
@@ -298,7 +308,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
   it("AC#3: buffer arrives while system-paused → play + src.start() called once", async () => {
     const captions = [{ start: 10, end: 13, text: "hello" }];
     const fakeVideo = makeFakeVideo(0);
-    const { pipeline, sm, audioCtxMock } = makePipeline(captions, fakeVideo);
+    const { pipeline, sm, lifecycle, audioCtxMock } = makePipeline(captions, fakeVideo);
 
     const sess = await doStart(pipeline, sm, [{ text: "tr", audioMp3: new ArrayBuffer(0) }]);
     const sent = sess.sentences[0]!;
@@ -309,7 +319,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
 
     // Tick 1: no buffer → system-pause.
     await vi.advanceTimersByTimeAsync(250);
-    expect(sess._systemPaused).toBe(true);
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(true);
     const pausesBefore = vi.mocked(fakeVideo.pause).mock.calls.length;
     // Record how many times play was called before the system-resume.
     const playsBefore = vi.mocked(fakeVideo.play).mock.calls.length;
@@ -320,7 +330,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
 
     // Tick 2: system-pause check → buffer ready → resumeSystemPause → play().
     await vi.advanceTimersByTimeAsync(250);
-    expect(sess._systemPaused).toBeFalsy();
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false);
     // Exactly one more play() call from resumeSystemPause.
     expect(vi.mocked(fakeVideo.play).mock.calls.length).toBe(playsBefore + 1);
     // No new pause.
@@ -339,31 +349,45 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     clearInterval(sess.playbackTimer!);
   });
 
-  // ─ AC#4: _systemPaused guard ────────────────────────────────────────────────
-  // After the pause/resume rewire, onPause now calls pauseSession() (not stopSession).
-  // The _systemPaused guard still returns early to prevent a user-pause action
-  // when the driver itself issued the pause (buffer-wait micro-pause).
+  // ─ AC#4: self-issued guard (replaces the old _systemPaused onPause guard) ────
+  // onPause now no-ops when the controller itself issued the pause (its
+  // synchronous #selfIssued flag is set across the controller's own video.pause()
+  // — e.g. the system-buffer micro-pause). A genuine user pause (flag not set)
+  // routes to pauseSession().
 
-  it("AC#4: _systemPaused=true → onPause guard returns early (pauseSession NOT called)", () => {
+  it("AC#4: isSelfIssued()=true → onPause guard returns early (pauseSession NOT called)", async () => {
     const pauseSession = vi.fn();
+    const lifecycle = new LifecycleController();
 
-    function simulateOnPause(sess: { kind: string; _systemPaused?: boolean } | null) {
-      if (!sess) return;
-      if (sess.kind === "subtitle-first" && sess._systemPaused) return;
+    // Mirror the index.ts onPause handler shape.
+    function simulateOnPause() {
+      if (lifecycle.isSelfIssued()) return;
       pauseSession();
     }
 
-    // With _systemPaused: true — guard fires, no action.
-    simulateOnPause({ kind: "subtitle-first", _systemPaused: true });
+    // Observe the flag *inside* the controller-owned video.pause() call.
+    let selfIssuedDuringPause = false;
+    const fakeVideo = {
+      paused: false,
+      pause: vi.fn(() => { selfIssuedDuringPause = lifecycle.isSelfIssued(); }),
+      play: vi.fn(async () => {}),
+    } as unknown as HTMLVideoElement;
+    lifecycle.setVideo(fakeVideo);
+
+    lifecycle.pause("system-buffer");
+    // The flag was true at the synchronous video.pause() call boundary…
+    expect(selfIssuedDuringPause).toBe(true);
+    // …and stays true across the window the async "pause" DOM event would land in,
+    // so a controller-issued onPause no-ops.
+    expect(lifecycle.isSelfIssued()).toBe(true);
+    simulateOnPause();
     expect(pauseSession).not.toHaveBeenCalled();
 
-    // With _systemPaused: false — guard doesn't fire, pauseSession runs.
-    simulateOnPause({ kind: "subtitle-first", _systemPaused: false });
-    expect(pauseSession).toHaveBeenCalledTimes(1);
-
-    pauseSession.mockClear();
-    // With _systemPaused: undefined — same as false.
-    simulateOnPause({ kind: "subtitle-first", _systemPaused: undefined });
+    // The flag clears on the next macrotask (after the DOM event task). A genuine
+    // user pause after that routes to pauseSession.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(lifecycle.isSelfIssued()).toBe(false);
+    simulateOnPause();
     expect(pauseSession).toHaveBeenCalledTimes(1);
   });
 
@@ -410,7 +434,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
       { start: 16, end: 19, text: "next" },
     ];
     const fakeVideo = makeFakeVideo(0);
-    const { pipeline, sm, audioCtxMock } = makePipeline(captions, fakeVideo);
+    const { pipeline, sm, lifecycle, audioCtxMock } = makePipeline(captions, fakeVideo);
 
     const sess = await doStart(pipeline, sm, [
       { text: "tr0", audioMp3: new ArrayBuffer(0) },   // no buffer for stale
@@ -434,8 +458,116 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     await vi.advanceTimersByTimeAsync(250);
 
     expect(s0._played).toBe(true);          // skipped
-    expect(sess._systemPaused).toBeFalsy(); // no micro-pause
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false); // no micro-pause
     expect(audioCtxMock._sources.length).toBeGreaterThan(0); // next cue started
+
+    clearInterval(sess.playbackTimer!);
+  });
+
+  // ─ FIX 2 (Bug B1 — seek desync): BUFFERED stale cue is drift-skipped ────────
+  //
+  // A forward seek leaves earlier cues already DECODED (the rolling renderer
+  // fetched them before the seek) whose end is now well behind the new playhead.
+  // The old `while (due && !due._buffer)` guard only skipped UNbuffered stale
+  // cues, so a buffered-but-stale cue slipped through to #startCue and played at
+  // the WRONG video position (the seek-desync bug). The fix makes the time-stale
+  // check buffer-agnostic: t - due.end > DRIFT_SKIP_SEC skips regardless of
+  // whether _buffer is present. This test FAILS against the pre-fix code (the
+  // stale cue's src.start would be called and the wrong cue would play).
+
+  it("FIX2-B1: a BUFFERED cue > DRIFT_SKIP_SEC past its end (forward seek) is SKIPPED, the current cue plays", async () => {
+    // cue0 (stale): start=10, end=12 — HAS a decoded _buffer.
+    // cue1 (current): start=20, end=23 — HAS a decoded _buffer.
+    // Seek to t=20: 20 - 12 = 8 > DRIFT_SKIP_SEC=3 → cue0 must be skipped even
+    // though it is buffered; cue1 (current) must start.
+    const captions = [
+      { start: 10, end: 12, text: "stale-buffered." },
+      { start: 20, end: 23, text: "current." },
+    ];
+    const fakeVideo = makeFakeVideo(0);
+    const { pipeline, sm, lifecycle, audioCtxMock } = makePipeline(captions, fakeVideo);
+
+    const sess = await doStart(pipeline, sm, [
+      { text: "tr0", audioMp3: new ArrayBuffer(100) }, // buffer for stale
+      { text: "tr1", audioMp3: new ArrayBuffer(100) }, // buffer for current
+    ]);
+
+    const s0 = sess.sentences[0]!; // stale — buffered
+    const s1 = sess.sentences[1]!; // current — buffered
+
+    // Both cues have a real _buffer (the crux: stale is BUFFERED, not empty).
+    const stale = makeFakeBuffer();
+    s0._buffer = stale;
+    s0._played = false;
+    if (!s1._buffer) s1._buffer = makeFakeBuffer();
+    s1._played = false;
+
+    const sourcesBefore = audioCtxMock._sources.length;
+
+    // Forward seek to cue1's start.
+    fakeVideo.currentTime = 20;
+    fakeVideo.paused = false;
+
+    // Tick: stale buffered cue0 must be skipped (diff=8>3); current cue1 starts.
+    await vi.advanceTimersByTimeAsync(250);
+
+    // cue0 marked played WITHOUT being started (drift-skip), no micro-pause.
+    expect(s0._played).toBe(true);
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false);
+
+    // Exactly ONE new source was created — and its buffer is cue1's, NOT the
+    // stale cue0's. (Pre-fix: cue0 would be started → wrong-position audio.)
+    const created = audioCtxMock._sources.slice(sourcesBefore);
+    expect(created.length).toBe(1);
+    expect(created[0]!.buffer).toBe(s1._buffer);
+    expect(created[0]!.buffer).not.toBe(stale);
+    expect(created[0]!.start).toHaveBeenCalledTimes(1);
+    // cue1 is the one that played.
+    expect(s1._played).toBe(true);
+
+    clearInterval(sess.playbackTimer!);
+  });
+
+  // ─ FIX 2 regression-guard: buffered cue with dueIdx < renderCursor is PLAYED ──
+  //
+  // The FIRST (wrong) cut of the fix broadened the dueIdx<renderCursor skip to
+  // buffered cues too — which broke NORMAL playback (a buffered cue with index <
+  // renderCursor is the normal ready state, NOT a stale cue). The fix keeps the
+  // dueIdx<renderCursor skip tied to the NO-BUFFER case only. This test asserts a
+  // buffered cue at the current position with dueIdx < renderCursor still plays.
+
+  it("FIX2-regression: a buffered cue at the current position with dueIdx < renderCursor is STILL played (not skipped)", async () => {
+    // Single cue at 10..13s, NOT stale (currentTime=10 → 10-13 = -3, well within
+    // DRIFT_SKIP_SEC), buffered, and renderCursor advanced PAST it (the normal
+    // ready state after the rolling renderer processed it).
+    const captions = [{ start: 10, end: 13, text: "ready-and-current." }];
+    const fakeVideo = makeFakeVideo(0);
+    const { pipeline, sm, lifecycle, audioCtxMock } = makePipeline(captions, fakeVideo);
+
+    const sess = await doStart(pipeline, sm, [
+      { text: "tr0", audioMp3: new ArrayBuffer(100) },
+    ]);
+    const s0 = sess.sentences[0]!;
+    if (!s0._buffer) s0._buffer = makeFakeBuffer();
+    s0._played = false;
+    // renderCursor strictly past the cue's index 0 → dueIdx(0) < renderCursor.
+    sess.renderCursor = 1;
+
+    const sourcesBefore = audioCtxMock._sources.length;
+
+    // At the cue's own position (not stale).
+    fakeVideo.currentTime = 10;
+    fakeVideo.paused = false;
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    // Must be PLAYED, not skipped: a source created and started for it.
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false);
+    const created = audioCtxMock._sources.slice(sourcesBefore);
+    expect(created.length).toBe(1);
+    expect(created[0]!.buffer).toBe(s0._buffer);
+    expect(created[0]!.start).toHaveBeenCalledTimes(1);
+    expect(s0._played).toBe(true);
 
     clearInterval(sess.playbackTimer!);
   });
@@ -490,7 +622,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
   it("AC#9: stall cap calls video.play() to un-freeze; advancing time past cue end then skips the cue", async () => {
     const captions = [{ start: 10, end: 13, text: "hello" }];
     const fakeVideo = makeFakeVideo(0);
-    const { pipeline, sm } = makePipeline(captions, fakeVideo);
+    const { pipeline, sm, lifecycle } = makePipeline(captions, fakeVideo);
 
     const sess = await doStart(pipeline, sm, [{ text: "tr", audioMp3: new ArrayBuffer(0) }]);
     const sent = sess.sentences[0]!;
@@ -503,7 +635,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
 
     // Tick 1: no buffer → system-pause.
     await vi.advanceTimersByTimeAsync(250);
-    expect(sess._systemPaused).toBe(true);
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(true);
 
     const playsBefore = vi.mocked(fakeVideo.play).mock.calls.length;
 
@@ -524,7 +656,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     // Tick 3: stale check → skip (not micro-pause).
     await vi.advanceTimersByTimeAsync(250);
     expect(sent._played).toBe(true);    // skipped as stale
-    expect(sess._systemPaused).toBeFalsy(); // no more freeze
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false); // no more freeze
 
     clearInterval(sess.playbackTimer!);
   });
@@ -566,7 +698,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
       { start: 22, end: 25, text: "four." },   // <── the one the roller must render
     ];
     const fakeVideo = makeFakeVideo(0);
-    const { pipeline, sm, audioCtxMock } = makePipeline(captions, fakeVideo);
+    const { pipeline, sm, lifecycle, audioCtxMock } = makePipeline(captions, fakeVideo);
 
     // Use renderSubtitleDubStream (the streaming path used by #renderBatch).
     // First call: start() initial wave (cues 0-1).
@@ -614,7 +746,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
 
     // Tick: cue 3 is due (start=22 ≤ 22+0.15), no buffer → system-pause.
     await vi.advanceTimersByTimeAsync(250);
-    expect(sess._systemPaused).toBe(true);
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(true);
     expect(fakeVideo.pause).toHaveBeenCalled();
     expect(cue3._played).toBeFalsy();
     expect(audioCtxMock._sources.length).toBe(0);
@@ -636,7 +768,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
     // The 250ms tick fires and detects _buffer → resumeSystemPause → video.play().
     await vi.advanceTimersByTimeAsync(250);
     expect(vi.mocked(fakeVideo.play).mock.calls.length).toBeGreaterThan(0);
-    expect(sess._systemPaused).toBeFalsy();
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(false);
 
     // Next tick: video unpaused, buffer present → src.start().
     await vi.advanceTimersByTimeAsync(250);
@@ -652,7 +784,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
   it("AC#11: stopFlag set during system-pause → subsequent ticks bail early, video.play() NOT called", async () => {
     const captions = [{ start: 10, end: 13, text: "hello" }];
     const fakeVideo = makeFakeVideo(0);
-    const { pipeline, sm } = makePipeline(captions, fakeVideo);
+    const { pipeline, sm, lifecycle } = makePipeline(captions, fakeVideo);
 
     const sess = await doStart(pipeline, sm, [{ text: "tr", audioMp3: new ArrayBuffer(0) }]);
     const sent = sess.sentences[0]!;
@@ -665,7 +797,7 @@ describe("SubtitleFirstPipeline — buffering-aware playback tick (sync-pause-re
 
     // Tick 1: enters system-pause.
     await vi.advanceTimersByTimeAsync(250);
-    expect(sess._systemPaused).toBe(true);
+    expect(lifecycle.isPausedFor("system-buffer")).toBe(true);
 
     const playBefore = vi.mocked(fakeVideo.play).mock.calls.length;
 

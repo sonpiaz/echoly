@@ -30,8 +30,13 @@ const URL_POLL_MS = 500;
 // dead time to every auto-next transition.
 const NAV_DEBOUNCE_MS = 700;
 const NAV_DEBOUNCE_YT_EVENT_MS = 100;
-// After `onEnded`: wait this long for a follow-up navigation before stopping.
-const PENDING_NEXT_TIMEOUT_MS = 8_000;
+// Terminal idle timeout (ms). `notifyEnded` arms this LONG window; it only fires
+// a {stop, VIDEO_ENDED} if NO navigation happened AND the video is genuinely
+// finished. The 500ms URL poll + yt-navigate-finish are the REAL continuation
+// trigger (they detect the auto-advance by videoId change regardless of whether
+// the source <video> ever fired 'ended'). The long window lets a user who
+// lingers on the up-next screen ≤45s still auto-continue when YouTube advances.
+const TERMINAL_IDLE_TIMEOUT_MS = 45_000;
 
 /**
  * NavigationWatcher — watches for SPA navigations and video-end transitions.
@@ -47,13 +52,20 @@ export class NavigationWatcher {
   #debounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** Source that started the current debounce ('poll' uses long window; 'yt-event' uses short). */
   #debounceSource: 'poll' | 'yt-event' = 'poll';
-  #pendingNextTimer: ReturnType<typeof setTimeout> | null = null;
+  #terminalIdleTimer: ReturnType<typeof setTimeout> | null = null;
   #onEvent: ((e: NavEvent) => void) | null = null;
 
   #lastUrl: string = location.href;
   #lastVideoId: string | null = null;
-  /** True when a pending-next window is open (notifyEnded was called and not resolved). */
-  #pendingNext = false;
+  /**
+   * True from the moment the source video reports `ended` (notifyEnded) until the
+   * next qualifying navigation resolves it. While this is set AND a session is
+   * still alive, the watcher is "awaiting next": the URL poll / yt-navigate-finish
+   * must emit {continue} for the next videoId — the idle branch (sm.session==null)
+   * can NEVER consume it, and a still-alive session does not get torn down early.
+   * The long terminal-idle timer is the only thing that can clear it without a nav.
+   */
+  #awaitingNext = false;
   /** Guard: true while an emit is in progress (prevents re-entrant double-emit). */
   #emitting = false;
 
@@ -79,7 +91,8 @@ export class NavigationWatcher {
     this.#lastUrl = location.href;
     this.#lastVideoId = this.#app.adapter.getVideoId(location.href);
     this.#emitting = false;
-    this.#pendingNext = false;
+    this.#awaitingNext = false;
+    console.info("[nav] watcher STARTED", { lastVideoId: this.#lastVideoId, adapter: this.#app.adapter.id });
 
     // 500ms href poll — cross-platform baseline.
     this.#pollTimer = setInterval(() => {
@@ -108,7 +121,8 @@ export class NavigationWatcher {
       this.#pollTimer = null;
     }
     this.#clearDebounce();
-    this.#clearPendingNext();
+    this.#clearTerminalIdle();
+    this.#awaitingNext = false;
     this.#cancelPrefetch();
     this.#ytNavListener?.();
     this.#ytNavListener = null;
@@ -117,21 +131,69 @@ export class NavigationWatcher {
 
   /**
    * Called from the source <video> `ended` event handler.
-   * Arms a ~8s pending-next window: if a qualifying navigation occurs within it,
-   * the continue path handles it naturally; if the timer fires with no navigation,
-   * emits {stop, VIDEO_ENDED}.
+   *
+   * NOTE: `ended` is NO LONGER the continuation trigger — YouTube frequently does
+   * NOT fire it on autoplay, so the 500ms URL poll + yt-navigate-finish are what
+   * actually detect the auto-advance (by videoId change, independent of `ended`).
+   *
+   * All `notifyEnded` does now is:
+   *   1. Mark the watcher as "awaiting next" so the still-alive session keeps the
+   *      watcher armed and the idle branch cannot consume the next videoId; and
+   *   2. Arm a LONG terminal-idle timer (~45s). That timer ONLY emits a terminal
+   *      {stop, VIDEO_ENDED} if NO navigation happened in the window AND the video
+   *      is genuinely finished (ended + not mid-buffer of a new clip). A user who
+   *      lingers ≤45s on the up-next screen still auto-continues when the URL flips.
    */
   notifyEnded(): void {
-    // If a pending-next window is already open, ignore (shouldn't happen, but safe).
-    if (this.#pendingNext) return;
-    this.#pendingNext = true;
+    // If we're already awaiting the next video, just keep the existing window.
+    if (this.#awaitingNext) return;
+    this.#awaitingNext = true;
+    console.info("[nav] video ENDED → keep watcher alive, terminal-idle window open (%dms)", TERMINAL_IDLE_TIMEOUT_MS);
 
-    this.#pendingNextTimer = setTimeout(() => {
-      this.#pendingNextTimer = null;
-      if (!this.#pendingNext) return; // already resolved by a navigation
-      this.#pendingNext = false;
+    // Capture the live session identity at arm time. If 'ended' fired AFTER the URL
+    // already advanced (a NEW session is in flight), the session we'd be stopping is
+    // NOT the one that ended — guard the timer on this identity so a stale 'ended'
+    // can never terminate a fresh session. pageToken is the monotonic per-session
+    // identity (bumped on every stop/start); session.token pins the exact session.
+    const armedPageToken = this.#app.sm.pageToken;
+    const armedSessionToken = this.#app.sm.session?.token ?? null;
+
+    this.#clearTerminalIdle();
+    this.#terminalIdleTimer = setTimeout(() => {
+      this.#terminalIdleTimer = null;
+      // Resolved by a navigation in the meantime → nothing to do.
+      if (!this.#awaitingNext) return;
+      // No session left to continue → nothing to stop.
+      if (this.#app.sm.session == null) {
+        this.#awaitingNext = false;
+        return;
+      }
+      // A NEW session started after this 'ended' was armed (post-URL-change race):
+      // the page advanced, a fresh session is live, and this stale terminal-idle
+      // timer must NOT emit VIDEO_ENDED against it. Silently discard.
+      if (
+        this.#app.sm.pageToken !== armedPageToken ||
+        (armedSessionToken !== null && this.#app.sm.session?.token !== armedSessionToken)
+      ) {
+        console.info("[nav] terminal-idle: session changed since 'ended' armed → discard (stale)");
+        this.#awaitingNext = false;
+        return;
+      }
+      // Still on a watch URL with a NEW video loaded? Then YouTube swapped the
+      // clip without us seeing a URL change yet — let the poll/continue path own
+      // it instead of terminating. (Defensive; the poll normally fires first.)
+      const currentUrl = location.href;
+      if (
+        this.#app.adapter.isWatchUrl(currentUrl) &&
+        this.#app.adapter.getVideoId(currentUrl) !== this.#lastVideoId
+      ) {
+        console.info("[nav] terminal-idle: new videoId already on page → defer to continue path");
+        return;
+      }
+      this.#awaitingNext = false;
+      console.warn("[nav] terminal-idle EXPIRED (no navigation in %dms) → STOP session", TERMINAL_IDLE_TIMEOUT_MS);
       this.#emit({ kind: "stop", reason: STOP_REASON.VIDEO_ENDED });
-    }, PENDING_NEXT_TIMEOUT_MS);
+    }, TERMINAL_IDLE_TIMEOUT_MS);
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
@@ -140,6 +202,7 @@ export class NavigationWatcher {
     const currentUrl = location.href;
     if (currentUrl === this.#lastUrl) return;
 
+    console.info("[nav] URL changed", { source, from: this.#lastUrl, to: currentUrl, hasSession: this.#app.sm.session != null });
     // URL changed — update lastUrl but wait for debounce before acting.
     this.#lastUrl = currentUrl;
 
@@ -186,16 +249,29 @@ export class NavigationWatcher {
     }
 
     const newId = this.#app.adapter.getVideoId(stableUrl);
+    console.info("[nav] url stable", {
+      newId, lastVideoId: this.#lastVideoId, hasSession: this.#app.sm.session != null,
+    });
 
     // Must have a valid id that differs from the last-known id.
-    if (!newId || newId === this.#lastVideoId) return;
+    if (!newId || newId === this.#lastVideoId) {
+      console.info("[nav] skip (no id or same id)", { newId });
+      return;
+    }
 
     // B4: Eager caption prefetch — kick off regardless of session state.
     // • Idle (no session): prefetch so cold-start doesn't pay caption-fetch latency.
     // • Active session (auto-next): prefetch IN PARALLEL before emitting continue,
     //   so restart() consumes the cached result instead of fetching serially at the
     //   worst possible time (while the video is trying to play).
-    if (this.#app.sm.session == null) {
+    //
+    // GUARD: the idle branch (prefetch-only, consumes the videoId) must run ONLY
+    // when there is genuinely no live session AND we are not awaiting the next
+    // video. A still-alive session — even one whose source video already fired
+    // `ended` (#awaitingNext) — must ALWAYS emit {continue} so the dub continues;
+    // it must never be demoted to a prefetch that consumes the id.
+    if (this.#app.sm.session == null && !this.#awaitingNext) {
+      console.info("[nav] idle path (no active session) → prefetch only, NO auto-next continue");
       // Update tracking so the next navigation starts fresh.
       this.#lastVideoId = newId;
       // Trigger prefetch only for adapters with subtitle-first capability.
@@ -205,9 +281,11 @@ export class NavigationWatcher {
       return;
     }
 
-    // Active session — resolve the pending-next window (if any) first.
-    this.#clearPendingNext();
-    this.#pendingNext = false;
+    // Active (or awaiting-next) session — the navigation is the auto-advance we
+    // were waiting for: resolve the terminal-idle window and clear awaitingNext
+    // so the continuation owns the transition.
+    this.#clearTerminalIdle();
+    this.#awaitingNext = false;
 
     // Kick off the eager prefetch IN PARALLEL so restart() can consume it via
     // getPrefetchedCaptions().  We pass `forActiveSession: true` so the guard
@@ -219,6 +297,7 @@ export class NavigationWatcher {
     // Update tracking.
     this.#lastVideoId = newId;
 
+    console.info("[nav] ACTIVE session + new video → emit CONTINUE (auto-next)", { newId });
     this.#emit({ kind: "continue", videoId: newId });
   }
 
@@ -309,10 +388,10 @@ export class NavigationWatcher {
     }
   }
 
-  #clearPendingNext(): void {
-    if (this.#pendingNextTimer !== null) {
-      clearTimeout(this.#pendingNextTimer);
-      this.#pendingNextTimer = null;
+  #clearTerminalIdle(): void {
+    if (this.#terminalIdleTimer !== null) {
+      clearTimeout(this.#terminalIdleTimer);
+      this.#terminalIdleTimer = null;
     }
   }
 }

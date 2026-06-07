@@ -19,6 +19,7 @@
 
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { SubtitleFirstPipeline } from "@/content/pipelines/subtitle-first-pipeline";
+import { LifecycleController } from "@/content/lifecycle";
 import type { SubtitleFirstSession } from "@/content/session-manager";
 import type { PlatformAdapter } from "@/shared/platform-ports";
 import type { StartSettings } from "@/shared/types";
@@ -93,6 +94,8 @@ function makePipeline(
   const audioCtxMock = makeAudioCtxMock();
   (window as unknown as { AudioContext: unknown }).AudioContext = vi.fn(() => audioCtxMock);
 
+  const lifecycle = new LifecycleController();
+
   let pageToken = 0;
   let sessionRef: SubtitleFirstSession | null = null;
 
@@ -101,8 +104,10 @@ function makePipeline(
     set session(s: SubtitleFirstSession | null) { sessionRef = s; },
     settings: null as StartSettings | null,
     apiBase: "https://api.echolyhq.com",
+    lifecycle,
     pageToken,
-    userPaused: false,
+    // Derived (mirror the real SessionManager getter).
+    get userPaused(): boolean { return lifecycle.effectivePaused; },
     nextToken() { pageToken += 1; this.pageToken = pageToken; return pageToken; },
     isSessionStale(tok: number) { return tok !== this.pageToken; },
     emitState: vi.fn(),
@@ -125,7 +130,7 @@ function makePipeline(
   };
 
   const app = {
-    sm, overlay, capture, callbacks: {},
+    sm, lifecycle, overlay, capture, callbacks: {},
     adapter: {
       id: "generic",
       capabilities: {

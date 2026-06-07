@@ -191,4 +191,95 @@ describe("auto-start — chrome.tabs.onUpdated gating", () => {
       true,
     );
   });
+
+  // ── Hard-nav continuation: bypass Gate-4 for a fresh same-tab intent ──────────
+  // After a playlist auto-advance hard nav, nav-stop recorded {tabId, at}. The
+  // fresh page's `complete` must auto-continue the dub EVEN on a host the user
+  // never opted into via autoStartHosts — but only Gate-4 is bypassed; Gates
+  // 1/2/3/5 + the per-tab debounce still apply, and the intent is consumed once.
+  describe("hard-nav continuation (Gate-4 bypass)", () => {
+    it("BYPASSES Gate-4 — start fires on a host NOT in autoStartHosts when a fresh same-tab intent exists", () => {
+      const { store, startSpy, listener } = build();
+      signIn(store);
+      // NB: host (youtube.com) is NOT enabled — normally Gate-4 would reject.
+      store.setContinuationIntent({ tabId: 42, at: Date.now() });
+      listener(42, { status: "complete" }, YT_TAB);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(startSpy).toHaveBeenCalledWith({});
+    });
+
+    it("IGNORES an expired intent (> CONTINUATION_WINDOW_MS) → falls back to Gate-4 (no host → no call)", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(100_000);
+      const { store, startSpy, listener } = build();
+      signIn(store);
+      // Intent recorded 13s ago — outside the 12s window.
+      store.setContinuationIntent({ tabId: 42, at: 100_000 - 13_000 });
+      listener(42, { status: "complete" }, YT_TAB);
+      expect(startSpy).not.toHaveBeenCalled();
+    });
+
+    it("IGNORES a wrong-tabId intent → falls back to Gate-4 (no host → no call)", () => {
+      const { store, startSpy, listener } = build();
+      signIn(store);
+      // Intent for a DIFFERENT tab (99); the complete is for tab 42.
+      store.setContinuationIntent({ tabId: 99, at: Date.now() });
+      listener(42, { status: "complete" }, YT_TAB);
+      expect(startSpy).not.toHaveBeenCalled();
+    });
+
+    it("CONSUMES the intent once — a second complete for the same tab does NOT start again", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(50_000);
+      const { store, startSpy, listener } = build();
+      signIn(store);
+      store.setContinuationIntent({ tabId: 42, at: 50_000 });
+
+      listener(42, { status: "complete" }, YT_TAB);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(store.getContinuationIntent()).toBeNull(); // consumed
+
+      // A second complete past the debounce window: intent is gone, host not
+      // enabled → Gate-4 now rejects, so NO second start.
+      vi.setSystemTime(52_000);
+      store.setRunning(false);
+      store.setConnecting(false);
+      listener(42, { status: "complete" }, YT_TAB);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT consume the intent when an earlier gate early-returns (wrong url)", () => {
+      const { store, startSpy, listener } = build();
+      signIn(store);
+      store.setContinuationIntent({ tabId: 42, at: Date.now() });
+      // Gate-2 (watch-url) fails on YT home → early return BEFORE the intent peek.
+      listener(
+        42,
+        { status: "complete" },
+        { id: 42, url: "https://www.youtube.com/" } as chrome.tabs.Tab,
+      );
+      expect(startSpy).not.toHaveBeenCalled();
+      expect(store.getContinuationIntent()).not.toBeNull(); // still pending
+    });
+
+    it("does NOT consume the intent when signed out (Gate-3 early-returns)", () => {
+      const { store, startSpy, listener } = build();
+      // NOT signed in → Gate-3 rejects before the intent is consumed.
+      store.setContinuationIntent({ tabId: 42, at: Date.now() });
+      listener(42, { status: "complete" }, YT_TAB);
+      expect(startSpy).not.toHaveBeenCalled();
+      expect(store.getContinuationIntent()).not.toBeNull(); // still pending
+    });
+
+    it("still honours Gate-5 — a fresh intent does NOT start when already running", () => {
+      const { store, startSpy, listener } = build();
+      signIn(store);
+      store.setContinuationIntent({ tabId: 42, at: Date.now() });
+      store.setRunning(true);
+      listener(42, { status: "complete" }, YT_TAB);
+      expect(startSpy).not.toHaveBeenCalled();
+      // Gate-5 returns before the consume point → intent untouched.
+      expect(store.getContinuationIntent()).not.toBeNull();
+    });
+  });
 });

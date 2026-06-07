@@ -318,7 +318,7 @@ export class WebRtcPipeline {
           // If the user has paused the source video, do NOT tear down the session —
           // mark it as lost so resumeSession can attempt a one-shot rebuild (§2.5).
           if (sm.userPaused) {
-            sm.connectionLost = true;
+            this.app.lifecycle.pause("connection-lost");
             return;
           }
           // stopSession emits STOP_REASON_MESSAGE[CONNECTION_LOST].
@@ -332,7 +332,7 @@ export class WebRtcPipeline {
           // Peer died — if the user is paused, mark as lost for resume-rebuild
           // (§2.5); otherwise tear down immediately.
           if (sm.userPaused) {
-            sm.connectionLost = true;
+            this.app.lifecycle.pause("connection-lost");
           } else {
             this.app.stopSession(STOP_REASON.CONNECTION_LOST);
           }
@@ -691,7 +691,13 @@ export class WebRtcPipeline {
 
     sm.prevSession = null;
     sm.session = newSession;
-    sm.videoPaused = wasPaused;
+    // Re-establish the paused STATE on the rebuilt session via the lifecycle
+    // reason stack (replaces sm.videoPaused = wasPaused, now a derived getter).
+    // The stack persists across the handover, so 'user' is already present if the
+    // user had paused; this keeps the two in sync for any edge where the video is
+    // paused without the user reason held. resume('user') here would issue a
+    // video.play(), so we only ADD the reason when wasPaused — never remove.
+    if (wasPaused) this.app.lifecycle.pause("user");
     capture.applyVolumes(newSettings.originalVolume, newSettings.voiceVolume);
 
     if (pipeline === "realtime") {

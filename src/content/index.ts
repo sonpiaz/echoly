@@ -12,6 +12,7 @@ import {
   AD_WAIT_POLL_MS,
   DUB_LIVE_TTFA_CEILING_MS,
   DUB_SYNC_POLL_MS,
+  DUB_STANDARD_RELEASE_FLOOR_MS,
 } from "@/shared/constants";
 import type { BgToContentMessage, BgToContentResponse } from "@/shared/protocol";
 import type { HistoryTurn, StartSettings } from "@/shared/types";
@@ -30,10 +31,13 @@ import { isSubtitleFirstSession, isWebRtcSession } from "./session-manager";
 import { TOAST_PRESS_PLAY, STATUS_CONNECTING, STATUS_PREPARING_DUB, STATUS_AD_WAIT } from "@/shared/product-copy";
 import { isPipelineToastError } from "@/lib/echoly-api";
 import { createController } from "./controller";
-import { STOP_REASON, STOP_REASON_MESSAGE, type StopReason } from "./stop-reasons";
-import { bindSourceVideoPlayback } from "@/lib/rtc-media-sync";
+import {
+  STOP_REASON,
+  STOP_REASON_MESSAGE,
+  type StopReason,
+} from "./stop-reasons";
+import { bindSourceVideoPlayback, syncSourcePauseState } from "@/lib/rtc-media-sync";
 import { drainRemoteAudio, RTC_DRAIN_TIMEOUT_MS } from "@/lib/rtc-handover";
-import { shouldIgnoreSourcePlaybackEvent } from "./source-playback-guards";
 import {
   bindStandardDubPlaybackSync,
   type StandardDubPlaybackSyncHandle,
@@ -45,7 +49,9 @@ import { QuickStartLauncher } from "./launcher";
 import { setActiveAdapter } from "./media-stage";
 import { pauseSession, resumeSession } from "./pause-controller";
 import { NavigationWatcher } from "./navigation";
+import { AdWatcher } from "./ad-watcher";
 import { continueOnNewVideo } from "./auto-next";
+import { LifecycleController } from "./lifecycle";
 
 /** Extra video listeners a pipeline can opt into. */
 interface ExtraVideoListeners {
@@ -64,6 +70,13 @@ interface ExtraVideoListeners {
  */
 export class ContentApp {
   readonly sm = new SessionManager();
+  /**
+   * The single owner of video.pause()/play() + the reason-stack + the 7-state
+   * machine (SOLUTION §4). All pause/resume and direct video playback control
+   * route through here; modules subscribe to its events instead of poking flags.
+   * Stage B/C/D plug into this controller — its public API is the locked contract.
+   */
+  readonly lifecycle = new LifecycleController();
   readonly overlay: OverlayView = createOverlay();
   readonly capture: AudioCapture;
   readonly webrtc: WebRtcPipeline;
@@ -80,6 +93,10 @@ export class ContentApp {
    *  Set in initContent after construction; null until then. */
   nav: NavigationWatcher | null = null;
 
+  /** Mid-session ad watcher (Stage C). Per-session like `nav` — armed in
+   *  startSession, re-armed on auto-next restart, stopped on both stop paths. */
+  ad: AdWatcher | null = null;
+
   // F3 — source caption polling state.
   private lastSeenCaption = "";
 
@@ -91,6 +108,10 @@ export class ContentApp {
   standardDubSync: StandardDubPlaybackSyncHandle | null = null;
 
   constructor() {
+    // Wire the lifecycle controller into the SessionManager BEFORE anything else
+    // touches sm.userPaused/videoPaused/connectionLost — those are derived
+    // getters over this controller's reason stack.
+    this.sm.lifecycle = this.lifecycle;
     this.capture = new AudioCapture(this.sm, this.overlay);
     this.webrtc = new WebRtcPipeline(this);
     this.subtitleFirst = new SubtitleFirstPipeline(this);
@@ -243,28 +264,39 @@ export class ContentApp {
     extra: ExtraVideoListeners = {},
   ): void {
     this.unbindSourcePlayback?.();
-    const adapter = this.adapter;
+    // The controller owns video.pause()/play(); this is the current video.
+    this.lifecycle.setVideo(video);
     this.unbindSourcePlayback = bindSourceVideoPlayback(video, {
       onPause: () => {
-        if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
+        // Self-issued guard: if the controller itself issued this pause (start/
+        // restart buffer-wait, switching, OR the Stage-C ad pause), no-op — it
+        // isn't a user pause. (Replaces the per-session _systemPaused onPause guard.)
+        // This is the ONLY guard the AdWatcher's controller-issued ad pause needs:
+        // it pushes the 'ad' reason via lifecycle.pause('ad'), which issues a
+        // self-issued video.pause(), so the resulting DOM 'pause' no-ops here.
+        if (this.lifecycle.isSelfIssued()) return;
+        // A GENUINE user pause that the user presses during an ad must NOT be
+        // swallowed: it pushes the 'user' reason, which coexists with 'ad' on the
+        // reason stack — the video resumes only when BOTH clear. (The old
+        // shouldIgnoreSourcePlaybackEvent secondary guard dropped this real pause,
+        // so the dub un-paused on ad-end despite the user having pressed pause.)
         const sess = this.sm.session;
         if (!sess) return;
-        // Guard: if the subtitle-first driver issued this pause itself (to wait
-        // for a cue's buffer), do NOT pause the user session. _systemPaused is
-        // set synchronously BEFORE video.pause() so it is already true here.
-        if (isSubtitleFirstSession(sess) && sess._systemPaused) return;
         // Pause the dub session (no teardown) — credits stop, overlay → paused.
-        // Resuming auto-resumes the dub.
+        // Resuming auto-resumes the dub. Routes through lifecycle.pause('user').
         pauseSession(this);
       },
       onPlay: () => {
         extra.onPlayExtra?.();
-        if (shouldIgnoreSourcePlaybackEvent(adapter)) return;
+        if (this.lifecycle.isSelfIssued()) return;
+        // A genuine user play during an ad must pop the 'user' reason too (the
+        // self-issued guard already absorbs the AdWatcher's own 'ad' play).
         // Resume is synchronous + non-blocking (no resume gate). Safe to call
-        // when not paused (idempotent).
-        resumeSession(this);
+        // when not paused (idempotent). Routes through lifecycle.resume('user').
+        void resumeSession(this);
       },
       onEnded: () => {
+        console.info("[nav] source video 'ended' event fired → notifyEnded", { hasNav: this.nav != null });
         extra.onEndedBefore?.();
         // Arm a pending-next window instead of immediate teardown. If autoplay
         // navigates to the next video within ~8s, continueOnNewVideo takes over.
@@ -273,6 +305,117 @@ export class ContentApp {
       },
       onSeeked: extra.onSeeked,
     });
+  }
+
+  // ───── Ad watcher (Stage C — instant mid-session ad pause/resume) ─────────
+
+  /**
+   * (Re-)arm the AdWatcher for the current session. Called from startSession and
+   * from continueOnNewVideo (auto-next) so the observer re-attaches to the NEW
+   * video's ad-signal target (`#movie_player` is re-created across SPA navs).
+   * Idempotent-ish: stops any prior watcher first.
+   */
+  startAdWatcher(): void {
+    this.ad?.stop();
+    this.ad = new AdWatcher(this);
+    this.ad.start(
+      () => this.#enterAdPause(),
+      () => {
+        void this.#exitAdPause();
+      },
+    );
+  }
+
+  /** Tear down the AdWatcher (both stop paths + before a re-arm). Idempotent. */
+  stopAdWatcher(): void {
+    this.ad?.stop();
+    this.ad = null;
+  }
+
+  /**
+   * An ad started mid-session. Instantly pause the dub (no dub over the ad, freeze
+   * server metering) by holding the controller's 'ad' reason. The controller
+   * issues video.pause() iff the stack was empty; its self-issued guard makes the
+   * resulting onPause a no-op (so it is NOT also taken as a user pause).
+   *
+   * For WebRTC, ALSO disable the outbound sender tracks (the ad is NOT sent to the
+   * provider), pause remoteAudio, suspend the AudioContext, and POST media-pause —
+   * so SERVER METERING FREEZES. This reuses the SAME mechanism as the user-pause
+   * path (syncSourcePauseState), NOT a parallel one. effectivePaused includes 'ad',
+   * so the subtitle-first tick gate + Standard corrector quiesce automatically.
+   */
+  #enterAdPause(): void {
+    const sess = this.sm.session;
+    if (!sess) return;
+    if (this.lifecycle.isPausedFor("ad")) return;
+
+    // Hold the 'ad' reason → controller pauses the video iff the stack was empty.
+    this.lifecycle.pause("ad");
+
+    if (isWebRtcSession(sess)) {
+      // Disable sender tracks + pause remoteAudio + suspend ctx + POST media-pause
+      // (fire-and-forget) → server metering freezes. Same path the user pause uses.
+      void syncSourcePauseState(this.sm, sess, true, this.lifecycle);
+      if (sess.pipeline === "standard") {
+        // Quiesce dub-sync so it doesn't apply a stale catch-up rate on resume.
+        this.standardDubSync?.stop();
+      }
+    }
+    // subtitle-first: the 250ms #playbackTick + #runRollingRenderer already idle
+    // when effectivePaused (now includes 'ad') is true — no extra action needed.
+
+    this.overlay.setOverlayState("ad-wait");
+    this.overlay.setStatusText(STATUS_AD_WAIT);
+    this.sm.emitState({ running: true, paused: true, status: STATUS_AD_WAIT });
+  }
+
+  /**
+   * The ad ended (skip or natural end). Pop the controller's 'ad' reason → the
+   * controller issues video.play() iff NO other reason holds (e.g. a real user
+   * pause taken DURING the ad keeps the video paused — resume only when BOTH clear).
+   * Re-enable the WebRTC media plane (tracks + remoteAudio + media-resume POST) and
+   * re-anchor the dub to the restored content currentTime.
+   */
+  async #exitAdPause(): Promise<void> {
+    const sess = this.sm.session;
+    if (!sess) return;
+    if (!this.lifecycle.isPausedFor("ad")) return;
+
+    // Pop 'ad' → video.play() iff the stack becomes empty. If a user pause is also
+    // held, the video stays paused (resume only when both clear) — correct.
+    const playPromise = this.lifecycle.resume("ad");
+    playPromise.catch(() => {});
+
+    // If the user is still holding a pause, leave the overlay in its paused state;
+    // do not flip to live or re-anchor while the dub is meant to stay frozen.
+    const stillPaused = this.lifecycle.effectivePaused;
+
+    if (isWebRtcSession(sess)) {
+      // Re-enable sender tracks + remoteAudio + ctx + media-resume POST. Fire-and-
+      // forget (awaiting it would hold the video). Skip the audio re-enable while a
+      // user pause still holds — syncSourcePauseState(paused=false) would unpause
+      // remoteAudio; gate on stillPaused so a user-pause-during-ad stays silent.
+      if (!stillPaused) {
+        void syncSourcePauseState(this.sm, sess, false, this.lifecycle);
+        if (sess.pipeline === "standard") {
+          // Re-anchor the Standard drift corrector to the restored playhead.
+          this.standardDubSync?.snapPlaybackStart();
+          this.standardDubSync?.start();
+        }
+      }
+    } else if (isSubtitleFirstSession(sess) && !stillPaused) {
+      // Subtitle-first: ONE clean re-anchor at the restored content currentTime.
+      // The #onSeek ad-gate is now clear (the 'ad' reason was popped above), so
+      // reAnchor() replays the covering cue against the content clock.
+      const video = this.capture.videoEl;
+      if (video) this.subtitleFirst.reAnchor(sess, video);
+    }
+
+    if (!stillPaused) {
+      this.overlay.setOverlayState("live");
+      this.overlay.setStatusText("Translating");
+      this.sm.emitState({ running: true, paused: false, status: "Translating" });
+    }
   }
 
   // ───── Start router (token-bumped inside each pipeline) ───────────────────
@@ -286,6 +429,10 @@ export class ContentApp {
   }> {
     const { sm, capture, overlay } = this;
     if (sm.session) return { ok: false, error: "Session already running." };
+    // The previous session's terminal teardown parks the controller in `stopped`
+    // (terminal, no outgoing edges). Reset it to a clean `idle` so this session's
+    // transitions are legal again + clear any lingering pause reasons / bump epoch.
+    this.lifecycle.resetForNewSession();
     sm.settings = { ...incomingSettings };
     sm.apiBase = sm.settings.apiBase || ECHOLY_PROXY_BASE;
     sm.history = [];
@@ -366,8 +513,19 @@ export class ContentApp {
       setActiveAdapter(this.adapter);
     }
 
+    // ── Arm the mid-session AdWatcher (Stage C) ──────────────────────────────
+    // Armed BEFORE routing so it is already live when the pipeline sets sm.session
+    // (an ad can start during the WebRTC TTFA wait). It seeds #adActive from the
+    // current ad state (false after the start ad-gate above) and only reports the
+    // NEXT transition. Both handlers no-op until sm.session is set.
+    this.startAdWatcher();
+
     // ── Routing decision (run fresh after any ad-wait) ────────────────────────
-    return this._routeStart(incomingSettings, opts);
+    const routed = await this._routeStart(incomingSettings, opts);
+    // If routing failed, the session never came up — tear the AdWatcher back down
+    // (stopSession is not called on a failed start that returns {ok:false}).
+    if (!routed.ok && !sm.session) this.stopAdWatcher();
+    return routed;
   }
 
   /** Routing decision: subtitleFirst vs WebRTC. Called both by startSession and
@@ -424,6 +582,13 @@ export class ContentApp {
     const video = this.adapter.findVideo() ?? capture.findVideo();
     if (!video) return { ok: false, error: "No playable video on this page." };
     capture.videoEl = video;
+    // NOTE: the controller is NOT given this video yet. captureWithRetry() may
+    // nudge video.play() directly (capture.ts nudgePlay) to wake the media
+    // pipeline; if the controller owned the video during that nudge, the play()
+    // would bypass the reason-stack and could desync #selfIssued. We register the
+    // video with the controller JUST before the first controller-owned pause
+    // (system-buffer) below, so every pause/resume from that point routes through
+    // it and capture nudges stay outside its ownership.
     capture.bindVolumeDriftGuard(video);
     const live = capture.isLive(video);
     const wasPlaying = !video.paused;
@@ -456,11 +621,12 @@ export class ContentApp {
     // forceWebRtcStandard (no-CC live-dub fallback) also skips the pause —
     // the user keeps watching; the dub trails by its natural lag.
     if (!live && !opts?.forceWebRtcStandard) {
-      try {
-        video.pause();
-      } catch {
-        /* ignore */
-      }
+      // Hand the video to the controller NOW (after capture's direct play-nudges
+      // are done) so this system-buffer pause + its later resume route through it.
+      this.lifecycle.setVideo(video);
+      // Controller-owned system-buffer pause — held until the dub is ready and
+      // video.play() is released below (resume('system-buffer')).
+      this.lifecycle.pause("system-buffer");
       overlay.setStatusText(STATUS_CONNECTING);
     }
 
@@ -486,12 +652,11 @@ export class ContentApp {
       });
     } catch (err) {
       stream.getTracks().forEach((t) => t.stop());
+      // Build failed — release the system-buffer pause so the video resumes
+      // (resume plays iff the reason stack is now empty; idempotent if already
+      // cleared). Only meaningful when we actually paused above (!live && playing).
       if (!live && wasPlaying) {
-        try {
-          video.play().catch(() => {});
-        } catch {
-          /* ignore */
-        }
+        void this.lifecycle.resume("system-buffer");
       }
       overlay.removeOverlay();
       if (isPipelineToastError(err) && err.expiryLike) {
@@ -513,12 +678,9 @@ export class ContentApp {
       } catch {
         /* ignore */
       }
+      // Release the system-buffer pause (no-op if stopSession already cleared it).
       if (!live && wasPlaying) {
-        try {
-          video.play().catch(() => {});
-        } catch {
-          /* ignore */
-        }
+        void this.lifecycle.resume("system-buffer");
       }
       overlay.removeOverlay();
       return { ok: false, error: "Cancelled before connect completed." };
@@ -541,7 +703,19 @@ export class ContentApp {
     overlay.syncFromSettings(settings);
     if (settings.showSource) this.startCaptionPoll();
 
-    this.bindCommonVideoListeners(video, newSession);
+    this.bindCommonVideoListeners(video, newSession, {
+      onSeeked: () => {
+        // Standard-VOD only: the dub MediaStream cannot seek, so on a source
+        // seek the drift-corrector's anchors (videoAnchor/dubAnchor) become
+        // stale and it would ramp playbackRate to "catch up" a 60s jump it can
+        // never close → runaway desync. Re-anchor to the new playhead instead
+        // (snapPlaybackStart resets anchors + rate=1; next tick re-bootstraps
+        // from the current video/dub positions). Live has no sync engine → no-op.
+        if (!this.capture.isLive(video)) {
+          this.standardDubSync?.snapPlaybackStart();
+        }
+      },
+    });
 
     // VOD: SF6 already paused the video. Realtime → ICE + ms align; Standard →
     // TTFA gate + adaptive sync loop.
@@ -607,7 +781,16 @@ export class ContentApp {
         // ── Normal Standard-VOD path (caption-driven, video was paused above) ─
         this.beginStandardDubSync(video);
         overlay.setStatusText(STATUS_PREPARING_DUB);
-        await this.standardDubSync!.waitForFirstDub();
+        // Stage D (SOLUTION §3.4): release video.play() as soon as the first dub
+        // resolves OR a short release-floor elapses — whichever is FIRST — instead
+        // of freezing the video for the full TTFA. waitForFirstDub() still caps at
+        // DUB_TTFA_GATE_MS (the ABSOLUTE cap); the floor just shortens the common
+        // case. After release, bindStandardDubPlaybackSync ramps playbackRate so
+        // the (possibly slightly-behind) dub catches up — no hard freeze.
+        await Promise.race([
+          this.standardDubSync!.waitForFirstDub(),
+          new Promise((r) => setTimeout(r, DUB_STANDARD_RELEASE_FLOOR_MS)),
+        ]);
         if (token !== sm.pageToken) {
           return { ok: false, error: "Cancelled before play." };
         }
@@ -620,7 +803,8 @@ export class ContentApp {
           }
         }
         try {
-          await video.play();
+          // Release the SF6 system-buffer pause now that the first dub is ready.
+          await this.lifecycle.resume("system-buffer");
           if (this.standardDubSync) {
             this.standardDubSync.snapPlaybackStart();
             this.standardDubSync.start();
@@ -645,7 +829,8 @@ export class ContentApp {
           return { ok: false, error: "Cancelled before play." };
         }
         try {
-          await video.play();
+          // Release the SF6 system-buffer pause once the realtime dub is aligned.
+          await this.lifecycle.resume("system-buffer");
           // C2: first dub has arrived — now flip the overlay to "live".
           overlay.setOverlayState("live");
           overlay.setStatusText("Translating");
@@ -664,12 +849,31 @@ export class ContentApp {
   // ───── Universal teardown (bumps token FIRST) ─────────────────────────────
 
   stopSession(reason: StopReason = STOP_REASON.DEFAULT): void {
+    console.warn("[session] stopSession called", { reason, hasSession: this.sm.session != null }, new Error("stop-trace").stack);
+
+    // stopSession is ALWAYS a full, terminal teardown. There is no continuable
+    // server-stop signal: CONTENT_STOP is only ever the popup Stop or the
+    // background coordinator's authoritative stop() (both terminal), and the
+    // video-end boundary does NOT stop the session (onEnded → nav.notifyEnded()
+    // keeps it alive so the URL-poll drives continueOnNewVideo for auto-next).
     const { sm, capture } = this;
     this.stopStandardDubSync();
-    sm.videoPaused = false;
-    sm.userPaused = false;
-    sm.connectionLost = false;
+    // Terminal: drop every pause reason WITHOUT issuing a video.play() — the
+    // teardown below owns the video from here (clearReasons replaces the old
+    // sm.videoPaused/userPaused/connectionLost = false resets). Bump the epoch
+    // so any in-flight async work supersedes itself.
+    this.lifecycle.clearReasons();
+    this.lifecycle.bumpEpoch();
+    // Park the controller in a terminal state so the NEXT session starts from a
+    // clean 'idle' (resetForNewSession) instead of a stuck dubbing/paused/switching
+    // state that would make the next session's transitions throw (dev)/no-op (prod).
+    // `stopping`/`stopped` are legal from EVERY non-terminal state.
+    if (this.lifecycle.state !== "stopped") {
+      if (this.lifecycle.state !== "stopping") this.lifecycle.transition("stopping");
+      this.lifecycle.transition("stopped");
+    }
     this.nav?.stop();
+    this.stopAdWatcher();
     sm.pageToken += 1;
     sm.clearSessionTimer();
     sm.stopHeartbeat();
@@ -826,9 +1030,10 @@ export class ContentApp {
     setActiveAdapter(null);
     this.overlay.removeOverlay();
     sm.emitState({ running: false, paused: false, status: "Stopped" });
-    if (reason !== STOP_REASON.BACKEND_STOP) {
-      sm.emitEnded(STOP_REASON_MESSAGE[reason]);
-    }
+    // Surface the end message for every terminal reason. (Previously BACKEND_STOP
+    // was skipped because the backend had already driven the stop; that signal no
+    // longer reaches stopSession — CONTENT_STOP is a terminal USER_STOP.)
+    sm.emitEnded(STOP_REASON_MESSAGE[reason]);
     // Session ended — re-show the on-page launcher if still eligible.
     this.launcher?.refresh();
   }
@@ -985,7 +1190,12 @@ export function initContent(): void {
             break;
           }
           case "CONTENT_STOP":
-            app.stopSession(STOP_REASON.BACKEND_STOP);
+            // CONTENT_STOP is sent ONLY by the popup (user clicks Stop) and the
+            // background session-coordinator's authoritative stop() — both terminal.
+            // There is no continuable server-stop signal, so this is always a full,
+            // terminal teardown (USER_STOP). Realtime/Standard auto-next is driven
+            // by the nav URL-poll keep-alive (continueOnNewVideo), NOT by a stop.
+            app.stopSession(STOP_REASON.USER_STOP);
             sendResponse({ ok: true } satisfies BgToContentResponse["CONTENT_STOP"]);
             break;
           case "CONTENT_UPDATE_SETTINGS":
