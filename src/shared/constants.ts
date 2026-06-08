@@ -71,6 +71,15 @@ export const DUB_STANDARD_RELEASE_FLOOR_MS = 1_500;
 export const DUB_LIVE_TTFA_CEILING_MS = 30_000;
 /** Poll interval while holding in the "ad-wait" state for a YouTube ad to end. */
 export const AD_WAIT_POLL_MS = 250;
+/** onEnded gate: ignore a source-video `ended` fired within this window after an
+ *  ad ended (the ad→content src-swap fires a spurious `ended`). See Fix A. */
+export const AD_END_GRACE_MS = 1500;
+/** onEnded gate (secondary): a finite-duration video is only a genuine end when
+ *  currentTime is within this many seconds of duration. */
+export const VIDEO_END_EPSILON_S = 1.5;
+/** nav-stop: defer the teardown on a transient non-watch URL by this window and
+ *  re-check the tab's URL at expiry (a watch→ad→watch flicker must not stop). */
+export const NAV_STOP_RECHECK_MS = 700;
 /** Max ms to wait for the media-gate POST / AudioContext.resume() before proceeding anyway (soft-fail). */
 export const MEDIA_GATE_TIMEOUT_MS = 1500;
 /** Realtime VOD only — post-ICE align before play (no adaptive sync). */

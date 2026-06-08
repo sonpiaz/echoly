@@ -478,6 +478,7 @@ describe("syncFromSettings", () => {
     ov.syncFromSettings({
       tier: TIER_REALTIME,
       targetLanguage: "ja",
+      sourceLanguage: "auto",
       realtimeVoice: "marin",
       standardVoice: "English_magnetic_voiced_man",
       originalVolume: 42,
@@ -527,6 +528,7 @@ describe("syncFromSettings", () => {
     ov.syncFromSettings({
       tier: TIER_REALTIME,
       targetLanguage: "vi",
+      sourceLanguage: "auto",
       realtimeVoice: "marin",
       standardVoice: "English_magnetic_voiced_man",
       originalVolume: 18,

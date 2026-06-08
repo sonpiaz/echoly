@@ -25,21 +25,53 @@ export function getYouTubeVideoId(href = location.href): string | null {
 
 // ─── Caption track selection ──────────────────────────────────────────────────
 
+/**
+ * Select the best SOURCE caption track for dubbing.
+ *
+ * `sourcePref` distinguishes two modes:
+ *   • `undefined` (AUTO) — the user left "Auto-detect": pick the video's ORIGINAL
+ *     spoken-language track (ASR-first), avoiding the output language.
+ *   • a BCP-47 code (EXPLICIT) — the user chose a specific source language: a track
+ *     in that language MUST win, even over the ASR/original track.
+ *
+ * Scoring:
+ *   +300  code matches an EXPLICIT sourcePref — the user's choice wins decisively
+ *   +100  ASR (auto-captions) = the original spoken-language track
+ *   +20   code is "en" — safe fallback source
+ *   hard  code matches avoidLang primary subtag → score −1000 (NEVER the output lang)
+ *
+ * Returns `null` when:
+ *   - tracks is empty, OR
+ *   - the highest-scoring track's language IS the avoid/target language
+ *     (prevents target→target dubbing even when it is the only track).
+ */
 export function pickCaptionTrack(
   tracks: Array<{ languageCode?: string; kind?: string; baseUrl?: string }>,
-  targetLang: string,
+  sourcePref?: string,
+  avoidLang?: string,
 ): (typeof tracks)[number] | null {
   if (!Array.isArray(tracks) || tracks.length === 0) return null;
-  const targetCode = (targetLang || "").toLowerCase().split("-")[0];
+  // null = AUTO (no explicit choice). A defined value = the user's explicit source.
+  const sourceCode = sourcePref ? sourcePref.toLowerCase().split("-")[0] : null;
+  const avoidCode = avoidLang ? avoidLang.toLowerCase().split("-")[0] : null;
   const score = (t: (typeof tracks)[number]) => {
     const code = (t.languageCode || "").toLowerCase().split("-")[0];
+    if (avoidCode && code === avoidCode) return -1000; // hard avoid the output language
     let s = 0;
-    if (code === targetCode) s += 100;
-    if (code === "en") s += 50;
-    if (!t.kind || t.kind !== "asr") s += 10;
+    if (sourceCode && code === sourceCode) s += 300; // EXPLICIT source choice wins over ASR
+    if (t.kind === "asr") s += 100;                  // original spoken language
+    if (code === "en") s += 20;                      // English is a safe default source
     return s;
   };
-  return [...tracks].sort((a, b) => score(b) - score(a))[0] ?? null;
+  const best = [...tracks].sort((a, b) => score(b) - score(a))[0] ?? null;
+  if (!best) return null;
+  // Robustness: if the best remaining track IS the target/avoid language, return
+  // null so the caller falls back (audio-capture) instead of dubbing target→target.
+  if (avoidCode) {
+    const bestCode = (best.languageCode || "").toLowerCase().split("-")[0];
+    if (bestCode === avoidCode) return null;
+  }
+  return best;
 }
 
 // ─── json3 event parser ───────────────────────────────────────────────────────

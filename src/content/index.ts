@@ -13,6 +13,8 @@ import {
   DUB_LIVE_TTFA_CEILING_MS,
   DUB_SYNC_POLL_MS,
   DUB_STANDARD_RELEASE_FLOOR_MS,
+  AD_END_GRACE_MS,
+  VIDEO_END_EPSILON_S,
 } from "@/shared/constants";
 import type { BgToContentMessage, BgToContentResponse } from "@/shared/protocol";
 import type { HistoryTurn, StartSettings } from "@/shared/types";
@@ -296,6 +298,45 @@ export class ContentApp {
         void resumeSession(this);
       },
       onEnded: () => {
+        // ── Ad-boundary guard (Fix A) ──────────────────────────────────────────
+        // YouTube plays ads through the SAME <video> element. When the ad clip
+        // ends it fires `ended` before restoring the content video — this is NOT
+        // a genuine content-video end. Suppress notifyEnded() in two cases:
+        //
+        //   PRIMARY guards (catch the ad-boundary ended):
+        //   1. An ad is still active (adActive===true).
+        //   2. An ad just ended within AD_END_GRACE_MS (lastAdEndAt guard).
+        //      lastAdEndAt is set BEFORE #onAdEnd fires (ad-watcher.ts) so it is
+        //      already non-null when this callback runs synchronously.
+        //
+        //   SECONDARY guard (seek-to-end false positive, independent of ads):
+        //   3. The video element reports a playhead clearly not at the actual end
+        //      on a finite-duration video (seek near end then play fires ended).
+        //      NOTE: this does NOT catch the ad-boundary case — during a YouTube
+        //      ad the <video> reports the ad's clock so currentTime ≈ duration at
+        //      ad-end; guards 1 & 2 are what suppress that scenario.
+        if (this.ad?.adActive === true) {
+          console.info("[nav] ad-boundary 'ended' ignored (not a real video end)", { reason: "adActive" });
+          return;
+        }
+        if (this.ad?.lastAdEndAt != null && Date.now() - this.ad.lastAdEndAt < AD_END_GRACE_MS) {
+          console.info("[nav] ad-boundary 'ended' ignored (not a real video end)", { reason: "lastAdEndAt grace" });
+          return;
+        }
+        // Secondary: if we have the video element in scope, filter a seek-to-near-end
+        // that isn't at the actual boundary (independent of ad-end scenario).
+        if (
+          video.duration != null &&
+          Number.isFinite(video.duration) &&
+          video.duration > 0 &&
+          video.currentTime < video.duration - VIDEO_END_EPSILON_S
+        ) {
+          console.info("[nav] 'ended' ignored (currentTime not at video end)", {
+            currentTime: video.currentTime,
+            duration: video.duration,
+          });
+          return;
+        }
         console.info("[nav] source video 'ended' event fired → notifyEnded", { hasNav: this.nav != null });
         extra.onEndedBefore?.();
         // Arm a pending-next window instead of immediate teardown. If autoplay
@@ -333,10 +374,18 @@ export class ContentApp {
   }
 
   /**
-   * An ad started mid-session. Instantly pause the dub (no dub over the ad, freeze
-   * server metering) by holding the controller's 'ad' reason. The controller
-   * issues video.pause() iff the stack was empty; its self-issued guard makes the
-   * resulting onPause a no-op (so it is NOT also taken as a user pause).
+   * An ad started mid-session. Instantly silence the dub (no dub over the ad, freeze
+   * server metering) by holding the controller's 'ad' reason.
+   *
+   * IMPORTANT — the 'ad' reason must NOT pause the source <video> (holdReason, not
+   * pause): YouTube plays the ad in the SAME <video> element as the content, so
+   * pausing it would freeze the AD itself → the ad never ends → isAdPlaying() stays
+   * true → onAdEnd / #exitAdPause never fire → the dub stays silenced forever. This
+   * was the "mất tiếng luôn khi seek vào ad" deadlock: a seek-induced ad (now
+   * detected promptly via AdWatcher.reseed) entered ad-pause, froze the ad, and the
+   * dub never recovered. The dub is silenced purely via effectivePaused (the
+   * subtitle-first #playbackTick Step-2 gate + Standard corrector both key off it);
+   * the ad plays through and ends normally.
    *
    * For WebRTC, ALSO disable the outbound sender tracks (the ad is NOT sent to the
    * provider), pause remoteAudio, suspend the AudioContext, and POST media-pause —
@@ -349,8 +398,9 @@ export class ContentApp {
     if (!sess) return;
     if (this.lifecycle.isPausedFor("ad")) return;
 
-    // Hold the 'ad' reason → controller pauses the video iff the stack was empty.
-    this.lifecycle.pause("ad");
+    // Hold the 'ad' reason WITHOUT pausing the <video> — the ad shares the element
+    // and must play through to end (see the deadlock note above).
+    this.lifecycle.holdReason("ad");
 
     if (isWebRtcSession(sess)) {
       // Disable sender tracks + pause remoteAudio + suspend ctx + POST media-pause
@@ -705,6 +755,12 @@ export class ContentApp {
 
     this.bindCommonVideoListeners(video, newSession, {
       onSeeked: () => {
+        // Re-seed the ad watcher so a seek-induced mid-roll ad is detected at
+        // the seek edge (not up to 250ms later on the next poll tick). The
+        // MutationObserver stays connected — #movie_player is NOT re-created on
+        // a same-page seek; reseed() just re-reads the live ad state and
+        // edge-fires the matching callback if it changed. See Fix C.
+        this.ad?.reseed();
         // Standard-VOD only: the dub MediaStream cannot seek, so on a source
         // seek the drift-corrector's anchors (videoAnchor/dubAnchor) become
         // stale and it would ramp playbackRate to "catch up" a 60s jump it can
@@ -849,7 +905,18 @@ export class ContentApp {
   // ───── Universal teardown (bumps token FIRST) ─────────────────────────────
 
   stopSession(reason: StopReason = STOP_REASON.DEFAULT): void {
-    console.warn("[session] stopSession called", { reason, hasSession: this.sm.session != null }, new Error("stop-trace").stack);
+    // Genuine-error reasons (server/connection failures) retain a stack trace to
+    // help diagnose unexpected teardowns. Normal reasons (user stop, video end,
+    // navigation, etc.) log at info level — no alarming Error stack in the console.
+    const isErrorReason =
+      reason === STOP_REASON.SERVER_ERROR ||
+      reason === STOP_REASON.CONNECTION_LOST ||
+      reason === STOP_REASON.HANDOVER_FAILED;
+    if (isErrorReason) {
+      console.warn("[session] stopSession called", { reason, hasSession: this.sm.session != null }, new Error("stop-trace").stack);
+    } else {
+      console.info("[session] stopSession", { reason });
+    }
 
     // stopSession is ALWAYS a full, terminal teardown. There is no continuable
     // server-stop signal: CONTENT_STOP is only ever the popup Stop or the
@@ -1060,6 +1127,8 @@ export class ContentApp {
     const langOrVoiceChanged =
       ("targetLanguage" in newSettings &&
         newSettings.targetLanguage !== prev.targetLanguage) ||
+      ("sourceLanguage" in newSettings &&
+        newSettings.sourceLanguage !== prev.sourceLanguage) ||
       ("realtimeVoice" in newSettings &&
         newSettings.realtimeVoice !== prev.realtimeVoice) ||
       ("standardVoice" in newSettings &&

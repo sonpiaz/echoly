@@ -73,9 +73,19 @@ export const youtubeAdapter: PlatformAdapter = {
   async fetchCaptions(opts: {
     videoId: string;
     preferLang?: string;
+    avoidLang?: string;
     signal: AbortSignal;
   }): Promise<CaptionFetchResult | null> {
-    return fetchYouTubeCaptionsWithSettle(opts.videoId, opts.preferLang ?? "en", opts.signal);
+    // Pass preferLang AS-IS: `undefined` means "auto" (pick the original/ASR
+    // track); a defined code is the user's explicit source choice and must win.
+    // Do NOT default to "en" here — that would erase the auto/explicit distinction.
+    return fetchYouTubeCaptionsWithSettle(
+      opts.videoId,
+      opts.preferLang,
+      opts.signal,
+      undefined,
+      opts.avoidLang,
+    );
   },
 
   readLiveCaptionText(): string | null {

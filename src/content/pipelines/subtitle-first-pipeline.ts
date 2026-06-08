@@ -153,7 +153,10 @@ export class SubtitleFirstPipeline {
       try {
         captionResult = await adapter.fetchCaptions({
           videoId,
-          preferLang: sm.settings.targetLanguage,
+          preferLang: (sm.settings.sourceLanguage && sm.settings.sourceLanguage !== "auto")
+            ? sm.settings.sourceLanguage
+            : undefined,
+          avoidLang: sm.settings.targetLanguage,
           signal: abortController.signal,
         });
       } catch {
@@ -173,7 +176,12 @@ export class SubtitleFirstPipeline {
       // ships standard <track> elements even when the adapter's fetchCaptions returns
       // null/empty (Udemy, generic). Uses the same abort signal already in scope.
       const html5 = await fetchHtml5TextTrackCaptions(video, {
-        preferLang: sm.settings.targetLanguage,
+        // Source preference, NOT the target/output language (Fix D). "auto" → let
+        // the fallback pick the first available <track>.
+        preferLang:
+          sm.settings.sourceLanguage && sm.settings.sourceLanguage !== "auto"
+            ? sm.settings.sourceLanguage
+            : undefined,
         signal: abortController.signal,
       });
       if (html5?.captions.length) {
@@ -495,7 +503,10 @@ export class SubtitleFirstPipeline {
       try {
         captionResult = await adapter.fetchCaptions({
           videoId: newVideoId,
-          preferLang: settings.targetLanguage,
+          preferLang: (settings.sourceLanguage && settings.sourceLanguage !== "auto")
+            ? settings.sourceLanguage
+            : undefined,
+          avoidLang: settings.targetLanguage,
           signal: abortController.signal,
         });
       } catch {
@@ -512,7 +523,11 @@ export class SubtitleFirstPipeline {
       // B3: pipeline-level HTML5 text-track fallback in restart() — same rescue
       // as in start() so auto-next videos with <track> elements are not abandoned.
       const html5 = await fetchHtml5TextTrackCaptions(video, {
-        preferLang: settings.targetLanguage,
+        // Source preference, NOT the target/output language (Fix D).
+        preferLang:
+          settings.sourceLanguage && settings.sourceLanguage !== "auto"
+            ? settings.sourceLanguage
+            : undefined,
         signal: abortController.signal,
       });
       if (html5?.captions.length) {
@@ -1037,6 +1052,11 @@ export class SubtitleFirstPipeline {
    * 'ad' reason is popped, so this gate is clear by then).
    */
   #onSeek(s: SubtitleFirstSession, video: HTMLVideoElement): void {
+    // Re-seed the AdWatcher FIRST so the ad gate below sees fresh state.
+    // reseed() may synchronously fire onAdStart → push the 'ad' reason, making
+    // the isPausedFor gate correctly no-op the rest of the seek handler when a
+    // seek triggers a mid-roll ad (Fix C, subtitle-first path).
+    this.app.ad?.reseed();
     if (this.app.lifecycle.isPausedFor("ad")) return;
     const newT = video.currentTime;
     // The anchor is the cue #firstPlayableCueAt would start on: the cue COVERING

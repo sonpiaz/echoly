@@ -207,28 +207,60 @@ describe("isQuotaOrTier — regression guard (402-only)", () => {
   });
 });
 
-// ── original usagePatchFromServerError tests (unchanged) ─────────────────
+// ── usagePatchFromServerError — unified pool patch (credit-unify) ─────────
 
-describe("usagePatchFromServerError", () => {
-  it("maps standard 402 credit fields", () => {
+describe("usagePatchFromServerError — unified pool patch (A10)", () => {
+  it("maps 402 to unified usage.{used, cap, remaining} — mode is not a routing dimension", () => {
     const parsed: ParsedServerError = {
       status: 402,
       code: "quota_exhausted",
       user: "Quota exhausted",
       isQuotaOrTier: true,
       kind: "quota",
-      mode: TIER_STANDARD,
+      mode: TIER_STANDARD, // mode is informational only; patch goes to unified pool
       usedCredits: 9500,
       capCredits: 10000,
     };
     expect(usagePatchFromServerError(parsed)).toEqual({
-      standard: 9500,
-      standardCap: 10000,
-      standardRemaining: 500,
+      used: 9500,
+      cap: 10000,
+      remaining: 500,
     });
   });
 
-  it("returns null for non-402", () => {
+  it("unified patch is identical regardless of mode field (realtime 402 same pool)", () => {
+    const parsed: ParsedServerError = {
+      status: 402,
+      code: "quota_exhausted",
+      user: "Quota exhausted",
+      isQuotaOrTier: true,
+      kind: "quota",
+      usedCredits: 17000,
+      capCredits: 17000,
+    };
+    expect(usagePatchFromServerError(parsed)).toEqual({
+      used: 17000,
+      cap: 17000,
+      remaining: 0,
+    });
+  });
+
+  it("includes resetsAt when present", () => {
+    const parsed: ParsedServerError = {
+      status: 402,
+      code: "quota_exhausted",
+      user: "Quota exhausted",
+      isQuotaOrTier: true,
+      kind: "quota",
+      usedCredits: 500,
+      capCredits: 500,
+      resetsAt: "2026-07-01T00:00:00.000Z",
+    };
+    const patch = usagePatchFromServerError(parsed);
+    expect(patch?.resetsAt).toBe("2026-07-01T00:00:00.000Z");
+  });
+
+  it("returns null for non-402 (isQuotaOrTier=false)", () => {
     expect(
       usagePatchFromServerError({
         status: 500,

@@ -80,6 +80,7 @@ function cachePopupState(s: Partial<State>): void {
     paused: s.paused,
     tier: s.tier,
     targetLanguage: s.targetLanguage,
+    sourceLanguage: s.sourceLanguage,
     realtimeVoice: s.realtimeVoice,
     standardVoice: s.standardVoice,
     originalVolume: s.originalVolume,
@@ -153,6 +154,7 @@ export function initPopup(): void {
   const tierSelect = $("tier") as HTMLSelectElement;
   const voiceSelect = $("voice") as HTMLSelectElement;
   const langSelect = $("lang") as HTMLSelectElement;
+  const srcLangSelect = $("src-lang") as HTMLSelectElement;
   const toggleBtn = $("toggle") as HTMLButtonElement;
   const statusEl = $("status") as HTMLElement;
   const originalVolumeInput = $("originalVolume") as HTMLInputElement;
@@ -203,11 +205,6 @@ export function initPopup(): void {
   const umStdCap = $("um-std-cap");
   const umStdFill = $("um-std-fill");
   const umStdNumbers = umStdUsed?.parentElement;
-  const umRtBlock = $("um-rt");
-  const umRtUsed = $("um-rt-used");
-  const umRtCap = $("um-rt-cap");
-  const umRtFill = $("um-rt-fill");
-  const umRtNumbers = umRtUsed?.parentElement;
 
   // ── Advanced V2 controls (server-authoritative; popup is a dispatcher) ─
   const advReset = $("advResetBtn") as HTMLButtonElement | null;
@@ -230,6 +227,7 @@ export function initPopup(): void {
     paused: false,
     tier: DEFAULT_TRANSLATION_TIER,
     targetLanguage: "vi",
+    sourceLanguage: "auto",
     realtimeVoice: "marin",
     standardVoice: "English_magnetic_voiced_man",
     originalVolume: 18,
@@ -288,6 +286,23 @@ export function initPopup(): void {
       opt.value = code;
       opt.textContent = name;
       langSelect.appendChild(opt);
+    }
+  }
+
+  function populateSourceLanguages() {
+    if (!srcLangSelect) return;
+    const list = state.languagePicker ?? [...offlineLanguagePicker()];
+    srcLangSelect.replaceChildren();
+    // Prepend the "Auto-detect" sentinel first.
+    const autoOpt = document.createElement("option");
+    autoOpt.value = "auto";
+    autoOpt.textContent = "Auto-detect";
+    srcLangSelect.appendChild(autoOpt);
+    for (const [code, name] of list) {
+      const opt = document.createElement("option");
+      opt.value = code;
+      opt.textContent = name;
+      srcLangSelect.appendChild(opt);
     }
   }
   function repopulateVoices(tier: TranslationTier | string, preferredVoiceId?: string) {
@@ -412,10 +427,26 @@ export function initPopup(): void {
     if (tgtName) tgtName.textContent = resolveLangName(c, state.languageNames);
     if (tgtFlag) tgtFlag.textContent = c.toUpperCase();
   }
+  function renderSourceLang(code: string) {
+    const srcFlag = $("src-flag");
+    const srcName = $("src-name");
+    if (code === "auto" || !code) {
+      if (srcFlag) srcFlag.textContent = "??";
+      if (srcName) srcName.textContent = "Auto-detect";
+    } else {
+      const c = code.slice(0, 2);
+      if (srcFlag) srcFlag.textContent = c.toUpperCase();
+      if (srcName) srcName.textContent = resolveLangName(c, state.languageNames);
+    }
+  }
   function updateLiveSummary() {
     const code = (state.targetLanguage || "vi").slice(0, 2);
     if (liveTargetFlag) liveTargetFlag.textContent = code.toUpperCase();
-    if (liveSrcFlag) liveSrcFlag.textContent = "??";
+    if (liveSrcFlag) {
+      const sl = state.sourceLanguage;
+      liveSrcFlag.textContent =
+        !sl || sl === "auto" ? "??" : sl.slice(0, 2).toUpperCase();
+    }
     const voiceName = lookupVoiceLabel();
     if (liveVoiceName) liveVoiceName.textContent = voiceName;
     if (liveVoiceAvatar) {
@@ -449,19 +480,11 @@ export function initPopup(): void {
   function renderUsageHint(tier: string | undefined,
                           usage: State["usage"] | undefined) {
     const caps = capsForUsage(tier, usage ?? undefined);
-    const used = usage ?? { standard: 0, realtime: 0 };
-    // Show Realtime remaining only for plans that may use Realtime (Max).
-    // Gate on the canonical plan rule, not on whatever cap the server sent —
-    // the server may echo a non-zero realtime cap for Free/Pro.
-    const isRt = canUseRealtime(tier) && caps.rt > 0;
-    const remaining = isRt
-      ? (usage?.realtimeRemaining ??
-        Math.max(0, caps.rt - used.realtime))
-      : (usage?.standardRemaining ??
-        Math.max(0, caps.std - used.standard));
+    const usedCredits = usage?.used ?? 0;
+    const remaining = usage?.remaining ?? Math.max(0, caps.cap - usedCredits);
     if (usageHintAmount) usageHintAmount.textContent = `${fmtCredits(remaining)} credits`;
     if (usageHintLabel)
-      usageHintLabel.textContent = isRt ? "Realtime left this month" : "Standard left this month";
+      usageHintLabel.textContent = "Credits left this month";
     if (usageHintReset) usageHintReset.textContent = resetsAtLabel(usage?.resetsAt);
   }
 
@@ -488,24 +511,13 @@ export function initPopup(): void {
     }
 
     const caps = capsForUsage(user.tier, usage ?? undefined);
-    const u = usage ?? { standard: 0, realtime: 0 };
-    // Render meters in credits: "4,200 / 10,000 credits"
-    if (umStdUsed) umStdUsed.textContent = fmtCredits(u.standard);
-    if (umStdCap)  umStdCap.textContent  = `${fmtCredits(caps.std)} credits`;
-    if (umStdFill) (umStdFill as HTMLElement).style.width = `${fillPercent(u.standard, caps.std)}%`;
+    const usedCredits = usage?.used ?? 0;
+    // Render unified credits meter: "4,200 / 10,000 credits"
+    if (umStdUsed) umStdUsed.textContent = fmtCredits(usedCredits);
+    if (umStdCap)  umStdCap.textContent  = `${fmtCredits(caps.cap)} credits`;
+    if (umStdFill) (umStdFill as HTMLElement).style.width = `${fillPercent(usedCredits, caps.cap)}%`;
     if (umStdNumbers)
-      (umStdNumbers as HTMLElement).dataset.low = meterLevel(u.standard, caps.std) !== "ok" ? "true" : "false";
-    // Realtime is a Max-only feature: gate the meter row on the canonical plan
-    // rule, not on the server-sent cap (which may be non-zero for Free/Pro).
-    const showRt = canUseRealtime(user.tier) && caps.rt > 0;
-    if (umRtBlock) umRtBlock.hidden = !showRt;
-    if (showRt) {
-      if (umRtUsed) umRtUsed.textContent = fmtCredits(u.realtime);
-      if (umRtCap)  umRtCap.textContent  = `${fmtCredits(caps.rt)} credits`;
-      if (umRtFill) (umRtFill as HTMLElement).style.width = `${fillPercent(u.realtime, caps.rt)}%`;
-      if (umRtNumbers)
-        (umRtNumbers as HTMLElement).dataset.low = meterLevel(u.realtime, caps.rt) !== "ok" ? "true" : "false";
-    }
+      (umStdNumbers as HTMLElement).dataset.low = meterLevel(usedCredits, caps.cap) !== "ok" ? "true" : "false";
   }
 
   // ── Account-state decider ─────────────────────────────────────────────
@@ -579,6 +591,17 @@ export function initPopup(): void {
     }
     langSelect.value = effectiveLang;
     renderTargetLang(effectiveLang);
+
+    const effectiveSrcLang = state.sourceLanguage ?? "auto";
+    if (srcLangSelect) {
+      srcLangSelect.value = effectiveSrcLang;
+      // If the value didn't stick (option not yet populated), re-populate first.
+      if (srcLangSelect.value !== effectiveSrcLang) {
+        populateSourceLanguages();
+        srcLangSelect.value = effectiveSrcLang;
+      }
+    }
+    renderSourceLang(effectiveSrcLang);
 
     const voiceTierKey = `${tierSelect.value}:${state.standardVoice ?? ""}:${state.realtimeVoice ?? ""}:${state.standardVoices?.length ?? 0}`;
     if (voiceTierKey !== lastVoiceTierKey) {
@@ -728,6 +751,7 @@ export function initPopup(): void {
     return {
       tier,
       targetLanguage: langSelect.value,
+      sourceLanguage: srcLangSelect?.value ?? "auto",
       [voiceKey]: voiceSelect.value,
       originalVolume: Number(originalVolumeInput.value),
       voiceVolume: Number(voiceVolumeInput.value),
@@ -859,6 +883,11 @@ export function initPopup(): void {
     renderTargetLang(langSelect.value);
     void pushSettings();
   });
+  srcLangSelect?.addEventListener("change", () => {
+    state.sourceLanguage = srcLangSelect.value;
+    renderSourceLang(srcLangSelect.value);
+    void pushSettings();
+  });
   showSourceCheckbox.addEventListener("change", () => void pushSettings());
   showTargetCaptionsCheckbox.addEventListener("change", () => void pushSettings());
   originalVolumeInput.addEventListener("input", onVolumeChange);
@@ -961,6 +990,13 @@ export function initPopup(): void {
       iconHtml: `<span class="dropdown-lang-flag">${(o.value || "??").slice(0, 2).toUpperCase()}</span>`,
     }));
   }
+  function srcLangItems(): DropdownItem[] {
+    return Array.from(srcLangSelect.options).map((o) => ({
+      value: o.value,
+      primary: o.textContent || o.value,
+      iconHtml: `<span class="dropdown-lang-flag">${(o.value === "auto" ? "??" : (o.value || "??").slice(0, 2)).toUpperCase()}</span>`,
+    }));
+  }
   const dropdowns: Record<string, DropdownHandle> = {};
   const tierTrigger = $("tier-trigger");
   if (tierTrigger) dropdowns.tier = attachDropdown({
@@ -976,6 +1012,11 @@ export function initPopup(): void {
   if (langTrigger) dropdowns.lang = attachDropdown({
     trigger: langTrigger, select: langSelect, items: langItems,
     align: "right", panelClass: "dropdown-panel--lang",
+  });
+  const srcTrigger = $("src-trigger");
+  if (srcTrigger && srcLangSelect) dropdowns.src = attachDropdown({
+    trigger: srcTrigger, select: srcLangSelect, items: srcLangItems,
+    align: "left", panelClass: "dropdown-panel--lang",
   });
 
   // ── Account menu popover ──────────────────────────────────────────────
@@ -1180,6 +1221,7 @@ export function initPopup(): void {
   document.body.dataset.loadingShell = "main";
 
   populateLanguages();
+  populateSourceLanguages();
   repopulateVoices(
     state.tier!,
     state.tier === TIER_STANDARD ? state.standardVoice : state.realtimeVoice,
@@ -1187,6 +1229,7 @@ export function initPopup(): void {
   renderTierRow();
   renderVoiceRow();
   renderTargetLang(state.targetLanguage ?? "vi");
+  renderSourceLang(state.sourceLanguage ?? "auto");
   setSliderFill(originalVolumeInput);
   setSliderFill(voiceVolumeInput);
 

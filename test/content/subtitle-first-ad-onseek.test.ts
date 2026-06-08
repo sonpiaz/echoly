@@ -26,13 +26,19 @@ function uninstallChrome() {
   (globalThis as { chrome?: unknown }).chrome = undefined;
 }
 
-/** A minimal real ContentApp facade: lifecycle + sm + capture(videoEl). */
-function makeApp(lifecycle: LifecycleController, sm: SessionManager, video: HTMLVideoElement) {
+/** A minimal real ContentApp facade: lifecycle + sm + capture(videoEl) + optional ad. */
+function makeApp(
+  lifecycle: LifecycleController,
+  sm: SessionManager,
+  video: HTMLVideoElement,
+  ad?: { reseed: () => void } | null,
+) {
   return {
     lifecycle,
     sm,
     capture: { videoEl: video },
     overlay: { setTargetText: vi.fn(), setSourceText: vi.fn() },
+    ad: ad ?? null,
   } as unknown as ContentApp;
 }
 
@@ -183,5 +189,82 @@ describe("subtitle-first #onSeek — Stage C ad gate", () => {
     // since 5 > c.start=4 → c.start >= 5 is false → 'c' would stay played/skipped).
     expect(session.sentences[2]!._played).toBe(false);
     expect(session.renderCursor).toBe(2); // anchor index is cue 'c' (idx 2)
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C3 — #onSeek calls app.ad.reseed() FIRST; no-ops rest when seek triggered ad
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("subtitle-first #onSeek — C3: reseed() called first, gates on ad state", () => {
+  it("C3a: reseed() is called before the isPausedFor('ad') gate on every seek", () => {
+    const lifecycle = new LifecycleController();
+    const sm = new SessionManager();
+    sm.lifecycle = lifecycle;
+    const video = { currentTime: 3 } as HTMLVideoElement;
+    const session = makeSession();
+    sm.session = session;
+
+    const reseedSpy = vi.fn();
+    const app = makeApp(lifecycle, sm, video, { reseed: reseedSpy });
+    const pipeline = new SubtitleFirstPipeline(app);
+
+    // No ad active — reseed should be called and seek proceeds normally.
+    pipeline.reAnchor(session, video);
+
+    expect(reseedSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("C3b: reseed() that flips ad state ON causes #onSeek to no-op (ad gate fires)", () => {
+    const lifecycle = new LifecycleController();
+    const sm = new SessionManager();
+    sm.lifecycle = lifecycle;
+    const video = { currentTime: 0 } as HTMLVideoElement;
+    const session = makeSession();
+    sm.session = session;
+
+    // reseed() will synchronously push the 'ad' reason — simulating a seek that
+    // triggers a mid-roll ad. After reseed(), isPausedFor('ad') === true, so
+    // the rest of #onSeek must be skipped (no _played reset, no cursor change).
+    const reseedSpy = vi.fn().mockImplementation(() => {
+      lifecycle.pause("ad");
+    });
+    const app = makeApp(lifecycle, sm, video, { reseed: reseedSpy });
+    const pipeline = new SubtitleFirstPipeline(app);
+
+    // Record the state BEFORE the seek.
+    const renderCursorBefore = session.renderCursor;
+    const playedBefore = session.sentences.map((s) => s._played);
+
+    pipeline.reAnchor(session, video);
+
+    // reseed() was called (Fix C — reseed before gate).
+    expect(reseedSpy).toHaveBeenCalledTimes(1);
+
+    // After reseed() pushed 'ad', the gate fired → no bookkeeping changes.
+    expect(session.renderCursor).toBe(renderCursorBefore);
+    session.sentences.forEach((s, i) => {
+      expect(s._played).toBe(playedBefore[i]);
+    });
+  });
+
+  it("C3c: reseed() with no ad watcher (ad=null) still proceeds normally", () => {
+    // When app.ad is null (non-YouTube platform / no ad support), reseed()
+    // optional chaining must not throw and the seek proceeds.
+    const lifecycle = new LifecycleController();
+    const sm = new SessionManager();
+    sm.lifecycle = lifecycle;
+    const video = { currentTime: 0 } as HTMLVideoElement;
+    const session = makeSession();
+    sm.session = session;
+
+    // Pass null ad — tests the `this.app.ad?.reseed()` optional chain.
+    const app = makeApp(lifecycle, sm, video, null);
+    const pipeline = new SubtitleFirstPipeline(app);
+
+    // Should not throw; seek re-anchors normally.
+    expect(() => pipeline.reAnchor(session, video)).not.toThrow();
+    // All cues reset (t=0, no ad gate).
+    expect(session.sentences.every((s) => s._played === false)).toBe(true);
   });
 });

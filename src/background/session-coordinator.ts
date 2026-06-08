@@ -262,7 +262,10 @@ export class SessionCoordinator {
       this.store.setStatus("Translating");
       const token = await this.auth.getSessionToken();
       if (token) {
-        void recordLanguagePairRecent(token, this.store.state.targetLanguage, "en");
+        void recordLanguagePairRecent(token, this.store.state.targetLanguage,
+          (this.store.state.sourceLanguage && this.store.state.sourceLanguage !== "auto")
+            ? this.store.state.sourceLanguage
+            : "en");
       }
       this.store.broadcast();
       return { ok: true, state: this.store.snapshot() };

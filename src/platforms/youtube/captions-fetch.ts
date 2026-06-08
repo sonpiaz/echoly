@@ -216,6 +216,25 @@ function langFromUrl(url: string): string | null {
 }
 
 /**
+ * Read BOTH `lang` and `tlang` query params from a YouTube timedtext URL.
+ * A YouTube auto-translated track URL looks like: `...&lang=<source>&tlang=<target>`
+ * so reading only `lang` misses auto-translations.
+ */
+function captureLangs(url: string): { lang: string | null; tlang: string | null } {
+  try {
+    const u = new URL(url, location.origin);
+    return { lang: u.searchParams.get("lang"), tlang: u.searchParams.get("tlang") };
+  } catch {
+    return { lang: null, tlang: null };
+  }
+}
+
+function primarySubtag(lang: string | null | undefined): string | null {
+  if (!lang) return null;
+  return lang.toLowerCase().split("-")[0] ?? null;
+}
+
+/**
  * Layer-0 (PRIMARY, pot-proof): use caption data captured from the page's OWN
  * network traffic by the MAIN-world hook (yt-mainworld.content.ts). Since 2025/26
  * YouTube returns an empty body for any caption fetch lacking a valid `pot`
@@ -226,8 +245,9 @@ function langFromUrl(url: string): string | null {
  */
 async function fetchViaCapturedNetwork(
   videoId: string,
-  targetLang: string,
+  sourcePref: string | undefined,
   signal?: AbortSignal,
+  avoidLang?: string,
 ): Promise<CaptionFetchResult | null> {
   let cap = getYtMainWorldData(videoId);
 
@@ -253,8 +273,32 @@ async function fetchViaCapturedNetwork(
   }
   if (signal?.aborted) return null;
 
+  const avoidCode = primarySubtag(avoidLang);
+  // EXPLICIT source: the user chose a specific source language (not "auto"). The
+  // captured Layer-0 track is whatever the YouTube player itself fetched (the CC
+  // track it shows / its default) — which is NOT necessarily the user's choice. So
+  // when an explicit source is set, ONLY accept a captured track in that language;
+  // otherwise skip Layer-0 and fall through to captionTracks / DOM / timedtext,
+  // which can target the requested language. AUTO (sourceCode === null) keeps the
+  // original behavior (accept the player's track, only avoiding the output lang).
+  const sourceCode = primarySubtag(sourcePref);
+  /** True iff this captured-track URL must be skipped (avoid lang, or explicit-source mismatch). */
+  const skipCaptured = (url: string): boolean => {
+    const { lang, tlang } = captureLangs(url);
+    if (avoidCode && (primarySubtag(lang) === avoidCode || primarySubtag(tlang) === avoidCode)) {
+      cclog("layer0 captured SKIPPED (avoidLang)", { lang, tlang, avoidLang });
+      return true;
+    }
+    if (sourceCode && primarySubtag(lang) !== sourceCode) {
+      cclog("layer0 captured SKIPPED (explicit source mismatch)", { lang, sourcePref });
+      return true;
+    }
+    return false;
+  };
+
   // (a) Zero-refetch: parse the player's own timedtext response body (pot-proof).
   for (const rec of cap.ccBodies) {
+    if (skipCaptured(rec.url)) continue;
     const cues = parseTimedtextBody(rec.body);
     cclog("layer0 captured cc-body", { cues: cues.length, host: safeHost(rec.url) });
     if (cues.length) return { captions: cues, sourceLang: langFromUrl(rec.url) };
@@ -263,6 +307,7 @@ async function fetchViaCapturedNetwork(
   // (b) Refetch the player's own pot'd timedtext URL, forcing json3 (pot/sig
   // survive an fmt swap — fmt is not part of YouTube's URL signature).
   for (const url of cap.ccUrls) {
+    if (skipCaptured(url)) continue;
     if (signal?.aborted) return null;
     try {
       const cues = await fetchJson3Url(normalizeToJson3(url), signal);
@@ -276,7 +321,7 @@ async function fetchViaCapturedNetwork(
 
   // (c) captionTracks + poToken from the captured /youtubei/v1/player response.
   if (cap.captionTracks?.length) {
-    const picked = pickCaptionTrack(cap.captionTracks, targetLang);
+    const picked = pickCaptionTrack(cap.captionTracks, sourcePref, avoidLang);
     if (picked?.baseUrl) {
       let url = normalizeToJson3(picked.baseUrl);
       if (cap.poToken) url += `&c=WEB&pot=${encodeURIComponent(cap.poToken)}`;
@@ -305,12 +350,13 @@ async function fetchViaCapturedNetwork(
 
 export async function fetchYouTubeCaptions(
   videoId: string,
-  targetLang: string,
+  sourcePref: string | undefined,
   signal?: AbortSignal,
+  avoidLang?: string,
 ): Promise<CaptionFetchResult | null> {
   // ── Layer 0: captured page network (pot-proof, PRIMARY) ───────────────────
   try {
-    const captured = await fetchViaCapturedNetwork(videoId, targetLang, signal);
+    const captured = await fetchViaCapturedNetwork(videoId, sourcePref, signal, avoidLang);
     if (signal?.aborted) return null;
     if (captured) return captured;
   } catch (err) {
@@ -352,7 +398,7 @@ export async function fetchYouTubeCaptions(
     hasPlayerResponse: !!pr,
     trackCount: tracks?.length ?? 0,
   });
-  const picked = pickCaptionTrack(tracks || [], targetLang);
+  const picked = pickCaptionTrack(tracks || [], sourcePref, avoidLang);
   if (picked?.baseUrl) {
     const url = normalizeToJson3(picked.baseUrl);
     try {
@@ -377,9 +423,10 @@ export async function fetchYouTubeCaptions(
   // regions/videos. Cheap relative to "no captions → live dub". If YouTube has
   // locked it (pot/signature), fetchJson3Url logs the 200-but-empty case so we
   // can see it in the [echoly-cc] trace.
+  // Use the SOURCE language (sourcePref || "en") — never the output/target language.
   const base = "https://www.youtube.com/api/timedtext";
   const v = encodeURIComponent(videoId);
-  const lang = encodeURIComponent(targetLang || "vi");
+  const lang = encodeURIComponent(sourcePref || "en");
   const fallbackUrls = [
     `${base}?lang=en&v=${v}&fmt=json3`,
     `${base}?lang=${lang}&v=${v}&fmt=json3`,
@@ -456,9 +503,10 @@ export interface FetchYouTubeCaptionsWithSettleOpts {
  */
 export async function fetchYouTubeCaptionsWithSettle(
   videoId: string,
-  targetLang: string,
+  sourcePref: string | undefined,
   signal?: AbortSignal,
   opts?: FetchYouTubeCaptionsWithSettleOpts,
+  avoidLang?: string,
 ): Promise<CaptionFetchResult | null> {
   const maxAttempts = opts?.maxAttempts ?? 2;
   const delayMs = opts?.delayMs ?? 500;
@@ -466,7 +514,7 @@ export async function fetchYouTubeCaptionsWithSettle(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) return null;
 
-    const result = await fetchYouTubeCaptions(videoId, targetLang, signal);
+    const result = await fetchYouTubeCaptions(videoId, sourcePref, signal, avoidLang);
 
     if (signal?.aborted) return null;
 

@@ -19,42 +19,30 @@ export interface SessionBootstrapSnapshot {
   voices: StandardVoiceSnapshot;
 }
 
-// Credit snapshot shape per CONTRACTS §D (UsageMeterC = {usedCredits, capCredits, remainingCredits}).
-// Server emits camelCase from GET /v1/session/bootstrap.
+// Credit snapshot shape per D5 (unified pool — UsageMeter = {usedCredits, capCredits, remainingCredits}).
+// Server emits camelCase from GET /v1/session/bootstrap: { credits, realtimeAllowed, resetsAt }.
 type BootstrapUsageMeter = {
   usedCredits?: number;
   capCredits?: number;
   remainingCredits?: number;
 };
 type BootstrapUsage = {
-  standard?: BootstrapUsageMeter;
-  realtime?: BootstrapUsageMeter;
+  credits?: BootstrapUsageMeter;
+  realtimeAllowed?: boolean;
   resetsAt?: string;
 };
-
-function parseMeter(m: BootstrapUsageMeter | undefined): { used: number; cap: number | undefined; remaining: number | undefined } {
-  if (!m) return { used: 0, cap: undefined, remaining: undefined };
-  return {
-    used: m.usedCredits ?? 0,
-    cap: m.capCredits,
-    remaining: m.remainingCredits,
-  };
-}
 
 /** @internal exported for unit tests only — not part of the public API. */
 export function parseUsage(raw: BootstrapUsage | null | undefined): Usage | null {
   if (!raw || typeof raw !== "object") return null;
   const d = raw;
-  if (!d.standard && !d.realtime) return null;
-  const std = parseMeter(d.standard);
-  const rt = parseMeter(d.realtime);
+  if (!d.credits) return null;
+  const m = d.credits;
   return {
-    standard: std.used,
-    realtime: rt.used,
-    standardCap: std.cap,
-    realtimeCap: rt.cap,
-    standardRemaining: std.remaining,
-    realtimeRemaining: rt.remaining,
+    used: m.usedCredits ?? 0,
+    cap: m.capCredits,
+    remaining: m.remainingCredits,
+    realtimeAllowed: d.realtimeAllowed ?? false,
     resetsAt: d.resetsAt,
   };
 }
@@ -87,7 +75,7 @@ export async function fetchSessionBootstrap(
         tier?: SignedInUser["tier"];
         cancel_at_period_end?: boolean;
       };
-      usage?: BootstrapUsage;
+      usage?: BootstrapUsage | null;
       languagePairs?: Record<string, object | string | number | boolean | null> | null;
       voices?: Record<string, object | string | number | boolean | null> | null;
     };

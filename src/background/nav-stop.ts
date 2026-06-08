@@ -11,9 +11,18 @@
 //     (continueOnNewVideo / auto-next). Stopping here would tear the session down
 //     before the watcher can continue the dub — this was why auto-next never fired
 //     (bg killed the session on the very navigation the content side needed).
-//   • Leaving the dubbable context (watch→home/search, or another site) → stop.
-//   • Url change while NOT running/connecting → stop (nothing for the watcher to
-//     continue; clean up any stale state).
+//   • SPA url change to a NON-watch url while a session is ACTIVE → DEFERRED stop.
+//     Instead of stopping immediately (which would tear down a session during a
+//     transient ad→content URL flicker), we schedule a re-check after
+//     NAV_STOP_RECHECK_MS. At expiry, we call chrome.tabs.get(tabId) to read the
+//     live url. If the tab has returned to a supported watch page, the transient
+//     resolved and we cancel the stop. If the session is no longer active or the
+//     tab belongs to a different session, we also cancel. Only if the url is still
+//     non-watch and the same session is active do we call session.stop().
+//   • Leaving the dubbable context (watch→home/search, or another site) → stop
+//     (after the re-check window).
+//   • Url change while NOT running/connecting → stop immediately (nothing for the
+//     watcher to continue; clean up any stale state).
 //
 // Extracted from index.ts (inline listener) so it is unit-testable the same way
 // registerAutoStart is — the returned listener can be invoked directly with
@@ -21,8 +30,20 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import { isSupportedWatchUrl } from "@/platforms/registry";
+import { NAV_STOP_RECHECK_MS } from "@/shared/constants";
 import type { Store } from "./store";
 import type { SessionCoordinator } from "./session-coordinator";
+
+/** Per-tab pending deferred-stop timers.  Module-scoped; mirrors `lastFireAt` in
+ *  auto-start.ts.  Keyed by tabId so simultaneous sessions on different tabs are
+ *  isolated.  The SW recycles these naturally. */
+const pendingDeferredStop = new Map<number, ReturnType<typeof setTimeout>>();
+
+/** Test-only: reset module state between specs. */
+export function resetNavStopState(): void {
+  for (const timer of pendingDeferredStop.values()) clearTimeout(timer);
+  pendingDeferredStop.clear();
+}
 
 /** Register the session-tab tabs.onUpdated stop listener. Returns the listener
  *  fn so tests can invoke it without going through chrome's event dispatch. */
@@ -40,6 +61,12 @@ export function registerNavStop(
     // background is the authority → stop. YouTube's history.pushState SPA
     // navigations (watch→watch autoplay/next) do NOT set status:"loading".
     if (changeInfo.status === "loading") {
+      // A genuine hard nav supersedes any pending deferred-stop check for this tab.
+      const pending = pendingDeferredStop.get(tabId);
+      if (pending !== undefined) {
+        clearTimeout(pending);
+        pendingDeferredStop.delete(tabId);
+      }
       // Record a continuation intent so auto-start re-dubs the fresh page (playlist
       // auto-advance is intermittently a GENUINE hard nav that destroys the content
       // script — the bg is the only survivor). Only when a dub is actually active
@@ -81,9 +108,58 @@ export function registerNavStop(
       (store.state.running || store.state.connecting) &&
       isSupportedWatchUrl(changeInfo.url)
     ) {
+      // The transient resolved back to a watch page — cancel any pending deferred
+      // stop so we do not tear down a session that should continue.
+      const pending = pendingDeferredStop.get(tabId);
+      if (pending !== undefined) {
+        clearTimeout(pending);
+        pendingDeferredStop.delete(tabId);
+      }
       return;
     }
-    void session.stop();
+
+    // Not running/connecting — no active session to guard; stop immediately.
+    if (!store.state.running && !store.state.connecting) {
+      void session.stop();
+      return;
+    }
+
+    // Active session + SPA nav to a non-watch URL.  Instead of stopping
+    // immediately (which would tear down the session during a transient
+    // ad→content URL flicker), schedule a deferred re-check.  A new
+    // onUpdated event for this tab (arriving before expiry) will:
+    //   • cancel the timer if the new URL is a watch page (transient resolved), OR
+    //   • reschedule it for the new non-watch URL.
+    const existing = pendingDeferredStop.get(tabId);
+    if (existing !== undefined) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      pendingDeferredStop.delete(tabId);
+      void (async () => {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (tab.url && isSupportedWatchUrl(tab.url)) {
+            // URL recovered to a watch page — transient resolved; do not stop.
+            return;
+          }
+          if (
+            store.state.tabId !== tabId ||
+            (!store.state.running && !store.state.connecting)
+          ) {
+            // A different session now owns this tab, or the session already ended
+            // via another path — stale guard; do not issue a double-stop.
+            return;
+          }
+          void session.stop();
+        } catch {
+          // chrome.tabs.get threw — the tab was closed/removed while we were
+          // waiting.  Clean up whatever session state is left.
+          void session.stop();
+        }
+      })();
+    }, NAV_STOP_RECHECK_MS);
+
+    pendingDeferredStop.set(tabId, timer);
   };
 
   chrome.tabs.onUpdated.addListener(listener);

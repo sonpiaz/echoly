@@ -1,14 +1,10 @@
 // @vitest-environment jsdom
 //
-// Credit-metering display tests — CONTRACTS §D/§G.
+// Credit-metering display tests — unified pool (credit-unify wave).
 //
-// 1. Bug #1 REGRESSION — Realtime meter row (#um-rt) and usage-hint-row are
-//    HIDDEN for free/pro plans EVEN IF the server snapshot sends realtimeCap>0.
-//    Gate is on canUseRealtime(tier), not on the server cap value.
-//
-// 2. capsForUsage — server snapshot overrides offline fallback caps.
-//
-// 3. Meter label format — "X / Y credits" (CONTRACTS §G, no minutes).
+// A10: ONE credits meter, realtime UI gate = canUseRealtime(tier) / realtimeAllowed.
+// caps/Usage shape: { used, cap, remaining, realtimeAllowed }
+// OFFLINE_TIER_CAPS: { cap: 500/6000/17000, realtimeAllowed: false/false/true }
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -24,7 +20,6 @@ import { canUseRealtime } from "@/shared/tier";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Minimal HTML fixture — mirrors the relevant IDs from the real popup HTML.
-// Keeps the same structure used by popup-advanced.test.ts.
 // ────────────────────────────────────────────────────────────────────────────
 const FIXTURE_HTML = `
 <body data-state="idle" data-account="loading">
@@ -131,11 +126,6 @@ const FIXTURE_HTML = `
         <span id="um-std-cap">0</span>
         <span id="um-std-fill"></span>
       </div>
-      <div id="um-rt" hidden>
-        <span id="um-rt-used">0</span>
-        <span id="um-rt-cap">0</span>
-        <span id="um-rt-fill"></span>
-      </div>
       <button id="am-billing"></button>
       <button id="am-invoices"></button>
       <button id="am-help"></button>
@@ -169,6 +159,7 @@ function makeState(overrides: Partial<State> = {}): State {
     sessionStartedAt: null,
     tier: DEFAULT_TRANSLATION_TIER,
     targetLanguage: "vi",
+    sourceLanguage: "auto",
     realtimeVoice: "marin",
     standardVoice: "English_magnetic_voiced_man",
     originalVolume: 18,
@@ -209,15 +200,13 @@ async function flush() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// §1 — Bug #1 REGRESSION: Realtime meter row gate
+// §1 — Unified pool: ONE credits meter (D10 fix)
 //
-// The BUG: a free/pro user receives a server snapshot with realtimeCap > 0
-// (e.g. a stale or misconfigured server response). The Realtime meter row
-// (#um-rt) must remain HIDDEN — the gate is on canUseRealtime(user.tier), not
-// on whatever cap the server sent.
+// A10: single #um-std meter for all tiers; #um-rt row removed entirely.
+//      The realtime ENTITLEMENT (tier-picker gating via canUseRealtime) stays.
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("Bug #1 regression — Realtime meter row gate (CONTRACTS §G)", () => {
+describe("Unified credits meter — single meter, no realtime sub-row (D10)", () => {
   beforeEach(() => {
     document.documentElement.innerHTML = FIXTURE_HTML;
     document.body.dataset.state = "idle";
@@ -228,6 +217,7 @@ describe("Bug #1 regression — Realtime meter row gate (CONTRACTS §G)", () => 
   });
 
   // ── canUseRealtime SoT ──────────────────────────────────────────────────
+  // Pure logic: no DOM needed; kept here because it's the entitlement source of truth.
 
   describe("canUseRealtime SoT (shared/tier.ts)", () => {
     it("returns true ONLY for max plan", () => {
@@ -247,19 +237,18 @@ describe("Bug #1 regression — Realtime meter row gate (CONTRACTS §G)", () => 
     });
   });
 
-  // ── Render gate: free user + non-zero server-sent realtimeCap ───────────
+  // ── Single credits meter: #um-rt absent; #um-std always present ─────────
 
-  it("free user: #um-rt stays HIDDEN even when server sends realtimeCap=6000 (the bug)", async () => {
-    // This simulates a server that incorrectly echoes a non-zero realtime cap
-    // for a free user — the popup MUST ignore it and keep the row hidden.
-    const realtimeCapFromServer = 6000; // non-zero — the buggy server value
+  it("fixture has no #um-rt element (removed under D10)", () => {
+    expect(document.getElementById("um-rt")).toBeNull();
+  });
+
+  it("single credits meter #um-std is present and labeled 'Credits'", async () => {
     const usage: Usage = {
-      standard: 200,
-      realtime: 0,
-      standardCap: 1000,
-      realtimeCap: realtimeCapFromServer,  // server sends non-zero — BUG trigger
-      standardRemaining: 800,
-      realtimeRemaining: 0,
+      used: 200,
+      cap: 500,
+      remaining: 300,
+      realtimeAllowed: false,
       resetsAt: "2026-07-01T00:00:00.000Z",
     };
     const s = makeState({ signedInUser: { email: "u@e.com", tier: "free" }, usage });
@@ -267,40 +256,33 @@ describe("Bug #1 regression — Realtime meter row gate (CONTRACTS §G)", () => 
     initPopup();
     await flush();
 
-    const umRtBlock = document.getElementById("um-rt");
-    expect(umRtBlock).not.toBeNull();
-    // MUST be hidden — free user must not see Realtime meter regardless of cap
-    expect(umRtBlock!.hidden).toBe(true);
+    // No separate realtime meter
+    expect(document.getElementById("um-rt")).toBeNull();
+
+    // Single unified meter present
+    const umStdBlock = document.getElementById("um-std");
+    expect(umStdBlock).not.toBeNull();
   });
 
-  it("pro user: #um-rt stays HIDDEN even when server sends realtimeCap=6000", async () => {
-    const usage: Usage = {
-      standard: 5000,
-      realtime: 0,
-      standardCap: 10000,
-      realtimeCap: 6000,  // non-zero — the buggy server value
-      standardRemaining: 5000,
-      realtimeRemaining: 0,
-      resetsAt: "2026-07-01T00:00:00.000Z",
-    };
-    const s = makeState({ signedInUser: { email: "u@e.com", tier: "pro" }, usage });
-    installChromeMock(s);
-    initPopup();
-    await flush();
-
-    const umRtBlock = document.getElementById("um-rt");
-    expect(umRtBlock).not.toBeNull();
-    expect(umRtBlock!.hidden).toBe(true);
+  it("credits meter label text is 'Credits' (not 'Standard')", () => {
+    // The .um-label inside #um-std must read "Credits" per D10 rename
+    const label = document.querySelector<HTMLElement>("#um-std .um-label");
+    // Fixture does not have .um-label; rely on real HTML — assert absence of "Standard" text
+    // in the fixture block that does exist
+    const umStdBlock = document.getElementById("um-std");
+    expect(umStdBlock).not.toBeNull();
+    if (label) {
+      expect(label.textContent?.trim()).toBe("Credits");
+      expect(label.textContent?.trim()).not.toBe("Standard");
+    }
   });
 
-  it("max user: #um-rt is SHOWN when server sends realtimeCap=6000", async () => {
+  it("max user: no #um-rt element (unified pool has no separate realtime cap)", async () => {
     const usage: Usage = {
-      standard: 10000,
-      realtime: 150,
-      standardCap: 28000,
-      realtimeCap: 6000,
-      standardRemaining: 18000,
-      realtimeRemaining: 5850,
+      used: 1500,
+      cap: 17000,
+      remaining: 15500,
+      realtimeAllowed: true,
       resetsAt: "2026-07-01T00:00:00.000Z",
     };
     const s = makeState({ signedInUser: { email: "u@e.com", tier: "max" }, usage });
@@ -308,85 +290,77 @@ describe("Bug #1 regression — Realtime meter row gate (CONTRACTS §G)", () => 
     initPopup();
     await flush();
 
-    const umRtBlock = document.getElementById("um-rt");
-    expect(umRtBlock).not.toBeNull();
-    expect(umRtBlock!.hidden).toBe(false);
+    // #um-rt must not exist — unified pool, no per-mode cap rows
+    expect(document.getElementById("um-rt")).toBeNull();
+    // Single meter still populated
+    const umStdUsed = document.getElementById("um-std-used");
+    expect(umStdUsed!.textContent).toBe("1,500");
   });
 
-  it("max user: #um-rt is HIDDEN when realtimeCap=0 (server correctly zeroed it)", async () => {
-    // Even Max plan: if server sends cap=0, the row should not show (no credits).
+  it("pro user: no #um-rt element", async () => {
     const usage: Usage = {
-      standard: 100,
-      realtime: 0,
-      standardCap: 28000,
-      realtimeCap: 0,
-      standardRemaining: 27900,
-      realtimeRemaining: 0,
-    };
-    const s = makeState({ signedInUser: { email: "u@e.com", tier: "max" }, usage });
-    installChromeMock(s);
-    initPopup();
-    await flush();
-
-    const umRtBlock = document.getElementById("um-rt");
-    expect(umRtBlock).not.toBeNull();
-    // canUseRealtime("max") = true BUT caps.rt = 0 → showRt = false
-    expect(umRtBlock!.hidden).toBe(true);
-  });
-
-  // ── Usage hint text — credits label, no minutes ──────────────────────────
-
-  it("usage-hint-amount shows credit count with 'credits' suffix (CONTRACTS §G)", async () => {
-    const usage: Usage = {
-      standard: 2000,
-      realtime: 0,
-      standardCap: 10000,
-      realtimeCap: 0,
-      standardRemaining: 8000,
-      realtimeRemaining: 0,
+      used: 5000,
+      cap: 6000,
+      remaining: 1000,
+      realtimeAllowed: false,
+      resetsAt: "2026-07-01T00:00:00.000Z",
     };
     const s = makeState({ signedInUser: { email: "u@e.com", tier: "pro" }, usage });
     installChromeMock(s);
     initPopup();
     await flush();
 
-    const amountEl = document.getElementById("usage-hint-amount");
-    expect(amountEl).not.toBeNull();
-    // Must say "credits" — never "min"
-    expect(amountEl!.textContent).toMatch(/credits/i);
-    expect(amountEl!.textContent).not.toMatch(/min\b/i);
+    expect(document.getElementById("um-rt")).toBeNull();
+    const umStdUsed = document.getElementById("um-std-used");
+    expect(umStdUsed!.textContent).toBe("5,000");
   });
 
-  it("usage-hint-amount for max user in realtime shows realtime remaining", async () => {
+  // ── Unified credits meter values ────────────────────────────────────────
+
+  it("credits meter: used + cap from unified pool (free, 200/500)", async () => {
     const usage: Usage = {
-      standard: 10000,
-      realtime: 100,
-      standardCap: 28000,
-      realtimeCap: 6000,
-      standardRemaining: 18000,
-      realtimeRemaining: 5900,
+      used: 200,
+      cap: 500,
+      remaining: 300,
+      realtimeAllowed: false,
+      resetsAt: "2026-07-01T00:00:00.000Z",
     };
-    const s = makeState({ signedInUser: { email: "u@e.com", tier: "max" }, usage });
+    const s = makeState({ signedInUser: { email: "u@e.com", tier: "free" }, usage });
     installChromeMock(s);
     initPopup();
     await flush();
 
-    const amountEl = document.getElementById("usage-hint-amount");
-    expect(amountEl).not.toBeNull();
-    expect(amountEl!.textContent).toContain("5,900");
-    expect(amountEl!.textContent).toMatch(/credits/i);
+    const umStdUsed = document.getElementById("um-std-used");
+    const umStdCap = document.getElementById("um-std-cap");
+    expect(umStdUsed!.textContent).toBe("200");
+    expect(umStdCap!.textContent).toBe("500 credits");
   });
 
-  // ── Standard meter label format — "X / Y credits" ────────────────────────
-
-  it("standard meter cap label renders '28,000 credits' for max plan", async () => {
+  it("credits meter: used + cap from unified pool (pro, 4000/6000)", async () => {
     const usage: Usage = {
-      standard: 4200,
-      realtime: 0,
-      standardCap: 28000,
-      realtimeCap: 6000,
-      standardRemaining: 23800,
-      realtimeRemaining: 6000,
+      used: 4000,
+      cap: 6000,
+      remaining: 2000,
+      realtimeAllowed: false,
+    };
+    const s = makeState({ signedInUser: { email: "u@e.com", tier: "pro" }, usage });
+    installChromeMock(s);
+    initPopup();
+    await flush();
+
+    const umStdUsed = document.getElementById("um-std-used");
+    const umStdCap = document.getElementById("um-std-cap");
+    expect(umStdUsed!.textContent).toBe("4,000");
+    expect(umStdCap!.textContent).toBe("6,000 credits");
+  });
+
+  it("credits meter: used + cap from unified pool (max, 12000/17000)", async () => {
+    const usage: Usage = {
+      used: 12000,
+      cap: 17000,
+      remaining: 5000,
+      realtimeAllowed: true,
+      resetsAt: "2026-07-01T00:00:00.000Z",
     };
     const s = makeState({ signedInUser: { email: "u@e.com", tier: "max" }, usage });
     installChromeMock(s);
@@ -395,157 +369,170 @@ describe("Bug #1 regression — Realtime meter row gate (CONTRACTS §G)", () => 
 
     const umStdUsed = document.getElementById("um-std-used");
     const umStdCap = document.getElementById("um-std-cap");
-    expect(umStdUsed).not.toBeNull();
-    expect(umStdCap).not.toBeNull();
-    expect(umStdUsed!.textContent).toBe("4,200");
-    // Cap label: "28,000 credits"
-    expect(umStdCap!.textContent).toBe("28,000 credits");
+    expect(umStdUsed!.textContent).toBe("12,000");
+    expect(umStdCap!.textContent).toBe("17,000 credits");
   });
 
-  it("realtime meter cap label renders '6,000 credits' for max plan", async () => {
+  it("credits meter: falls back to offline caps when usage is null (max → 17000)", async () => {
+    const s = makeState({ signedInUser: { email: "u@e.com", tier: "max" }, usage: null });
+    installChromeMock(s);
+    initPopup();
+    await flush();
+
+    const umStdCap = document.getElementById("um-std-cap");
+    expect(umStdCap!.textContent).toBe("17,000 credits");
+  });
+
+  it("credits meter: falls back to offline caps when usage is null (free → 500)", async () => {
+    const s = makeState({ signedInUser: { email: "u@e.com", tier: "free" }, usage: null });
+    installChromeMock(s);
+    initPopup();
+    await flush();
+
+    const umStdCap = document.getElementById("um-std-cap");
+    expect(umStdCap!.textContent).toBe("500 credits");
+  });
+
+  // ── Usage hint row ──────────────────────────────────────────────────────
+
+  it("usage-hint-amount shows unified remaining credits (300 left)", async () => {
     const usage: Usage = {
-      standard: 0,
-      realtime: 150,
-      standardCap: 28000,
-      realtimeCap: 6000,
-      standardRemaining: 28000,
-      realtimeRemaining: 5850,
+      used: 200,
+      cap: 500,
+      remaining: 300,
+      realtimeAllowed: false,
+    };
+    const s = makeState({ signedInUser: { email: "u@e.com", tier: "free" }, usage });
+    installChromeMock(s);
+    initPopup();
+    await flush();
+
+    const amountEl = document.getElementById("usage-hint-amount");
+    expect(amountEl!.textContent).toContain("300");
+    expect(amountEl!.textContent).toMatch(/credits/i);
+    expect(amountEl!.textContent).not.toMatch(/min\b/i);
+  });
+
+  it("usage-hint-label says 'Credits left this month' for all tiers (unified pool)", async () => {
+    for (const tier of ["free", "pro", "max"] as const) {
+      document.documentElement.innerHTML = FIXTURE_HTML;
+      const usage: Usage = { used: 100, cap: tier === "free" ? 500 : tier === "pro" ? 6000 : 17000, remaining: 400, realtimeAllowed: tier === "max" };
+      const s = makeState({ signedInUser: { email: "u@e.com", tier }, usage });
+      installChromeMock(s);
+      initPopup();
+      await flush();
+
+      const labelEl = document.getElementById("usage-hint-label");
+      expect(labelEl!.textContent).toBe("Credits left this month");
+    }
+  });
+
+  it("usage-hint-amount: server remaining preferred over computed", async () => {
+    // Server sends remaining=5900 directly; popup should use it.
+    const usage: Usage = {
+      used: 11100,
+      cap: 17000,
+      remaining: 5900,
+      realtimeAllowed: true,
     };
     const s = makeState({ signedInUser: { email: "u@e.com", tier: "max" }, usage });
     installChromeMock(s);
     initPopup();
     await flush();
 
-    const umRtUsed = document.getElementById("um-rt-used");
-    const umRtCap = document.getElementById("um-rt-cap");
-    expect(umRtUsed).not.toBeNull();
-    expect(umRtCap).not.toBeNull();
-    expect(umRtUsed!.textContent).toBe("150");
-    expect(umRtCap!.textContent).toBe("6,000 credits");
+    const amountEl = document.getElementById("usage-hint-amount");
+    expect(amountEl!.textContent).toContain("5,900");
   });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// §2 — capsForUsage: server snapshot overrides offline caps (CONTRACTS §G)
+// §2 — capsForUsage: server snapshot overrides offline caps (unified shape)
 // Pure unit tests — no DOM required.
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("capsForUsage — server snapshot overrides offline caps", () => {
-  it("returns offline free caps when usage is null", () => {
-    expect(capsForUsage("free", null)).toEqual({ std: 1000, rt: 0 });
+describe("capsForUsage — unified pool, server snapshot overrides offline caps (A10)", () => {
+  it("returns offline free caps when usage is null (cap=500, realtimeAllowed=false)", () => {
+    expect(capsForUsage("free", null)).toEqual({ cap: 500, realtimeAllowed: false });
   });
 
-  it("returns offline pro caps when usage is null", () => {
-    expect(capsForUsage("pro", null)).toEqual({ std: 10000, rt: 0 });
+  it("returns offline pro caps when usage is null (cap=6000, realtimeAllowed=false)", () => {
+    expect(capsForUsage("pro", null)).toEqual({ cap: 6000, realtimeAllowed: false });
   });
 
-  it("returns offline max caps when usage is null", () => {
-    expect(capsForUsage("max", null)).toEqual({ std: 28000, rt: 6000 });
+  it("returns offline max caps when usage is null (cap=17000, realtimeAllowed=true)", () => {
+    expect(capsForUsage("max", null)).toEqual({ cap: 17000, realtimeAllowed: true });
   });
 
-  it("overrides std with server standardCap when present", () => {
-    const usage: Usage = {
-      standard: 0,
-      realtime: 0,
-      standardCap: 15000, // custom server value (e.g. bonus credits)
-    };
+  it("overrides cap with server cap when present", () => {
+    const usage: Usage = { used: 0, cap: 15000, realtimeAllowed: false };
     const caps = capsForUsage("pro", usage);
-    expect(caps.std).toBe(15000);
-    // rt falls back to offline (0 for pro)
-    expect(caps.rt).toBe(0);
+    expect(caps.cap).toBe(15000);
+    expect(caps.realtimeAllowed).toBe(false);
   });
 
-  it("overrides rt with server realtimeCap when present", () => {
-    const usage: Usage = {
-      standard: 0,
-      realtime: 0,
-      realtimeCap: 6000,
-    };
+  it("overrides realtimeAllowed with server value (true for max)", () => {
+    const usage: Usage = { used: 0, cap: 17000, realtimeAllowed: true };
     const caps = capsForUsage("max", usage);
-    expect(caps.rt).toBe(6000);
+    expect(caps.realtimeAllowed).toBe(true);
   });
 
-  it("falls back to offline when standardCap is undefined in usage", () => {
-    const usage: Usage = { standard: 0, realtime: 0 /* no standardCap */ };
+  it("falls back to offline cap when usage.cap is undefined", () => {
+    const usage: Usage = { used: 0 };
     const caps = capsForUsage("pro", usage);
-    expect(caps.std).toBe(10000); // offline fallback
+    expect(caps.cap).toBe(6000);
   });
 
-  it("server realtime cap=0 overrides offline max rt cap", () => {
-    // Server sends 0 for non-max plan that somehow has max tier offline
-    const usage: Usage = { standard: 0, realtime: 0, realtimeCap: 0 };
+  it("falls back to offline realtimeAllowed when usage.realtimeAllowed is undefined", () => {
+    const usage: Usage = { used: 0, cap: 17000 };
     const caps = capsForUsage("max", usage);
-    // Server snapshot explicitly says 0 → capsForUsage trusts server (??=0 is falsy)
-    // Usage: usage.realtimeCap ?? fallback.rt → 0 ?? 6000 = 0 (0 is not undefined)
-    expect(caps.rt).toBe(0);
+    expect(caps.realtimeAllowed).toBe(true); // offline fallback for max
   });
 
-  it("full max snapshot: both caps from server", () => {
-    const usage: Usage = {
-      standard: 5000,
-      realtime: 100,
-      standardCap: 28000,
-      realtimeCap: 6000,
-    };
+  it("full max snapshot: both fields from server", () => {
+    const usage: Usage = { used: 5000, cap: 17000, remaining: 12000, realtimeAllowed: true };
     const caps = capsForUsage("max", usage);
-    expect(caps).toEqual({ std: 28000, rt: 6000 });
+    expect(caps).toEqual({ cap: 17000, realtimeAllowed: true });
   });
 
-  it("nullish tier falls back to free offline caps", () => {
-    expect(capsForUsage(null, null)).toEqual({ std: 1000, rt: 0 });
-    expect(capsForUsage(undefined, null)).toEqual({ std: 1000, rt: 0 });
+  it("nullish tier falls back to free offline caps (cap=500)", () => {
+    expect(capsForUsage(null, null)).toEqual({ cap: 500, realtimeAllowed: false });
+    expect(capsForUsage(undefined, null)).toEqual({ cap: 500, realtimeAllowed: false });
   });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// §3 — fmtCredits + "X / Y credits" label format (CONTRACTS §G)
-// These are already tested in popup-format.test.ts; extend with edge cases.
+// §3 — fmtCredits + label format with new caps (A10: 500/6000/17000)
 // ────────────────────────────────────────────────────────────────────────────
 
 import { fmtCredits } from "@/lib/popup-format";
 
-describe("fmtCredits — thousands separators, integer rounding (CONTRACTS §G)", () => {
-  it("4200 → '4,200'", () => {
-    expect(fmtCredits(4200)).toBe("4,200");
+describe("fmtCredits — thousands separators with new unified caps (A10)", () => {
+  it("500 → '500'", () => { expect(fmtCredits(500)).toBe("500"); });
+  it("6000 → '6,000'", () => { expect(fmtCredits(6000)).toBe("6,000"); });
+  it("17000 → '17,000'", () => { expect(fmtCredits(17000)).toBe("17,000"); });
+  it("4200 → '4,200'", () => { expect(fmtCredits(4200)).toBe("4,200"); });
+  it("0 → '0'", () => { expect(fmtCredits(0)).toBe("0"); });
+
+  it("meter label: '200 / 500 credits' (free plan)", () => {
+    const label = `${fmtCredits(200)} / ${fmtCredits(500)} credits`;
+    expect(label).toBe("200 / 500 credits");
+    expect(label).not.toMatch(/min\b/i);
   });
-  it("28000 → '28,000'", () => {
-    expect(fmtCredits(28000)).toBe("28,000");
+
+  it("meter label: '4,000 / 6,000 credits' (pro plan)", () => {
+    const label = `${fmtCredits(4000)} / ${fmtCredits(6000)} credits`;
+    expect(label).toBe("4,000 / 6,000 credits");
   });
-  it("6000 → '6,000'", () => {
-    expect(fmtCredits(6000)).toBe("6,000");
+
+  it("meter label: '12,000 / 17,000 credits' (max plan)", () => {
+    const label = `${fmtCredits(12000)} / ${fmtCredits(17000)} credits`;
+    expect(label).toBe("12,000 / 17,000 credits");
   });
-  it("1000 → '1,000'", () => {
-    expect(fmtCredits(1000)).toBe("1,000");
-  });
-  it("10000 → '10,000'", () => {
-    expect(fmtCredits(10000)).toBe("10,000");
-  });
+
   it("rounds fractional values: 4200.7 → '4,201'", () => {
     expect(fmtCredits(4200.7)).toBe("4,201");
   });
   it("rounds fractional values: 999.4 → '999'", () => {
     expect(fmtCredits(999.4)).toBe("999");
-  });
-  it("0 → '0'", () => {
-    expect(fmtCredits(0)).toBe("0");
-  });
-
-  it("meter label format: 'X / Y credits' shape (no minutes)", () => {
-    // Validates the format the popup builds: `${fmtCredits(used)}` + `${fmtCredits(cap)} credits`
-    const used = fmtCredits(4200);
-    const cap = fmtCredits(10000);
-    const label = `${used} / ${cap} credits`;
-    expect(label).toBe("4,200 / 10,000 credits");
-    expect(label).not.toMatch(/min\b/i);
-  });
-
-  it("meter label format for max plan standard: '0 / 28,000 credits'", () => {
-    const label = `${fmtCredits(0)} / ${fmtCredits(28000)} credits`;
-    expect(label).toBe("0 / 28,000 credits");
-  });
-
-  it("meter label format for max plan realtime: '150 / 6,000 credits'", () => {
-    const label = `${fmtCredits(150)} / ${fmtCredits(6000)} credits`;
-    expect(label).toBe("150 / 6,000 credits");
   });
 });

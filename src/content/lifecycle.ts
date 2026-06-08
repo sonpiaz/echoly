@@ -182,6 +182,25 @@ export class LifecycleController {
   }
 
   /**
+   * Push `reason` WITHOUT issuing a video.pause() — the dub is gated by
+   * `effectivePaused`, but the source <video> keeps playing. Used for the `ad`
+   * reason: a YouTube ad shares the SAME <video> element as the content, so
+   * pausing it would freeze the ad itself → the ad never ends → `isAdPlaying()`
+   * stays true → `onAdEnd`/exitAdPause never fire → the dub is silenced forever
+   * (the "mất tiếng luôn khi seek vào ad" deadlock). The ad must play through;
+   * we only silence the dub (effectivePaused) + freeze metering. Idempotent per
+   * reason. Emits `pauseChanged` if effectivePaused flipped. Pair with `resume()`
+   * on exit — if the stack becomes empty it issues a harmless play() on the
+   * already-playing element (or genuinely resumes if something else paused it).
+   */
+  holdReason(reason: PauseReason): void {
+    if (this.#reasons.has(reason)) return;
+    const effBefore = this.effectivePaused;
+    this.#reasons.add(reason);
+    if (this.effectivePaused !== effBefore) this.#emit("pauseChanged", this.effectivePaused);
+  }
+
+  /**
    * Pop `reason`. If the stack BECOMES empty, issue the controller's
    * video.play() (guarded by #selfIssued) and return its promise so callers can
    * await it (dub-start lock-step, Stage D). Idempotent per reason. Returns a

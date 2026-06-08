@@ -39,6 +39,10 @@ export class AdWatcher {
   /** Edge-detect state — true while an ad is currently on. */
   #adActive = false;
 
+  /** ms-epoch of the last true→false (ad-end) edge; null until the first ad ends.
+   *  Read by ContentApp.onEnded to ignore the spurious ad→content `ended`. */
+  lastAdEndAt: number | null = null;
+
   #onAdStart: (() => void) | null = null;
   #onAdEnd: (() => void) | null = null;
 
@@ -96,6 +100,19 @@ export class AdWatcher {
     return this.#adActive;
   }
 
+  /**
+   * Re-seed the edge-detector from the CURRENT ad state and fire the matching
+   * callback exactly once if it changed (same edge semantics as the observer/poll
+   * `#evaluate`). Call after a seek — a seek-induced mid-roll may flip the ad
+   * state without the observer firing, and the 250ms poll would otherwise lag by
+   * up to one tick. Does NOT touch the MutationObserver (the same-page seek keeps
+   * `#movie_player`, so the observer is still bound to the right node). Idempotent
+   * when the state is unchanged. Body filled by Agent 1 (Fix C).
+   */
+  reseed(): void {
+    this.#evaluate();
+  }
+
   // ── Internals ──────────────────────────────────────────────────────────────
 
   #isAdPlaying(): boolean {
@@ -116,6 +133,11 @@ export class AdWatcher {
       console.info("[ad] ad STARTED → pause dub");
       this.#onAdStart?.();
     } else {
+      // Set lastAdEndAt FIRST — before invoking #onAdEnd — because the callback
+      // chain (#onAdEnd → #exitAdPause → lifecycle.resume("ad") → video.play())
+      // may fire a spurious `ended` event synchronously, and onEnded must read a
+      // fresh (non-null) lastAdEndAt to suppress it via the AD_END_GRACE_MS gate.
+      this.lastAdEndAt = Date.now();
       console.info("[ad] ad ENDED → resume dub");
       this.#onAdEnd?.();
     }

@@ -682,3 +682,245 @@ describe("fetchYouTubeCaptions — captured page network (layer-0)", () => {
     expect(result?.captions.length).toBeGreaterThan(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fix D6 — Layer-0 captured guard: skip entries whose lang/tlang === avoidLang
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("fetchYouTubeCaptions — D6: layer-0 avoidLang guard (cc-url/cc-body)", () => {
+  async function seedCapture(detail: Record<string, unknown>): Promise<void> {
+    const cache = await import("@/platforms/youtube/yt-mainworld-cache");
+    cache.__resetYtMainWorldCache();
+    cache.installYtMainWorldBridge();
+    document.dispatchEvent(
+      new CustomEvent("echoly:yt-capture", { detail: JSON.stringify(detail) }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    vi.doMock("@/shared/protocol", () => ({
+      sendFromContent: vi.fn().mockResolvedValue({ ok: false }),
+    }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+  });
+
+  it("D6a: skips a captured cc-url whose tlang === avoidLang (auto-translated target track)", async () => {
+    // Seed a captured cc-url whose URL has tlang=vi (auto-translated Vietnamese).
+    // With avoidLang=vi, this entry must be skipped → falls through to layer-1/2.
+    // We set up fetch to return captions on the fallback layer (via DOM captionTracks)
+    // so we can verify the layer-0 entry was NOT used.
+    await seedCapture({
+      kind: "cc-url",
+      // lang=en (source) + tlang=vi (auto-translated to target) — this is the
+      // WRONG track to use as the source (it IS the target).
+      url: "https://www.youtube.com/api/timedtext?v=vidD6a&lang=en&tlang=vi&fmt=srv3",
+    });
+
+    // The fetch mock returns captions when called (to simulate the fallback URL
+    // succeeding for the DOM layer).
+    const captured: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string) => {
+        captured.push(url as string);
+        return fakeJsonResponse(FAKE_JSON3_BODY);
+      }),
+    );
+
+    const mod = await import("@/platforms/youtube/captions-fetch");
+    // Call with avoidLang=vi — the cc-url with tlang=vi must be skipped.
+    const result = await mod.fetchYouTubeCaptions("vidD6a", "en", undefined, "vi");
+
+    // The captured cc-url with tlang=vi must NOT have been fetched.
+    const capturedUrls = captured.filter((u) => u.includes("tlang=vi"));
+    expect(capturedUrls).toHaveLength(0);
+
+    // A different layer (fallback timedtext) was tried (or result is null if all fail).
+    // Either way, the avoidLang guard prevented the target-language track from being used.
+    // We just need to ensure it wasn't the captured tlang=vi URL that succeeded.
+    // (Result may be null if no other layer has data in this test setup.)
+    // The key assertion is the captured URL was NOT fetched.
+    expect(capturedUrls).toHaveLength(0);
+  });
+
+  it("D6b: skips a captured cc-body whose URL lang === avoidLang", async () => {
+    // Seed a captured cc-body whose URL has lang=vi (the target/avoid language).
+    await seedCapture({
+      kind: "cc-body",
+      url: "https://www.youtube.com/api/timedtext?v=vidD6b&lang=vi&fmt=json3",
+      body: JSON.stringify(FAKE_JSON3_BODY),
+    });
+
+    const fetchSpy = vi.fn().mockResolvedValue(fakeJsonResponse(null, false));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const mod = await import("@/platforms/youtube/captions-fetch");
+    // With avoidLang=vi, the cc-body with lang=vi must be skipped.
+    const result = await mod.fetchYouTubeCaptions("vidD6b", "en", undefined, "vi");
+
+    // The body was skipped → result is null (no other layers have data).
+    // The critical invariant: the vi-language body was NOT used as source.
+    expect(result).toBeNull();
+  });
+
+  it("D6c: does NOT skip a captured cc-url when lang !== avoidLang (en url, vi avoidLang)", async () => {
+    // An English-language captured cc-url must pass through with avoidLang=vi.
+    await seedCapture({
+      kind: "cc-url",
+      url: "https://www.youtube.com/api/timedtext?v=vidD6c&lang=en&fmt=srv3",
+    });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeJsonResponse(FAKE_JSON3_BODY)));
+
+    const mod = await import("@/platforms/youtube/captions-fetch");
+    const result = await mod.fetchYouTubeCaptions("vidD6c", "en", undefined, "vi");
+
+    // English URL was NOT skipped → captions returned.
+    expect(result?.captions.length).toBeGreaterThan(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Problem-2 follow-up — Layer-0 honors an EXPLICIT source language. The captured
+// track is whatever the player itself fetched (its default/shown CC); when the
+// user explicitly chose a source, a captured track in a DIFFERENT language must be
+// skipped so a later layer can target the requested language. AUTO keeps using it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("fetchYouTubeCaptions — layer-0 explicit-source guard", () => {
+  async function seedCapture(detail: Record<string, unknown>): Promise<void> {
+    const cache = await import("@/platforms/youtube/yt-mainworld-cache");
+    cache.__resetYtMainWorldCache();
+    cache.installYtMainWorldBridge();
+    document.dispatchEvent(
+      new CustomEvent("echoly:yt-capture", { detail: JSON.stringify(detail) }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    vi.doMock("@/shared/protocol", () => ({
+      sendFromContent: vi.fn().mockResolvedValue({ ok: false }),
+    }));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+  });
+
+  it("EXPLICIT source 'ja' SKIPS a captured en cc-body (mismatch) → not used", async () => {
+    await seedCapture({
+      kind: "cc-body",
+      url: "https://www.youtube.com/api/timedtext?v=vidEx1&lang=en&fmt=json3",
+      body: JSON.stringify(FAKE_JSON3_BODY),
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeJsonResponse(null, false)));
+    const mod = await import("@/platforms/youtube/captions-fetch");
+    // sourcePref="ja" (explicit) ≠ captured lang "en" → skip → no other layer → null.
+    const result = await mod.fetchYouTubeCaptions("vidEx1", "ja", undefined, "vi");
+    expect(result).toBeNull();
+  });
+
+  it("AUTO (undefined source) USES the captured en cc-body (no explicit filter)", async () => {
+    await seedCapture({
+      kind: "cc-body",
+      url: "https://www.youtube.com/api/timedtext?v=vidEx2&lang=en&fmt=json3",
+      body: JSON.stringify(FAKE_JSON3_BODY),
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeJsonResponse(null, false)));
+    const mod = await import("@/platforms/youtube/captions-fetch");
+    // sourcePref=undefined (auto) → the captured en body is accepted.
+    const result = await mod.fetchYouTubeCaptions("vidEx2", undefined, undefined, "vi");
+    expect(result?.captions.length).toBeGreaterThan(0);
+  });
+
+  it("EXPLICIT source 'en' KEEPS a captured en cc-body (match)", async () => {
+    await seedCapture({
+      kind: "cc-body",
+      url: "https://www.youtube.com/api/timedtext?v=vidEx3&lang=en&fmt=json3",
+      body: JSON.stringify(FAKE_JSON3_BODY),
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeJsonResponse(null, false)));
+    const mod = await import("@/platforms/youtube/captions-fetch");
+    const result = await mod.fetchYouTubeCaptions("vidEx3", "en", undefined, "vi");
+    expect(result?.captions.length).toBeGreaterThan(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fix D4 — timedtext fallback URL uses source lang, NOT target lang
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("fetchYouTubeCaptions — D4: timedtext fallback URL uses source lang", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    vi.doMock("@/shared/protocol", () => ({
+      sendFromContent: vi.fn().mockResolvedValue({ ok: false }),
+    }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+  });
+
+  it("D4: the layer-3 timedtext fallback URL uses sourcePref (not targetLang)", async () => {
+    // No layer-0 (no cache), no layer-1 (intercept miss), no layer-2 (no DOM tracks).
+    // This forces the function into layer-3 (public timedtext fallback URLs).
+    // We capture the URLs that were fetched and assert they use the source lang.
+    const capturedUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string) => {
+        capturedUrls.push(url as string);
+        // Always fail → all attempts reach layer-3.
+        return fakeJsonResponse(null, false);
+      }),
+    );
+
+    const mod = await import("@/platforms/youtube/captions-fetch");
+    // sourcePref="en", avoidLang="vi" → timedtext fallback must use "en" (source),
+    // NOT "vi" (target). The old code used `targetLang || "vi"` — this is the bug.
+    await mod.fetchYouTubeCaptions("vidD4", "en", undefined, "vi");
+
+    // At least one layer-3 timedtext URL must have been attempted.
+    const timedtextUrls = capturedUrls.filter((u) => u.includes("api/timedtext"));
+    expect(timedtextUrls.length).toBeGreaterThan(0);
+
+    // NONE of the timedtext fallback URLs should contain `lang=vi` (the target).
+    // The old code: `lang = encodeURIComponent(targetLang || "vi")` → `lang=vi`.
+    // The fixed code: `lang = encodeURIComponent(sourcePref || "en")` → `lang=en`.
+    const targetLangUrls = timedtextUrls.filter((u) => {
+      const params = new URL(u).searchParams;
+      return params.get("lang") === "vi";
+    });
+    expect(targetLangUrls).toHaveLength(0);
+
+    // The dynamic lang param must be the source language (en).
+    const sourceAsLang = timedtextUrls.filter((u) => {
+      const params = new URL(u).searchParams;
+      return params.get("lang") === "en";
+    });
+    expect(sourceAsLang.length).toBeGreaterThan(0);
+  });
+});

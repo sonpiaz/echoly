@@ -10,12 +10,13 @@
 // returns the fn so we can invoke it directly with synthetic onUpdated payloads),
 // and spies on session.stop. We assert stop was (or wasn't) called per case.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resetChrome, type FakeChrome } from "../setup";
-import { registerNavStop } from "@/background/nav-stop";
+import { registerNavStop, resetNavStopState } from "@/background/nav-stop";
 import { Store } from "@/background/store";
 import { EcholyAuth } from "@/background/auth";
 import { SessionCoordinator } from "@/background/session-coordinator";
+import { NAV_STOP_RECHECK_MS } from "@/shared/constants";
 
 type Listener = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => void;
 
@@ -53,6 +54,11 @@ describe("nav-stop — bg tabs.onUpdated session-stop gating (FIX 1, Bug A auto-
   beforeEach(() => {
     chromeMock = resetChrome();
     void chromeMock;
+    resetNavStopState();
+  });
+
+  afterEach(() => {
+    resetNavStopState();
   });
 
   // ── (a) watch→watch SPA url change while running → SKIP the stop ──────────────
@@ -82,24 +88,40 @@ describe("nav-stop — bg tabs.onUpdated session-stop gating (FIX 1, Bug A auto-
   });
 
   // ── (c) leaving the watch context while running → STOP ────────────────────────
-  it("(c) running + url change to a non-watch (off-platform) url → session.stop IS called", () => {
+  it("(c) running + url change to a non-watch (off-platform) url → session.stop IS called (after recheck)", async () => {
     const { store, stopSpy, listener } = build();
     store.setRunning(true);
+    vi.useFakeTimers();
+    // chrome.tabs.get returns still-non-watch URL at expiry
+    chromeMock.tabs.get.mockResolvedValue({ id: SESSION_TAB, url: YT_HOME });
     // YouTube home is a youtube.com url but NOT a watch URL → adapter.isWatchUrl=false.
     listener(SESSION_TAB, { url: YT_HOME });
+    // stop is NOT immediate with an active session
+    expect(stopSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 50);
     expect(stopSpy).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 
-  it("(c'') running + url change to a non-supported scheme/url → session.stop IS called", () => {
+  it("(c'') running + url change to a non-supported scheme/url → session.stop IS called (after recheck)", async () => {
     const { store, stopSpy, listener } = build();
     store.setRunning(true);
+    vi.useFakeTimers();
+    // chrome.tabs.get returns still-non-watch URL at expiry
+    chromeMock.tabs.get.mockResolvedValue({
+      id: SESSION_TAB,
+      url: "https://www.youtube.com/results?search_query=x",
+    });
     // A chrome:// page is not parseable as a supported watch URL
     // (detectAdapterForUrl → generic, whose isWatchUrl can't apply to a
     // chrome-internal page) → falls through to stop. We use a clearly
     // non-dubbable destination distinct from the YT-home case above.
     listener(SESSION_TAB, { url: "https://www.youtube.com/results?search_query=x" });
     // youtube.com but NOT /watch and NOT /embed → YouTube adapter.isWatchUrl=false → stop.
+    expect(stopSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 50);
     expect(stopSpy).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 
   // NOTE on generic platforms: a destination on an UNKNOWN site (e.g. vimeo.com)
@@ -214,5 +236,172 @@ describe("nav-stop — bg tabs.onUpdated session-stop gating (FIX 1, Bug A auto-
       listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
       expect(stopSpy).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+// ── Fix B — deferred-stop re-check tests ──────────────────────────────────────
+// These specs cover the new deferred stop mechanism added to the SPA non-watch
+// branch. All use fake timers to control the NAV_STOP_RECHECK_MS window.
+
+describe("nav-stop — Fix B deferred-stop re-check (B1/B1b/B3/B4/B2)", () => {
+  let chromeMock: FakeChrome;
+
+  beforeEach(() => {
+    chromeMock = resetChrome();
+    resetNavStopState();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetNavStopState();
+  });
+
+  // B1 — active session + transient non-watch URL: before expiry a new onUpdated
+  // arrives with a watch URL for the same tab → session.stop MUST NOT be called.
+  it("B1: active session + transient non-watch → watch URL arrives before expiry → stop NOT called", async () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    // Trigger the deferred-stop path: SPA nav to non-watch URL.
+    listener(SESSION_TAB, { url: YT_HOME });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    // Before expiry, a watch URL arrives for the same tab (transient resolved).
+    listener(SESSION_TAB, { url: WATCH_A });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    // Advance past the window — the timer was cancelled; stop must STILL not fire.
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 100);
+    expect(stopSpy).not.toHaveBeenCalled();
+  });
+
+  // B1b — active session + non-watch URL; at expiry chrome.tabs.get returns a
+  // WATCH url → session.stop MUST NOT be called (tab recovered).
+  it("B1b: active session + non-watch → at expiry tabs.get returns watch URL → stop NOT called", async () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    // chrome.tabs.get will return a watch URL at expiry.
+    chromeMock.tabs.get.mockResolvedValue({ id: SESSION_TAB, url: WATCH_A });
+
+    listener(SESSION_TAB, { url: YT_HOME });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 50);
+    expect(stopSpy).not.toHaveBeenCalled();
+  });
+
+  // B3 — active session + non-watch URL; at expiry chrome.tabs.get returns a
+  // non-watch URL (still left the context) → session.stop IS called.
+  it("B3: active session + non-watch → at expiry tabs.get still non-watch → stop IS called", async () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    // chrome.tabs.get still returns the non-watch URL at expiry.
+    chromeMock.tabs.get.mockResolvedValue({ id: SESSION_TAB, url: YT_HOME });
+
+    listener(SESSION_TAB, { url: YT_HOME });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 50);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // B4 — active session on tab A schedules a deferred stop; before expiry
+  // store.state.tabId changes (different session) → at expiry stop NOT called.
+  it("B4: tabId changes before expiry → stale deferred-stop does NOT call stop", async () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    // chrome.tabs.get returns the non-watch URL at expiry (URL not recovered).
+    chromeMock.tabs.get.mockResolvedValue({ id: SESSION_TAB, url: YT_HOME });
+
+    listener(SESSION_TAB, { url: YT_HOME });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    // Simulate a different session taking over (different tabId).
+    store.setTabId(99);
+
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 50);
+    // The stale-guard sees store.state.tabId !== SESSION_TAB → no stop.
+    expect(stopSpy).not.toHaveBeenCalled();
+  });
+
+  // B2 — regression: hard nav (status:"loading") to a watch URL still stops
+  // immediately and sets continuation intent (hard-nav branch is UNCHANGED).
+  it("B2: hard nav status:loading to watch url → immediate stop + continuation intent (unchanged)", () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
+
+    // Hard nav: stop is immediate (no deferred timer involved).
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    const intent = store.getContinuationIntent();
+    expect(intent).not.toBeNull();
+    expect(intent?.tabId).toBe(SESSION_TAB);
+  });
+
+  // Additional: tab gone at expiry (chrome.tabs.get throws) → stop IS called.
+  it("tab removed before expiry (tabs.get throws) → stop IS called for cleanup", async () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    chromeMock.tabs.get.mockRejectedValue(new Error("No tab with id: 42"));
+
+    listener(SESSION_TAB, { url: YT_HOME });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 50);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // Additional: session ends before expiry (running→false) → stop NOT called.
+  it("session ends via another path before expiry → stop NOT called (not running at expiry)", async () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    chromeMock.tabs.get.mockResolvedValue({ id: SESSION_TAB, url: YT_HOME });
+
+    listener(SESSION_TAB, { url: YT_HOME });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    // Session ended via another path before the timer fires.
+    store.setRunning(false);
+    store.setConnecting(false);
+
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 50);
+    // The stale-guard sees !running && !connecting → no stop.
+    expect(stopSpy).not.toHaveBeenCalled();
+  });
+
+  // Additional: hard nav clears a pending deferred stop (real nav supersedes transient check).
+  it("hard nav after deferred-stop scheduled → clears the pending timer (no double-stop)", async () => {
+    const { store, stopSpy, listener } = build();
+    store.setRunning(true);
+    store.setTabId(SESSION_TAB);
+
+    chromeMock.tabs.get.mockResolvedValue({ id: SESSION_TAB, url: YT_HOME });
+
+    // First: schedule a deferred stop.
+    listener(SESSION_TAB, { url: YT_HOME });
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    // Before expiry: hard nav arrives → immediate stop + clears the pending timer.
+    store.setRunning(true); // re-arm running for the hard-nav check
+    listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+
+    // Advance past the original deferred window — it was cleared, so no second stop.
+    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 100);
+    expect(stopSpy).toHaveBeenCalledTimes(1); // still only 1
   });
 });

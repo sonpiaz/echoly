@@ -13,6 +13,8 @@ import { pipelineToastFromServer } from "@/lib/pipeline-error";
 import { notifyQuotaToBackground } from "@/lib/quota-notify";
 import { RTC_METADATA_CHANNEL } from "@/shared/rtc-metadata";
 import { currentSiteHost } from "@/shared/site-host";
+import { ECHOLY_WEB_URLS } from "@/shared/echoly-config";
+import { post } from "@/shared/protocol";
 import { applyLiveTranslationDelta } from "@/lib/caption-live";
 import { computeGain } from "@/lib/audio";
 import {
@@ -43,7 +45,7 @@ export interface WebRtcBuildOpts {
 }
 
 type MetadataEvent =
-  | { type: "error"; message?: string }
+  | { type: "error"; message?: string; code?: string; retryable?: boolean }
   | {
       type: "partial_translation";
       text: string;
@@ -60,6 +62,8 @@ type EventRecord = {
   type?: string;
   text?: string;
   message?: string;
+  code?: string;
+  retryable?: boolean;
   isFinal?: boolean;
   is_final?: boolean;
   segmentId?: number | null;
@@ -82,7 +86,12 @@ function parseMetadataEvent(raw: string): MetadataEvent | null {
   if (!obj || typeof obj.type !== "string") return null;
   switch (obj.type) {
     case "error":
-      return { type: "error", message: typeof obj.message === "string" ? obj.message : undefined };
+      return {
+        type: "error",
+        message: typeof obj.message === "string" ? obj.message : undefined,
+        code: typeof obj.code === "string" ? obj.code : undefined,
+        retryable: typeof obj.retryable === "boolean" ? obj.retryable : undefined,
+      };
     case "partial_translation": {
       if (typeof obj.text !== "string" || !obj.text) return null;
       const segRaw = obj.segmentId ?? obj.segment_id;
@@ -414,6 +423,27 @@ export class WebRtcPipeline {
 
     if (evt.type === "error") {
       const msg = evt.message?.trim() || "Translation error";
+      // Expiry-like codes (quota/tier/auth) warrant a persistent toast with a CTA.
+      // The server sends {type:"error", code:"quota_exhausted"} on the data-channel
+      // when the server-authoritative floor timer detects credit exhaustion (D1).
+      // Standard-live also emits the same frame (#onStandardSegmentTick).
+      const isExpiryCode =
+        evt.code === "quota_exhausted" ||
+        evt.code === "tier_locked" ||
+        evt.code === "unauthorized" ||
+        evt.code === "forbidden";
+      if (isExpiryCode) {
+        const upgradeUrl = ECHOLY_WEB_URLS.accountBilling();
+        overlay.showToast(msg, {
+          durationMs: 10000,
+          cta: upgradeUrl,
+          ctaLabel: evt.code === "unauthorized" ? "Sign in" : "Upgrade",
+        });
+        // Notify the background so it can mark the session as not running and
+        // reflect the quota state in the popup (no numeric fields available from
+        // the data-channel frame, but setRunning(false) is still useful).
+        post({ type: "CONTENT_QUOTA" });
+      }
       overlay.setStatusText(msg);
       this.app.stopSession(STOP_REASON.SERVER_ERROR);
       return;

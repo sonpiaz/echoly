@@ -1,5 +1,5 @@
-// Tier usage caps for popup meters — server SoT via bootstrap usage (standard.capCredits,
-// realtime.capCredits). Offline bootstrap when usage is missing or fetch failed.
+// Tier usage caps for popup meters — server SoT via bootstrap usage (capCredits,
+// realtimeAllowed). Offline bootstrap when usage is missing or fetch failed.
 // All values are CREDITS (1000 credits = $1 provider cost).
 
 import { offlineCapsForTier, type TierCap } from "@/lib/offline-tier-caps";
@@ -20,7 +20,7 @@ export function capsForUsage(
   const fallback = offlineCapsForTier(tier);
   if (!usage) return fallback;
   return {
-    std: usage.standardCap ?? fallback.std,
-    rt: usage.realtimeCap ?? fallback.rt,
+    cap: usage.cap ?? fallback.cap,
+    realtimeAllowed: usage.realtimeAllowed ?? fallback.realtimeAllowed,
   };
 }

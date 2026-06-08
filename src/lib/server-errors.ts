@@ -169,23 +169,16 @@ export function isExpiryLike(p: ParsedServerError): boolean {
   return p.kind === 'quota' || p.kind === 'auth' || p.kind === 'access';
 }
 
-/** Map a parsed 402 into store.usage fields (O(1), no bootstrap). */
+/** Map a parsed 402 into store.usage fields (O(1), no bootstrap).
+ *  Patches the unified pool — mode is no longer a quota dimension. */
 export function usagePatchFromServerError(parsed: ParsedServerError): Partial<Usage> | null {
   if (!parsed.isQuotaOrTier) return null;
   const patch: Partial<Usage> = {};
   if (parsed.resetsAt) patch.resetsAt = parsed.resetsAt;
-  if (parsed.mode === TIER_REALTIME) {
-    if (parsed.usedCredits != null) patch.realtime = parsed.usedCredits;
-    if (parsed.capCredits != null) patch.realtimeCap = parsed.capCredits;
-    if (parsed.usedCredits != null && parsed.capCredits != null) {
-      patch.realtimeRemaining = Math.max(0, parsed.capCredits - parsed.usedCredits);
-    }
-  } else {
-    if (parsed.usedCredits != null) patch.standard = parsed.usedCredits;
-    if (parsed.capCredits != null) patch.standardCap = parsed.capCredits;
-    if (parsed.usedCredits != null && parsed.capCredits != null) {
-      patch.standardRemaining = Math.max(0, parsed.capCredits - parsed.usedCredits);
-    }
+  if (parsed.usedCredits != null) patch.used = parsed.usedCredits;
+  if (parsed.capCredits != null) patch.cap = parsed.capCredits;
+  if (parsed.usedCredits != null && parsed.capCredits != null) {
+    patch.remaining = Math.max(0, parsed.capCredits - parsed.usedCredits);
   }
   return Object.keys(patch).length ? patch : null;
 }

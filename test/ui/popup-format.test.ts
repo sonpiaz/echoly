@@ -53,13 +53,12 @@ describe("fmtElapsed", () => {
 });
 
 describe("fmtCredits", () => {
-  it("formats credit integers with thousands separators", () => {
+  it("formats credit integers with thousands separators (unified caps: 500/6000/17000)", () => {
     expect(fmtCredits(0)).toBe("0");
-    expect(fmtCredits(1000)).toBe("1,000");
+    expect(fmtCredits(500)).toBe("500");
     expect(fmtCredits(4200)).toBe("4,200");
-    expect(fmtCredits(10000)).toBe("10,000");
-    expect(fmtCredits(28000)).toBe("28,000");
     expect(fmtCredits(6000)).toBe("6,000");
+    expect(fmtCredits(17000)).toBe("17,000");
   });
   it("rounds fractional credits to nearest integer", () => {
     expect(fmtCredits(999.7)).toBe("1,000");
@@ -90,16 +89,16 @@ describe("meterLevel", () => {
   });
 });
 
-describe("capsForTier (offline bootstrap — credits)", () => {
-  it("matches CAPS_CREDITS: free 1000, pro 10000, max 28000/6000", () => {
-    expect(capsForTier("free")).toEqual({ std: 1000, rt: 0 });
-    expect(capsForTier("pro")).toEqual({ std: 10000, rt: 0 });
-    expect(capsForTier("max")).toEqual({ std: 28000, rt: 6000 });
+describe("capsForTier (offline bootstrap — unified caps: 500/6000/17000)", () => {
+  it("matches CAPS_CREDITS: free 500, pro 6000, max 17000 + realtimeAllowed", () => {
+    expect(capsForTier("free")).toEqual({ cap: 500, realtimeAllowed: false });
+    expect(capsForTier("pro")).toEqual({ cap: 6000, realtimeAllowed: false });
+    expect(capsForTier("max")).toEqual({ cap: 17000, realtimeAllowed: true });
   });
-  it("unknown / nullish tier falls back to free", () => {
-    expect(capsForTier("unknown")).toEqual({ std: 1000, rt: 0 });
-    expect(capsForTier(undefined)).toEqual({ std: 1000, rt: 0 });
-    expect(capsForTier(null)).toEqual({ std: 1000, rt: 0 });
+  it("unknown / nullish tier falls back to free (cap=500)", () => {
+    expect(capsForTier("unknown")).toEqual({ cap: 500, realtimeAllowed: false });
+    expect(capsForTier(undefined)).toEqual({ cap: 500, realtimeAllowed: false });
+    expect(capsForTier(null)).toEqual({ cap: 500, realtimeAllowed: false });
   });
 });
 

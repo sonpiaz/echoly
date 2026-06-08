@@ -14,11 +14,14 @@ export type AccountTier = "free" | "pro" | "max";
 /** Signed-in Echoly session routes API calls through the server proxy. */
 export type ApiMode = "proxy" | null;
 
-/** The 8 persisted settings keys (chrome.storage.local). `apiBearer` is not
+/** The persisted settings keys (chrome.storage.local). `apiBearer` is not
  *  user-editable; CONTENT_START overwrites it with the session bearer. */
 export interface Settings {
   tier: TranslationTier;
   targetLanguage: string;
+  /** Source (spoken) language of the video. `"auto"` = auto-detect the original
+   *  caption track; an explicit BCP-47 code (e.g. `"en"`) forces that source. */
+  sourceLanguage: string;
   realtimeVoice: string;
   standardVoice: string;
   originalVolume: number;
@@ -32,6 +35,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   tier: DEFAULT_TRANSLATION_TIER,
   targetLanguage: "vi",
+  sourceLanguage: "auto",
   realtimeVoice: "marin",
   standardVoice: "English_magnetic_voiced_man",
   originalVolume: 18,
@@ -49,14 +53,14 @@ export interface SignedInUser {
 }
 
 export interface Usage {
-  standard: number; // used credits (standard tier)
-  realtime: number; // used credits (realtime tier)
-  /** Server credit caps from session bootstrap (UsageMeterC.capCredits). */
-  standardCap?: number;
-  realtimeCap?: number;
-  /** Server-computed remaining credits (preferred over cap - used). */
-  standardRemaining?: number;
-  realtimeRemaining?: number;
+  /** Total credits used this period (unified pool — standard + realtime). */
+  used: number;
+  /** Unified pool cap from server snapshot (capCredits). */
+  cap?: number;
+  /** Server-computed remaining credits from unified pool. */
+  remaining?: number;
+  /** Max-only feature entitlement flag from server snapshot. */
+  realtimeAllowed?: boolean;
   /** Period end from bootstrap `usage.resetsAt` (anchor-based; not calendar month). */
   resetsAt?: string;
 }

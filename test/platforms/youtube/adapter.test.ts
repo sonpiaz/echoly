@@ -6,10 +6,96 @@
 //   - youtubeAdapter.readLiveCaptionText() with .ytp-caption-segment spans present
 //   - youtubeAdapter.readLiveCaptionText() with no matching elements → null
 //   - genericAdapter.readLiveCaptionText() → always null
+//   - D3: youtubeAdapter.fetchCaptions forwards preferLang+avoidLang to
+//         fetchYouTubeCaptionsWithSettle correctly
 
-import { beforeEach, afterEach, describe, it, expect } from "vitest";
+import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { youtubeAdapter } from "@/platforms/youtube/adapter";
 import { genericAdapter } from "@/platforms/generic/adapter";
+
+// ─── D3: fetchCaptions argument forwarding ─────────────────────────────────────
+// The adapter must translate opts.preferLang (default "en") + opts.avoidLang into
+// the matching positional args of fetchYouTubeCaptionsWithSettle.
+
+vi.mock("@/platforms/youtube/captions-fetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/platforms/youtube/captions-fetch")>();
+  return {
+    ...actual,
+    fetchYouTubeCaptionsWithSettle: vi.fn().mockResolvedValue(null),
+  };
+});
+
+describe("youtubeAdapter.fetchCaptions — D3: argument forwarding", () => {
+  // Import the spy AFTER the vi.mock above is in place.
+  // Dynamic import inside each test ensures we see the mocked version.
+
+  it("D3a: forwards opts.preferLang and opts.avoidLang to fetchYouTubeCaptionsWithSettle", async () => {
+    const { fetchYouTubeCaptionsWithSettle } = await import(
+      "@/platforms/youtube/captions-fetch"
+    );
+    const spy = fetchYouTubeCaptionsWithSettle as ReturnType<typeof vi.fn>;
+    spy.mockClear();
+
+    const signal = new AbortController().signal;
+    await youtubeAdapter.fetchCaptions({
+      videoId: "v1",
+      preferLang: "en",
+      avoidLang: "vi",
+      signal,
+    });
+
+    expect(spy).toHaveBeenCalledOnce();
+    // Positional args: (videoId, sourcePref, signal, opts?, avoidLang?)
+    // adapter.ts: fetchYouTubeCaptionsWithSettle(opts.videoId, opts.preferLang, opts.signal, undefined, opts.avoidLang)
+    const [calledVideoId, calledSourcePref, , , calledAvoidLang] = spy.mock.calls[0]!;
+    expect(calledVideoId).toBe("v1");
+    expect(calledSourcePref).toBe("en");   // sourcePref = opts.preferLang (explicit)
+    expect(calledAvoidLang).toBe("vi");    // avoidLang forwarded as 5th arg
+  });
+
+  it("D3b: opts.avoidLang is forwarded even when preferLang differs from avoidLang", async () => {
+    const { fetchYouTubeCaptionsWithSettle } = await import(
+      "@/platforms/youtube/captions-fetch"
+    );
+    const spy = fetchYouTubeCaptionsWithSettle as ReturnType<typeof vi.fn>;
+    spy.mockClear();
+
+    const signal = new AbortController().signal;
+    await youtubeAdapter.fetchCaptions({
+      videoId: "v2",
+      preferLang: "ja",
+      avoidLang: "vi",
+      signal,
+    });
+
+    expect(spy).toHaveBeenCalledOnce();
+    const [, calledSourcePref, , , calledAvoidLang] = spy.mock.calls[0]!;
+    expect(calledSourcePref).toBe("ja");
+    expect(calledAvoidLang).toBe("vi");
+  });
+
+  it("D3c: when preferLang is omitted (AUTO), sourcePref is forwarded as undefined (NOT defaulted to 'en')", async () => {
+    const { fetchYouTubeCaptionsWithSettle } = await import(
+      "@/platforms/youtube/captions-fetch"
+    );
+    const spy = fetchYouTubeCaptionsWithSettle as ReturnType<typeof vi.fn>;
+    spy.mockClear();
+
+    const signal = new AbortController().signal;
+    // No preferLang supplied — "auto": the adapter passes undefined so the picker
+    // runs in AUTO mode (ASR/original-first) instead of forcing an explicit "en".
+    await youtubeAdapter.fetchCaptions({
+      videoId: "v3",
+      avoidLang: "vi",
+      signal,
+    });
+
+    expect(spy).toHaveBeenCalledOnce();
+    const [, calledSourcePref, , , calledAvoidLang] = spy.mock.calls[0]!;
+    expect(calledSourcePref).toBeUndefined();  // AUTO → undefined (no forced "en")
+    expect(calledAvoidLang).toBe("vi");
+  });
+});
 
 // ─── Setup / teardown ─────────────────────────────────────────────────────────
 

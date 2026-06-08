@@ -146,6 +146,36 @@ describe("LifecycleController — reason stack", () => {
     expect(v.pause).toHaveBeenCalledTimes(1); // still 1 — stack was non-empty
   });
 
+  it("holdReason adds a reason + flips effectivePaused WITHOUT issuing video.pause()", () => {
+    const lc = new LifecycleController();
+    const v = makeFakeVideo();
+    lc.setVideo(v);
+    const changed: boolean[] = [];
+    lc.on("pauseChanged", (p) => changed.push(p));
+    lc.holdReason("ad");
+    // Reason held + effectivePaused true (dub gated) ...
+    expect(lc.isPausedFor("ad")).toBe(true);
+    expect(lc.effectivePaused).toBe(true);
+    expect(changed).toEqual([true]);
+    // ... but the <video> was NOT paused (ad shares the element, must play through).
+    expect(v.pause).not.toHaveBeenCalled();
+    expect(v.paused).toBe(false);
+    // Idempotent.
+    lc.holdReason("ad");
+    expect(changed).toEqual([true]);
+  });
+
+  it("holdReason('ad') then resume('ad') recovers: stack empties, play() resumes the element", async () => {
+    const lc = new LifecycleController();
+    const v = makeFakeVideo();
+    lc.setVideo(v);
+    lc.holdReason("ad");
+    expect(v.pause).not.toHaveBeenCalled();
+    await lc.resume("ad");
+    expect(lc.effectivePaused).toBe(false);
+    expect(v.play).toHaveBeenCalledTimes(1); // harmless play() — ensures content is playing
+  });
+
   it("resume() only plays when the LAST reason is popped (AND semantics)", async () => {
     const lc = new LifecycleController();
     const v = makeFakeVideo();

@@ -5,15 +5,15 @@
 import type { AccountTier } from "@/shared/types";
 
 export interface TierCap {
-  readonly std: number; // standard credits cap
-  readonly rt: number;  // realtime credits cap (0 for non-Max plans)
+  readonly cap: number;            // unified pool credits cap
+  readonly realtimeAllowed: boolean; // Max-only feature entitlement (replaces rt > 0 trick)
 }
 
-/** Keep aligned with server CAPS_CREDITS: free {std:1000,rt:0}, pro {std:10000,rt:0}, max {std:28000,rt:6000}. */
+/** Keep aligned with server CAPS_CREDITS: free {cap:500}, pro {cap:6000}, max {cap:17000, realtimeAllowed:true}. */
 export const OFFLINE_TIER_CAPS: Readonly<Record<AccountTier, TierCap>> = {
-  free: { std: 1000, rt: 0 },
-  pro: { std: 10000, rt: 0 },
-  max: { std: 28000, rt: 6000 },
+  free: { cap: 500,   realtimeAllowed: false },
+  pro:  { cap: 6000,  realtimeAllowed: false },
+  max:  { cap: 17000, realtimeAllowed: true  },
 };
 
 export function offlineCapsForTier(tier: string | null | undefined): TierCap {

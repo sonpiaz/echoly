@@ -133,10 +133,13 @@
       <div class="session-row session-row--trans">
         <span class="label">Dubbing to</span>
         <div class="trans-grid">
-          <div class="lang-side">
-            <span class="flag-chip flag-chip--auto" id="src-flag">??</span>
+          <div class="lang-side lang-side--left" id="src-trigger">
+            <svg class="lang-chev lang-chev--left" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M9 4.5l-3 3-3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="flag-chip flag-chip--src" id="src-flag">??</span>
             <span class="lang-name" id="src-name">Auto-detect</span>
-            <span class="lang-auto-badge">auto</span>
+            <select id="src-lang" class="dropdown-mirror-select" aria-label="Source language"></select>
           </div>
           <div class="trans-divider"></div>
           <svg class="swap-ico" viewBox="0 0 12 12" aria-hidden="true">
@@ -365,22 +368,10 @@
       </div>
       <div class="um-block" id="um-std">
         <div class="um-row">
-          <span class="um-label">Standard</span>
+          <span class="um-label">Credits</span>
           <span class="um-numbers"><span id="um-std-used">0</span> / <span id="um-std-cap">— credits</span></span>
         </div>
         <div class="um-track"><div class="um-fill" id="um-std-fill" style="width:0%"></div></div>
-      </div>
-      <div class="um-block um-block--accent" id="um-rt" hidden>
-        <div class="um-row">
-          <span class="um-label">
-            <svg viewBox="0 0 9 9" fill="currentColor" aria-hidden="true" class="um-bolt">
-              <path d="M4.9 0.5L2.5 5.2h1.9L4 8.5l2.6-4.5H4.6L4.9 0.5z"/>
-            </svg>
-            Realtime
-          </span>
-          <span class="um-numbers"><span id="um-rt-used">0</span> / <span id="um-rt-cap">— credits</span></span>
-        </div>
-        <div class="um-track"><div class="um-fill" id="um-rt-fill" style="width:0%"></div></div>
       </div>
     </div>
 

@@ -173,6 +173,47 @@ describe("Stage C — ad pause routes through the lifecycle", () => {
     app.stopAdWatcher();
   });
 
+  it("ad-start does NOT pause the source <video> (shared element) — no freeze deadlock; recovers on ad-end", async () => {
+    // Regression: a YouTube ad plays in the SAME <video> as the content. If
+    // entering ad-pause paused that element, the ad itself would freeze → it never
+    // ends → isAdPlaying() stays true → onAdEnd never fires → the dub is silenced
+    // forever ("mất tiếng luôn khi seek vào ad"). The dub must be gated purely via
+    // effectivePaused while the ad plays through.
+    let ad = false;
+    const app = makeAppWithSession(() => ad);
+    app.sm.session = makeWebRtcSession();
+
+    // Bind a real <video> so we can observe whether the controller paused it.
+    const video = document.createElement("video");
+    const pauseSpy = vi.spyOn(video, "pause").mockImplementation(() => {});
+    vi.spyOn(video, "play").mockResolvedValue(undefined as never);
+    Object.defineProperty(video, "paused", { value: false, writable: true, configurable: true });
+    app.lifecycle.setVideo(video);
+    app.startAdWatcher();
+
+    // Ad starts.
+    ad = true;
+    vi.advanceTimersByTime(AD_WAIT_POLL_MS);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Dub is gated (silenced) ...
+    expect(app.lifecycle.isPausedFor("ad")).toBe(true);
+    expect(app.lifecycle.effectivePaused).toBe(true);
+    // ... but the source <video> was NOT paused → the ad keeps playing → it can end.
+    expect(pauseSpy).not.toHaveBeenCalled();
+
+    // Ad ends → the watcher sees isAdPlaying() flip false → clean recovery.
+    ad = false;
+    vi.advanceTimersByTime(AD_WAIT_POLL_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(app.lifecycle.isPausedFor("ad")).toBe(false);
+    expect(app.lifecycle.effectivePaused).toBe(false);
+    // The source <video> was never paused by the ad path across the whole cycle.
+    expect(pauseSpy).not.toHaveBeenCalled();
+
+    app.stopAdWatcher();
+  });
+
   it("WebRTC ad-pause disables the outbound sender track AND POSTs media-pause (metering freezes)", async () => {
     let ad = false;
     const app = makeAppWithSession(() => ad);

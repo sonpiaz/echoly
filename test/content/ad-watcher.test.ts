@@ -211,3 +211,93 @@ describe("AdWatcher — edge detect (MutationObserver on #movie_player class)", 
     watcher.stop();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A4 — lastAdEndAt is set BEFORE the onAdEnd callback fires (ordering invariant)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("AdWatcher — A4: lastAdEndAt ordering (set before onAdEnd callback)", () => {
+  it("lastAdEndAt is non-null synchronously when onAdEnd is invoked (not after)", () => {
+    // Start with an ad already running (seed adActive=true), then let it end.
+    let ad = true;
+    const adapter = makeAdAdapter({ isAdPlaying: () => ad });
+    const watcher = new AdWatcher(makeApp(adapter));
+
+    let lastAdEndAtDuringCallback: number | null | undefined = undefined;
+    const onEnd = vi.fn(() => {
+      // Capture the value of lastAdEndAt at the moment the callback fires.
+      // The ordering requirement: it must already be set (non-null) BEFORE
+      // onAdEnd is invoked, not after.
+      lastAdEndAtDuringCallback = watcher.lastAdEndAt;
+    });
+
+    watcher.start(vi.fn(), onEnd);
+    // Verify the watcher seeded correctly (no callback at start for an active ad).
+    expect(watcher.adActive).toBe(true);
+    expect(watcher.lastAdEndAt).toBeNull();
+
+    // Simulate ad ending via the poll.
+    ad = false;
+    vi.advanceTimersByTime(AD_WAIT_POLL_MS);
+
+    expect(onEnd).toHaveBeenCalledTimes(1);
+    // lastAdEndAt must have been set BEFORE the callback was invoked.
+    expect(lastAdEndAtDuringCallback).not.toBeNull();
+    expect(typeof lastAdEndAtDuringCallback).toBe("number");
+    // And it remains set after.
+    expect(watcher.lastAdEndAt).not.toBeNull();
+
+    watcher.stop();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C1 / C2 — reseed() edge semantics and idempotency
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("AdWatcher — C1/C2: reseed() after a seek", () => {
+  it("C1 — reseed() fires onAdStart exactly once when the ad class is now on (observer may have missed it)", () => {
+    // The watcher is started with no ad, then the ad state changes (simulating
+    // the observer missing it during a seek). reseed() re-reads and edge-fires.
+    let ad = false;
+    const adapter = makeAdAdapter({ isAdPlaying: () => ad });
+    const watcher = new AdWatcher(makeApp(adapter));
+    const onStart = vi.fn();
+    watcher.start(onStart, vi.fn());
+
+    expect(watcher.adActive).toBe(false);
+
+    // Flip ad state (as if the observer missed it during the seek).
+    ad = true;
+    // Do NOT advance fake timers — the poll has not fired yet.
+
+    // reseed() must detect the flip and fire onAdStart exactly once.
+    watcher.reseed();
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(watcher.adActive).toBe(true);
+
+    // Calling reseed() again with unchanged state must not fire again (idempotent).
+    watcher.reseed();
+    expect(onStart).toHaveBeenCalledTimes(1);
+
+    watcher.stop();
+  });
+
+  it("C2 — reseed() with unchanged ad state fires no callback (idempotent)", () => {
+    let ad = false;
+    const adapter = makeAdAdapter({ isAdPlaying: () => ad });
+    const watcher = new AdWatcher(makeApp(adapter));
+    const onStart = vi.fn();
+    const onEnd = vi.fn();
+    watcher.start(onStart, onEnd);
+
+    // No state change — reseed() must be a no-op.
+    watcher.reseed();
+    watcher.reseed();
+    watcher.reseed();
+    expect(onStart).not.toHaveBeenCalled();
+    expect(onEnd).not.toHaveBeenCalled();
+
+    watcher.stop();
+  });
+});

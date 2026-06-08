@@ -174,8 +174,11 @@ export interface PlatformAdapter {
   fetchCaptions(opts: {
     videoId: string;
     /** BCP-47 preferred source language (e.g. `"en"`). Optional — the adapter
-     *  picks the best available track when omitted. */
+     *  picks the best available (original) track when omitted. */
     preferLang?: string;
+    /** BCP-47 output/target language to AVOID selecting as the source track
+     *  (never dub target→target). Adapters may ignore it. */
+    avoidLang?: string;
     signal: AbortSignal;
   }): Promise<CaptionFetchResult | null>;
 

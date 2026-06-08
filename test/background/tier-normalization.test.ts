@@ -21,7 +21,7 @@ vi.mock("@/background/voice-catalog", async (importOriginal) => {
 function bootstrapFor(tier: AccountTier) {
   return {
     user: { email: "u@e.com", tier },
-    usage: { standard: 0, realtime: 0 },
+    usage: { used: 0 },
     catalog: { picker: [["vi", "Vietnamese"] as const], languageNames: { vi: "Vietnamese" } },
     voices: { voices: [["v1", "Voice"] as const], defaultId: "v1" },
   };
