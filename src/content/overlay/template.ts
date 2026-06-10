@@ -51,6 +51,7 @@ export const OVERLAY_TEMPLATE = `
         <span class="ec-dock-live">Live</span>
         <span class="ec-state" data-ec-status>Ready</span>
         <span class="ec-dock-sync" data-ec-sync-hint hidden aria-live="polite"></span>
+        <span class="ec-dock-eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
         <button class="ec-dock-caption" type="button" data-ec-caption-toggle aria-pressed="true" aria-label="Subtitles on video" title="Subtitles on/off">CC</button>
         <button class="ec-dock-expand" type="button" data-ec-expand aria-label="Expand controls" title="Expand">⋯</button>
         <button class="ec-dock-stop" type="button" data-ec-stop aria-label="Stop dubbing" title="Stop dubbing"></button>
