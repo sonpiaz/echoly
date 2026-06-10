@@ -1,14 +1,31 @@
-/* Echoly V5 in-page overlay — glass mini dock + bottom caption strip */
+/* Echoly — Warm Studio overlay v1.0
+ * In-page glass Island dock + caption strip.
+ * All data-ec-* attributes and .ec-* class contracts preserved.
+ * FONT: system stack only — no webfont inject on host pages. */
 
-/* ZERO-SIZE host. The host MUST NOT be a full-viewport box: every child
-   (.ec-dock / .ec-panel / .ec-caption-stack / toast) is position:fixed and
-   JS-anchored to the video rect, so the root needs no size. A full-viewport
-   `inset:0` fixed root with backdrop-filter children promotes a full-screen
-   compositor surface on YouTube → a dark scrim over the whole page on Start.
-   Collapsing to 0×0 removes that surface; fixed children are viewport-anchored
-   (root has no transform/filter/contain → it is NOT their containing block).
-   Also: do NOT use contain:paint here — it would clip the fixed descendants. */
+/* ZERO-SIZE host. Fixed children are NOT clipped by this root.
+   Tokens are set here alongside layout so the first .ec-root block passes
+   the overlay-root-no-fullscreen.test.ts assertions. Do NOT add
+   transform/filter/contain — they would make this the containing block for
+   the fixed children and break dock/caption positioning. */
 .ec-root {
+  /* ── Warm Studio tokens (scoped to the overlay shadow-tree) ── */
+  --ec-glass-bg:      rgba(26,20,15,.82);
+  --ec-glass-border:  rgba(255,255,255,.16);
+  --ec-glass-text:    #FFFFFF;
+  --ec-glass-text-dim:rgba(255,255,255,.55);
+  --ec-tangerine:     #FF7A3C;
+  --ec-tangerine-deep:#F25B17;
+  --ec-glow:          #FFB28A;
+  --ec-grad-orb:      radial-gradient(120% 120% at 25% 20%, #FFB28A 0%, #FF7A3C 52%, #F25B17 100%);
+  --ec-grad-brand:    linear-gradient(135deg, #FF7A3C 0%, #F25B17 100%);
+  --ec-cocoa:         #3B2A1E;
+  --ec-cocoa-soft:    #8A715D;
+  --ec-success:       #2E9E5B;
+  --ec-danger:        #E0442A;
+  --ec-warning:       #E8A013;
+  --ec-shadow-island: 0 14px 34px -10px rgba(26,20,15,.55), inset 0 1px 0 rgba(255,255,255,.12);
+  /* ── Layout ── */
   position: fixed;
   top: 0;
   left: 0;
@@ -20,9 +37,9 @@
   border: none;
   background: transparent;
   overflow: visible;
-  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
-  color: #221e2c;
+  color: var(--ec-glass-text);
   -webkit-font-smoothing: antialiased;
   pointer-events: none;
 }
@@ -35,7 +52,9 @@
   pointer-events: auto;
 }
 
-/* ─── Mini dock — positioned by JS from video stage (no static top/right) ─── */
+/* ─── THE ISLAND — mini dock ───────────────────────────────────────────────
+   Signature element: dark glass pill, orb, EQ bars.
+   Positioned by JS (no static top/right). */
 .ec-dock {
   position: fixed;
   top: 0;
@@ -44,14 +63,14 @@
   z-index: 2;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px 6px 8px;
-  border-radius: 999px;
-  background: rgba(12, 12, 14, 0.78);
-  backdrop-filter: blur(8px) saturate(120%);
-  -webkit-backdrop-filter: blur(8px) saturate(120%);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  gap: 10px;
+  padding: 9px 16px 9px 11px;
+  border-radius: 100px;
+  background: var(--ec-glass-bg);
+  backdrop-filter: blur(16px) saturate(120%);
+  -webkit-backdrop-filter: blur(16px) saturate(120%);
+  border: 1px solid var(--ec-glass-border);
+  box-shadow: var(--ec-shadow-island);
   cursor: grab;
   user-select: none;
   transition: left 0.15s ease, top 0.15s ease, opacity 0.2s ease;
@@ -61,160 +80,97 @@
   cursor: grabbing;
 }
 
+/* Orb — the glowing tangerine sphere */
 .ec-dock-mark {
   position: relative;
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
-  background: linear-gradient(135deg, #ff9764 0%, #ff6fb1 55%, #8b5bff 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
   flex-shrink: 0;
+  background: var(--ec-grad-orb);
+  animation: ec-orb-breathe 2.4s ease-in-out infinite;
 }
 
+/* State: pause dims the orb */
+.ec-root[data-state="paused"] .ec-dock-mark,
+.ec-root[data-state="paused"] .ec-panel-mark {
+  opacity: 0.45;
+  animation: none;
+}
+
+/* SVG icon inside the mark */
 .ec-dock-mark svg {
-  width: 12px;
-  height: 12px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 5px;
   color: #fff;
 }
 
+/* Live indicator dot — now minimal, hidden (orb already signals state) */
 .ec-live-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #8b5bff;
-  flex-shrink: 0;
-  animation: ec-pulse 1.4s ease-in-out infinite;
+  display: none;
 }
 
-.ec-root[data-state="live"] .ec-live-dot,
-.ec-root[data-state="connecting"] .ec-live-dot,
-.ec-root[data-state="switching"] .ec-live-dot {
-  background: #ff6fb1;
-}
-
-.ec-root[data-state="paused"] .ec-live-dot {
-  background: #c77b00;
-  animation: none;
-}
-
-.ec-root[data-state="error"] .ec-live-dot {
-  background: #c73c5b;
-  animation: none;
-}
-
-@keyframes ec-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.55;
-    transform: scale(0.85);
-  }
-}
-
-/* ─── Branded loading animation: conic ring spinner on the logo mark ───────
-   Driven purely by data-state attribute selectors — zero JS required.
-   ::after draws a conic-gradient ring that rotates around the square mark.
-   Works on both .ec-dock-mark (dock pill) and .ec-panel-mark (expanded panel).
-   position:relative has been added to both marks above to contain the ring. */
-
+/* ── Connecting state: conic ring spinner ────────────────────────── */
 @keyframes ec-mark-spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
 }
-
-/* Connecting = conic/ring spinner — "intentional work in progress" */
 @keyframes ec-mark-ring-appear {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
-
-/* Buffering = gentler opacity+scale pulse — "momentarily waiting" (different
-   from connecting so the user can visually distinguish the two states). */
 @keyframes ec-mark-buffer-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.6;
-    transform: scale(0.92);
-  }
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%     { opacity: 0.6; transform: scale(0.92); }
 }
 
-/* ── Connecting state: conic ring spinner on the logo mark ────────────── */
 .ec-root[data-state="connecting"] .ec-dock-mark::after,
 .ec-root[data-state="connecting"] .ec-panel-mark::after {
   content: "";
   position: absolute;
-  /* -3px outset so the ring wraps just outside the 5px border-radius square */
   inset: -3px;
-  border-radius: 8px;
-  /* Conic gradient traces the brand palette around the ring */
+  border-radius: 50%;
   background: conic-gradient(
     from 0deg,
-    #ff9764 0%,
-    #ff6fb1 33%,
-    #8b5bff 66%,
-    transparent 75%,
-    transparent 100%
+    var(--ec-glow)          0%,
+    var(--ec-tangerine)     40%,
+    var(--ec-tangerine-deep) 70%,
+    transparent              80%,
+    transparent             100%
   );
-  /* Mask out the center so only a thin ring is visible */
-  -webkit-mask:
-    radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
-  mask:
-    radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
-  animation:
-    ec-mark-spin 0.85s linear infinite,
-    ec-mark-ring-appear 0.15s ease-out both;
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+  mask:         radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+  animation: ec-mark-spin 0.85s linear infinite, ec-mark-ring-appear 0.15s ease-out both;
   pointer-events: none;
-  /* Keep the ring on top of the gradient square */
   z-index: 1;
 }
 
-/* ── Connecting state: gentle pulse on the mark itself (scale + brightness)
-   Layered under the ring — together they give a "breathing" branded load feel. */
 .ec-root[data-state="connecting"] .ec-dock-mark,
 .ec-root[data-state="connecting"] .ec-panel-mark {
   animation: ec-mark-buffer-pulse 1.1s ease-in-out infinite;
 }
 
-/* ── Buffering state: pulsing glow ring — visually distinct from "connecting"
-   Uses a box-shadow ring instead of a spinning ::after so it reads as
-   "waiting / catching up" rather than "actively connecting". */
+/* ── Buffering: glow ring pulse ─────────────────────────────────── */
+@keyframes ec-mark-buffer-glow {
+  0%,100% { opacity: 0.45; }
+  50%     { opacity: 1; }
+}
+
 .ec-root[data-state="buffering"] .ec-dock-mark::after,
 .ec-root[data-state="buffering"] .ec-panel-mark::after {
   content: "";
   position: absolute;
   inset: -2px;
-  border-radius: 7px;
+  border-radius: 50%;
   border: 2px solid transparent;
   background:
-    linear-gradient(rgba(12, 12, 14, 0), rgba(12, 12, 14, 0)) padding-box,
-    linear-gradient(135deg, #ff9764 0%, #ff6fb1 55%, #8b5bff 100%) border-box;
+    linear-gradient(rgba(12,12,14,0), rgba(12,12,14,0)) padding-box,
+    var(--ec-grad-brand) border-box;
   animation: ec-mark-buffer-glow 1.4s ease-in-out infinite;
   pointer-events: none;
   z-index: 1;
-}
-
-@keyframes ec-mark-buffer-glow {
-  0%,
-  100% {
-    opacity: 0.45;
-  }
-  50% {
-    opacity: 1;
-  }
 }
 
 .ec-root[data-state="buffering"] .ec-dock-mark,
@@ -222,74 +178,111 @@
   animation: ec-mark-buffer-pulse 1.4s ease-in-out infinite;
 }
 
-/* ── live-dot color for buffering state — amber, no animation (buffering
-   is a transient hold, not active streaming) */
-.ec-root[data-state="buffering"] .ec-live-dot {
-  background: #e08c20;
-  animation: none;
+@keyframes ec-orb-breathe {
+  0%,100% { box-shadow: 0 0 10px rgba(255,122,60,.45); }
+  50%     { box-shadow: 0 0 22px rgba(255,122,60,.90); }
 }
 
+/* Label area */
 .ec-dock-live {
-  font-size: 10.5px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.92);
+  letter-spacing: -0.01em;
+  color: var(--ec-glass-text);
+  white-space: nowrap;
 }
 
 .ec-state {
   font-size: 10.5px;
-  color: rgba(255, 255, 255, 0.55);
-  max-width: 72px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ec-glass-text-dim);
+  max-width: 80px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* EQ bars — 4 bars, tangerine gradient, Island EQ animation */
+.ec-dock-eq {
+  display: flex;
+  gap: 2.5px;
+  align-items: center;
+  height: 20px;
+  flex-shrink: 0;
+}
+.ec-dock-eq i {
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--ec-glow), var(--ec-tangerine));
+  animation: ec-eq 1s ease-in-out infinite;
+}
+.ec-dock-eq i:nth-child(1) { height: 8px; }
+.ec-dock-eq i:nth-child(2) { height: 16px; animation-delay: .13s; }
+.ec-dock-eq i:nth-child(3) { height: 11px; animation-delay: .26s; }
+.ec-dock-eq i:nth-child(4) { height: 18px; animation-delay: .39s; }
+
+@keyframes ec-eq {
+  0%,100% { transform: scaleY(.40); }
+  50%     { transform: scaleY(1.25); }
+}
+
+/* Paused: EQ bars frozen + dimmed */
+.ec-root[data-state="paused"] .ec-dock-eq i {
+  animation: none;
+  transform: scaleY(.40);
+  opacity: 0.40;
+}
+
+/* Small action buttons inside the dock */
 .ec-dock-caption {
-  min-width: 22px;
-  height: 22px;
+  min-width: 20px;
+  height: 20px;
   padding: 0 5px;
   border: none;
-  border-radius: 999px;
-  background: rgba(139, 91, 255, 0.28);
-  color: rgba(255, 255, 255, 0.95);
+  border-radius: 100px;
+  background: rgba(255,255,255,.18);
+  color: var(--ec-glass-text);
   font-size: 9px;
   font-weight: 800;
   letter-spacing: 0.3px;
   line-height: 1;
   cursor: pointer;
   font-family: inherit;
+  transition: background 0.15s;
 }
 
 .ec-dock-caption[aria-pressed="false"] {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.45);
+  background: rgba(255,255,255,.08);
+  color: var(--ec-glass-text-dim);
 }
 
 .ec-dock-expand {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   border: none;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.85);
+  border-radius: 100px;
+  background: rgba(255,255,255,.12);
+  color: var(--ec-glass-text);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
+  transition: background 0.15s;
 }
 
 .ec-dock-stop {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   border: none;
-  border-radius: 999px;
-  background: rgba(34, 30, 44, 0.85);
-  color: #fff;
+  border-radius: 100px;
+  background: rgba(255,255,255,.14);
+  color: var(--ec-glass-text);
   cursor: pointer;
   margin-left: 2px;
   position: relative;
+  transition: background 0.15s;
 }
 
 .ec-dock-stop::after {
@@ -297,8 +290,8 @@
   position: absolute;
   left: 7px;
   top: 7px;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   background: currentColor;
   border-radius: 1px;
 }
@@ -306,15 +299,22 @@
 .ec-dock-caption:hover,
 .ec-dock-expand:hover,
 .ec-dock-stop:hover {
-  filter: brightness(1.05);
+  background: rgba(255,255,255,.22);
 }
 
-/* ─── Caption — subtitle pair on video (per design styles.css .subs) ───
-   Original = dark-glass line (white text); translation = bright white card
-   with a brand-glow ring (ink text). No language chips on the lines. The stack
-   is the positioned/anchored element; the translation card (.ec-caption) stays
-   a *block* with the target text as a bare text node so [data-ec-target]
-   .textContent is pure translation and rolling auto-scroll keeps working. */
+/* Sync hint (matching dub / catching up) */
+.ec-dock-sync {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ec-warning);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ─── Caption strip — on-video subtitles ──────────────────────────────────── */
 .ec-caption-stack {
   position: fixed;
   box-sizing: border-box;
@@ -324,13 +324,11 @@
   width: max-content;
   min-width: 0;
   max-width: min(640px, calc(100vw - 32px));
-  /* Only the lines capture pointer events; the gaps/edges stay click-through
-     so the strip never blocks the video's own controls. */
   pointer-events: none;
   transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
-/* Original (source) line — plain white text, NO background box. */
+/* Original (source) line — plain white text, text-shadow only */
 .ec-cap-src {
   box-sizing: border-box;
   max-width: 100%;
@@ -342,8 +340,8 @@
   letter-spacing: 0.005em;
   color: #fffdfb;
   text-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.85),
-    0 0 6px rgba(0, 0, 0, 0.5);
+    0 1px 3px rgba(0,0,0,.85),
+    0 0 6px rgba(0,0,0,.5);
   word-break: break-word;
   overflow-wrap: anywhere;
   overflow: hidden;
@@ -354,24 +352,27 @@
   display: none;
 }
 
-/* Translation (target) line — bright white card with brand-glow ring. */
+/* Translation (target) — dark glass card with tangerine left accent */
 .ec-caption {
   position: relative;
   box-sizing: border-box;
   max-width: 100%;
   min-height: 0;
   max-height: calc(12px + 1.42em * 2);
-  padding: 7px 15px;
-  border-radius: 10px;
+  padding: 7px 16px;
+  border-radius: 12px;
   text-align: center;
   font-size: 15px;
   font-weight: 600;
   line-height: 1.42;
   letter-spacing: 0.005em;
-  color: #1a1320;
-  background: rgba(255, 253, 251, 0.98);
-  /* Flat white card with a single orange accent on the left — no ring/shadow. */
-  border-left: 3px solid #f98751;
+  color: var(--ec-glass-text);
+  background: var(--ec-glass-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--ec-glass-border);
+  border-left: 3px solid var(--ec-tangerine);
+  box-shadow: 0 8px 24px -8px rgba(26,20,15,.50);
   word-break: break-word;
   overflow-wrap: anywhere;
   user-select: text;
@@ -393,7 +394,7 @@
 
 .ec-caption.ec-caption--rolling:hover {
   scrollbar-width: thin;
-  scrollbar-color: rgba(26, 19, 32, 0.35) transparent;
+  scrollbar-color: rgba(255,122,60,.40) transparent;
 }
 
 .ec-caption.ec-caption--rolling:hover::-webkit-scrollbar {
@@ -402,7 +403,7 @@
 }
 
 .ec-caption.ec-caption--rolling:hover::-webkit-scrollbar-thumb {
-  background: rgba(26, 19, 32, 0.35);
+  background: rgba(255,122,60,.40);
   border-radius: 4px;
 }
 
@@ -414,20 +415,20 @@
   max-width: min(720px, calc(100vw - 32px));
 }
 
+/* Placeholder / loading state — strip card chrome, keep orb loader visible */
 .ec-caption.ec-target--placeholder {
-  color: #7a6b86;
+  color: var(--ec-glass-text-dim);
   font-size: 13px;
   font-weight: 500;
-  /* Loading state shows only the animated logo icon — strip the card chrome
-     (white background + orange accent border) so the mark floats on the video.
-     border-left-color (not width) is cleared to avoid a layout shift when the
-     real caption returns and the orange accent reappears. */
   background: transparent;
   border-left-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
-/* Branded loading state inside the on-video caption card — replaces raw status
-   text ("Translating N lines") with a single Echoly logo mark, gently breathing. */
+/* Branded loading mark inside caption */
 .ec-caption-loader {
   display: inline-flex;
   align-items: center;
@@ -438,8 +439,8 @@
 .ec-caption-loader-mark {
   width: 26px;
   height: 26px;
-  border-radius: 7px;
-  background: linear-gradient(135deg, #ff9764 0%, #ff6fb1 55%, #8b5bff 100%);
+  border-radius: 50%;
+  background: var(--ec-grad-orb);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -451,20 +452,11 @@
   color: #fff;
 }
 @keyframes ec-caption-mark-pulse {
-  0%,
-  100% {
-    transform: scale(0.92);
-    opacity: 0.8;
-  }
-  50% {
-    transform: scale(1);
-    opacity: 1;
-  }
+  0%,100% { transform: scale(0.92); opacity: 0.8; }
+  50%     { transform: scale(1);    opacity: 1;   }
 }
 
-/* On-page quick-start launcher — the Echoly logo mark stuck to the RIGHT screen
-   edge like a pull-tab (no card/background), shown on supported pages when
-   signed in + a dubbable video + no active session. */
+/* Quick-start launcher — tangerine squircle pull-tab on the right edge */
 .ec-launcher {
   position: fixed;
   right: 0;
@@ -494,10 +486,9 @@
 .ec-launcher-mark {
   width: 34px;
   height: 38px;
-  /* Rounded only on the page-facing (left) side so it reads as attached to the edge. */
   border-radius: 11px 0 0 11px;
-  background: linear-gradient(135deg, #ff9764 0%, #ff6fb1 55%, #8b5bff 100%);
-  box-shadow: -3px 3px 12px rgba(0, 0, 0, 0.24);
+  background: var(--ec-grad-brand);
+  box-shadow: -3px 3px 14px rgba(26,20,15,.30);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -508,41 +499,42 @@
   color: #fff;
 }
 
+/* Error state caption */
 .ec-root[data-state="error"] .ec-caption {
-  color: #b3261e;
-  background: rgba(255, 253, 251, 0.98);
-  border-left-color: #b3261e;
+  color: #fff;
+  background: rgba(224,68,42,.75);
+  border-left-color: #fff;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
+/* Top vs bottom caption strip position */
 .ec-root.ec-caption-top:not([data-stage="anchored"]) .ec-caption-stack {
   bottom: auto;
   top: 56px;
 }
 
-/* Hide the whole on-video strip when the user toggles CC off
-   (panel preview still mirrors the translation). */
+/* Caption hidden when CC off */
 .ec-root.ec-caption-off .ec-caption-stack {
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
 }
 
-/* ─── Expanded panel (design GlassOverlayExpanded) ─── */
+/* ─── Expanded panel — dark glass family (floats over video) ──────────────── */
 .ec-panel {
   position: fixed;
   top: 0;
   left: 0;
   width: 280px;
   z-index: 3;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(24px) saturate(140%);
-  -webkit-backdrop-filter: blur(24px) saturate(140%);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  box-shadow:
-    0 24px 40px -16px rgba(76, 35, 130, 0.4),
-    0 1px 0 0 rgba(255, 255, 255, 0.6) inset;
-  color: #221e2c;
+  border-radius: 18px;
+  background: rgba(26,20,15,.80);
+  backdrop-filter: blur(20px) saturate(130%);
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
+  border: 1px solid var(--ec-glass-border);
+  box-shadow: var(--ec-shadow-island);
+  color: var(--ec-glass-text);
   overflow: hidden;
   transition: left 0.15s ease, top 0.15s ease, opacity 0.2s ease;
 }
@@ -559,8 +551,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.5);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ec-glass-border);
   cursor: grab;
   user-select: none;
 }
@@ -570,59 +562,72 @@
 }
 
 .ec-panel-drag-ico {
-  color: #9385a8;
+  color: var(--ec-glass-text-dim);
   display: flex;
   flex-shrink: 0;
 }
 
+/* Panel orb — same as dock mark */
 .ec-panel-mark {
   position: relative;
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-  background: linear-gradient(135deg, #ff9764 0%, #ff6fb1 55%, #8b5bff 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
   flex-shrink: 0;
+  background: var(--ec-grad-orb);
+  animation: ec-orb-breathe 2.4s ease-in-out infinite;
 }
 
 .ec-panel-mark svg {
-  width: 10px;
-  height: 10px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 4px;
   color: #fff;
 }
 
 .ec-panel-brand {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ec-glass-text);
+  letter-spacing: -0.01em;
 }
 
 .ec-panel-live {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: linear-gradient(95deg, #ff6fb1, #ffa170);
-  font-size: 10.5px;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 100px;
+  background: rgba(255,122,60,.24);
+  border: 1px solid rgba(255,122,60,.35);
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: .12em;
   text-transform: uppercase;
-  color: #fff;
-  box-shadow: 0 4px 10px -4px rgba(255, 111, 177, 0.5);
+  color: var(--ec-glow);
 }
 
 .ec-panel-live .ec-live-dot {
-  background: #fff;
-  animation: none;
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ec-tangerine);
+  animation: ec-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes ec-pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%     { opacity: 0.55; transform: scale(0.85); }
 }
 
 .ec-panel-head-actions {
   margin-left: auto;
   display: flex;
   gap: 8px;
-  color: #9385a8;
+  color: var(--ec-glass-text-dim);
 }
 
 .ec-panel-collapse {
@@ -637,10 +642,11 @@
   align-items: center;
   justify-content: center;
   padding: 0;
+  transition: background 0.15s;
 }
 
 .ec-panel-collapse:hover {
-  background: rgba(139, 91, 255, 0.1);
+  background: rgba(255,255,255,.12);
 }
 
 .ec-panel-body {
@@ -660,7 +666,7 @@
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #8b5bff, #6a40b2);
+  background: var(--ec-grad-orb);
   color: #fff;
   font-size: 11px;
   font-weight: 700;
@@ -668,7 +674,7 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.65);
+  box-shadow: 0 0 0 2px rgba(255,255,255,.18);
 }
 
 .ec-panel-voice-meta {
@@ -679,20 +685,22 @@
 .ec-panel-voice-name {
   font-size: 11.5px;
   font-weight: 600;
+  color: var(--ec-glass-text);
 }
 
 .ec-speaking {
-  color: #9385a8;
+  color: var(--ec-glass-text-dim);
   font-weight: 400;
 }
 
+/* EQ wave inside panel */
 .ec-panel-wave {
   display: inline-flex;
   align-items: center;
   gap: 1.5px;
   height: 12px;
   margin-top: 3px;
-  color: #8b5bff;
+  color: var(--ec-tangerine);
 }
 
 .ec-panel-wave i {
@@ -723,39 +731,28 @@
 }
 
 .ec-lag-line {
-  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11.5px;
   font-weight: 600;
-  color: #574569;
+  color: var(--ec-glass-text-dim);
 }
 
 .ec-panel-lag:not(.ec-lag-empty) .ec-lag-line {
-  color: #221e2c;
+  color: var(--ec-glass-text);
 }
 
 .ec-panel-lag.ec-lag-matching .ec-lag-line {
-  color: #9a5c1a;
+  color: var(--ec-glow);
 }
 
 .ec-panel-lag.ec-lag-matching .ec-lag-label {
-  color: #b8731f;
-}
-
-.ec-dock-sync {
-  font-size: 10px;
-  font-weight: 600;
-  color: #b8731f;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-  max-width: 9rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--ec-tangerine);
 }
 
 .ec-lag-label {
   display: block;
   font-size: 8.5px;
-  color: #9385a8;
+  color: var(--ec-glass-text-dim);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -775,18 +772,20 @@
 .ec-picker-label {
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.6px;
+  letter-spacing: .12em;
   text-transform: uppercase;
-  color: #7b6a99;
+  color: var(--ec-glass-text-dim);
 }
 
+/* Preview pane — dark glass card inside the panel */
 .ec-panel-preview {
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.10);
   font-size: 11.5px;
   line-height: 1.38;
+  color: var(--ec-glass-text);
   max-height: calc(8px + 1.38em * 2);
   overflow-x: hidden;
   overflow-y: auto;
@@ -803,10 +802,10 @@
 .ec-panel-source {
   padding: 6px 10px;
   border-radius: 8px;
-  background: rgba(34, 30, 44, 0.06);
+  background: rgba(255,255,255,.04);
   font-size: 10.5px;
   line-height: 1.35;
-  color: #574569;
+  color: var(--ec-glass-text-dim);
   max-height: 3em;
   overflow: hidden;
 }
@@ -815,13 +814,14 @@
   display: none;
 }
 
+/* Toggle inside panel */
 .ec-panel-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   font-size: 11px;
-  color: #574569;
+  color: var(--ec-glass-text-dim);
   cursor: pointer;
 }
 
@@ -830,13 +830,13 @@
   appearance: none;
   width: 32px;
   height: 18px;
-  border-radius: 999px;
-  background: rgba(80, 60, 120, 0.18);
+  border-radius: 100px;
+  background: rgba(255,255,255,.12);
   position: relative;
   cursor: pointer;
   margin: 0;
   flex-shrink: 0;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.18);
 }
 
 .ec-panel-toggle input[type="checkbox"]::before {
@@ -847,19 +847,22 @@
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
-  transition: transform 140ms ease;
+  background: rgba(255,255,255,.80);
+  box-shadow: 0 2px 4px rgba(0,0,0,.20);
+  transition: transform 0.14s ease;
 }
 
 .ec-panel-toggle input[type="checkbox"]:checked {
-  background: linear-gradient(95deg, #8b5bff, #ff6fb1);
+  background: rgba(255,122,60,.55);
+  box-shadow: inset 0 0 0 1px rgba(255,122,60,.60);
 }
 
 .ec-panel-toggle input[type="checkbox"]:checked::before {
   transform: translateX(14px);
+  background: #fff;
 }
 
+/* Mix panel (sliders) inside expanded panel */
 .ec-panel-mix {
   display: flex;
   flex-direction: column;
@@ -875,7 +878,7 @@
 }
 
 .ec-mix-row > label {
-  color: #7b6a99;
+  color: var(--ec-glass-text-dim);
 }
 
 .ec-mix-row input[type="range"] {
@@ -890,7 +893,7 @@
 
 .ec-mix-row input[type="range"]::-webkit-slider-runnable-track {
   height: 4px;
-  background: linear-gradient(to right, #8b5bff var(--v), rgba(34, 30, 44, 0.08) var(--v));
+  background: linear-gradient(to right, var(--ec-tangerine) var(--v), rgba(255,255,255,.14) var(--v));
   border-radius: 2px;
 }
 
@@ -901,7 +904,7 @@
   border-radius: 50%;
   background: #fff;
   margin-top: -4px;
-  box-shadow: 0 2px 6px rgba(76, 35, 130, 0.3), inset 0 0 0 1.5px rgba(139, 91, 255, 0.6);
+  box-shadow: 0 2px 6px rgba(26,20,15,.30), inset 0 0 0 1.5px rgba(255,122,60,.5);
 }
 
 .ec-mix-row output {
@@ -909,6 +912,7 @@
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   font-size: 10.5px;
+  color: var(--ec-glass-text);
 }
 
 .ec-panel-foot {
@@ -917,19 +921,21 @@
   justify-content: space-between;
   margin-top: 2px;
   font-size: 10.5px;
-  color: #9385a8;
+  color: var(--ec-glass-text-dim);
 }
 
 .ec-panel-elapsed {
-  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--ec-glass-text-dim);
 }
 
+/* Stop button inside the panel — dark glass pill */
 .ec-panel-stop {
   padding: 4px 10px;
-  border-radius: 999px;
-  border: none;
-  background: rgba(34, 30, 44, 0.85);
-  color: #fff;
+  border-radius: 100px;
+  border: 1px solid rgba(255,255,255,.18);
+  background: rgba(255,255,255,.10);
+  color: var(--ec-glass-text);
   font-size: 10.5px;
   font-weight: 600;
   font-family: inherit;
@@ -937,29 +943,31 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  transition: background 0.15s;
 }
 
 .ec-panel-stop-ico {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   background: currentColor;
   border-radius: 1px;
   display: inline-block;
 }
 
 .ec-panel-stop:hover {
-  filter: brightness(1.08);
+  background: rgba(255,255,255,.18);
 }
 
+/* Selects inside the panel */
 .ec-select {
   width: 100%;
   font: inherit;
   font-size: 12.5px;
   padding: 6px 8px;
   border-radius: 8px;
-  border: 1px solid rgba(34, 30, 44, 0.1);
-  background: rgba(255, 255, 255, 0.9);
-  color: #221e2c;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.08);
+  color: var(--ec-glass-text);
   outline: none;
   appearance: none;
   -webkit-appearance: none;
@@ -970,46 +978,51 @@
 }
 
 .ec-select:focus-visible {
-  border-color: rgba(139, 91, 255, 0.45);
-  box-shadow: 0 0 0 3px rgba(139, 91, 255, 0.18);
+  border-color: rgba(255,122,60,.50);
+  box-shadow: 0 0 0 3px rgba(255,122,60,.18);
 }
 
+/* ec-btn (was hidden) */
 .ec-btn {
   display: none;
 }
 
-/* Toast (built in overlay.ts via DOM APIs) */
+/* ─── Toasts — white card + semantic left border ──────────────────────────── */
 .ec-toast {
   position: fixed;
   left: 50%;
   bottom: 88px;
   transform: translateX(-50%);
   max-width: 360px;
-  padding: 8px 14px;
-  border-radius: 10px;
-  background: rgba(34, 30, 44, 0.92);
-  color: #fff;
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: rgba(26,20,15,.88);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--ec-glass-border);
+  color: var(--ec-glass-text);
   font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: 0 8px 24px -8px rgba(26,20,15,.50);
+  border-left: 4px solid var(--ec-tangerine);
   z-index: 2147483601;
   pointer-events: none;
 }
-/* Re-enable pointer events on the CTA link so Upgrade / Sign-in is clickable.
-   The toast container itself stays pointer-events:none (no hit-test on the
-   background), but the nested <a> is interactive. */
 .ec-toast a {
   pointer-events: auto;
+  color: var(--ec-glow);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  /* Disable all animated elements so users who request reduced motion see a
-     fully static overlay. This covers both the pre-existing ec-pulse and all
-     new branded loading animations (AC9). */
-  .ec-live-dot,
   .ec-dock-mark,
   .ec-panel-mark,
   .ec-dock-mark::after,
   .ec-panel-mark::after,
-  .ec-caption-loader-mark {
+  .ec-caption-loader-mark,
+  .ec-dock-eq i,
+  .ec-panel-wave i {
     animation: none !important;
   }
   .ec-caption-loader-mark {
