@@ -243,6 +243,7 @@ export function initPopup(): void {
   };
   let hasEverSignedIn = false;
   let lastAccountClass: string | null = null;
+  let accountTransitionTimer: ReturnType<typeof setTimeout> | null = null;
   let lastLangPickerKey = "";
   let lastVoiceTierKey = "";
   let accountPopover: PopoverHandle | null = null;
@@ -266,11 +267,16 @@ export function initPopup(): void {
     lastAccountClass = name;
     document.body.dataset.account = name;
     if (prev && name !== "loading") {
-      document.body.classList.add("account-transition");
-      window.setTimeout(
-        () => document.body.classList.remove("account-transition"),
-        260,
-      );
+      // Capture the body element now; the callback must NOT re-resolve the
+      // global `document` 260ms later — in a torn-down env (tests, closed
+      // popup) that global is gone, which would throw and leak past teardown.
+      const body = document.body;
+      body.classList.add("account-transition");
+      if (accountTransitionTimer !== null) clearTimeout(accountTransitionTimer);
+      accountTransitionTimer = setTimeout(() => {
+        accountTransitionTimer = null;
+        body.classList.remove("account-transition");
+      }, 260);
     }
     if (name !== "in") accountPopover?.close();
   }
