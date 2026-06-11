@@ -48,7 +48,7 @@ export function nextResetLabel(now: Date = new Date()): string {
   const next = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1),
   );
-  return next.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+  return next.toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
 }
 
 export function resetsAtLabel(resetsAtIso: string | undefined): string {
