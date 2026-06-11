@@ -21,6 +21,7 @@
 import type {
   AdvancedPatch,
   AdvancedSettings,
+  ServerSettingsPatch,
   SiteOverrideMap,
 } from "@/shared/advanced";
 
@@ -138,9 +139,11 @@ export class SettingsClient {
     return this.parseOrThrow(r);
   }
 
-  /** PUT /me/settings. expectedVersion is the optimistic-concurrency token. */
+  /** PUT /me/settings. Accepts either a 3-key AdvancedPatch or a full 10-key
+   *  ServerSettingsPatch (for synced Settings pushes). expectedVersion is the
+   *  optimistic-concurrency token. */
   async putGlobal(
-    patch: AdvancedPatch,
+    patch: AdvancedPatch | ServerSettingsPatch,
     expectedVersion?: number,
   ): Promise<SettingsBundle> {
     const r = await this.authedFetch("/me/settings", {

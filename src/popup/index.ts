@@ -32,13 +32,16 @@ import {
 } from "@/shared/protocol";
 import type { State } from "@/shared/types";
 import { siteDisplayLabel } from "@/shared/active-site";
-import { canUseRealtime } from "@/shared/tier";
+import { canUseRealtime, canUseSubtitleStyling } from "@/shared/tier";
 import {
   DEFAULT_ADVANCED,
   effectiveAdvanced,
   normalizeDomain,
   type AdvancedSettings,
   type CaptionPosition,
+  type CaptionFontSize,
+  type CaptionBgOpacity,
+  type CaptionFontWeight,
 } from "@/shared/advanced";
 import {
   STATUS_SWITCHING_VIDEO,
@@ -52,6 +55,7 @@ import {
   fmtCredits,
   fmtElapsed,
   meterLevel,
+  renewsAtLabel,
   resetsAtLabel,
   shade,
 } from "@/lib/popup-format";
@@ -116,7 +120,7 @@ interface VoiceOption {
 }
 /** Realtime uses gpt-realtime-translate — output language only; voice is not configurable. */
 const POPUP_REALTIME_VOICES: VoiceOption[] = [
-  { id: "", name: "Auto · OpenAI output" },
+  { id: "", name: "Auto" },
 ];
 function popupStandardVoices(
   standardVoices: State["standardVoices"],
@@ -209,10 +213,13 @@ export function initPopup(): void {
   // ── Advanced V2 controls (server-authoritative; popup is a dispatcher) ─
   const advReset = $("advResetBtn") as HTMLButtonElement | null;
   const advSave = $("advSaveBtn") as HTMLButtonElement | null;
+  const subtitleStyleReset = $("subtitleStyleResetBtn") as HTMLButtonElement | null;
   const autoStart = $("autoStart") as HTMLInputElement | null;
   const autoStartDomain = $("autoStartDomain");
   const outputDeviceSelect = $("outputDevice") as HTMLSelectElement | null;
   const advDirtyPill = $("advDirtyPill");
+
+  // ── Subtitle style controls (W6 / Pro/Max only) ───────────────────────
 
   // Footer version chip
   const versionEl = document.querySelector<HTMLElement>(".status-footer .version");
@@ -497,23 +504,54 @@ export function initPopup(): void {
   function renderAccountMenu(user: State["signedInUser"] | undefined | null,
                              usage: State["usage"] | undefined | null) {
     if (!user) return;
-    if (amEmail) amEmail.textContent = user.email;
+    // W2: render display email (preserves dots/+ for gmail users).
+    if (amEmail) amEmail.textContent = user.email_display ?? user.email;
     renderPlanBadge(amPlanBadge, amPlanBadgeText, user.tier);
 
+    const isAnnual = user.billing_cycle === "annual";
+
     if (amDaysLeft) {
-      const left = daysLeftLabel(usage?.resetsAt);
-      if (left) {
+      if (isAnnual) {
+        // Annual plan: plan line shows "· billed yearly" instead of days-left.
         amDaysLeft.hidden = false;
-        amDaysLeft.textContent = left;
+        amDaysLeft.textContent = "· billed yearly";
       } else {
-        amDaysLeft.hidden = true;
-        amDaysLeft.textContent = "";
+        const left = daysLeftLabel(usage?.resetsAt);
+        if (left) {
+          amDaysLeft.hidden = false;
+          amDaysLeft.textContent = left;
+        } else {
+          amDaysLeft.hidden = true;
+          amDaysLeft.textContent = "";
+        }
       }
     }
-    if (user.cancel_at_period_end) {
-      if (amReset) amReset.textContent = "auto-renewal off · access until period end";
-    } else if (amReset) {
-      amReset.textContent = `resets ${resetsAtLabel(usage?.resetsAt ?? undefined)}`;
+
+    if (isAnnual) {
+      // Annual billing: reset row shows renewal date or cancel state.
+      if (user.cancel_at_period_end) {
+        const until = renewsAtLabel(user.renews_at);
+        if (amReset) {
+          amReset.textContent = until
+            ? `auto-renewal off · access until ${until}`
+            : "auto-renewal off · access until period end";
+        }
+      } else {
+        const resetsLabel = resetsAtLabel(usage?.resetsAt ?? undefined);
+        const renewsLabel = renewsAtLabel(user.renews_at);
+        if (amReset) {
+          amReset.textContent = renewsLabel
+            ? `resets ${resetsLabel} · renews ${renewsLabel}`
+            : `resets ${resetsLabel}`;
+        }
+      }
+    } else {
+      // Monthly / free: unchanged behavior.
+      if (user.cancel_at_period_end) {
+        if (amReset) amReset.textContent = "auto-renewal off · access until period end";
+      } else if (amReset) {
+        amReset.textContent = `resets ${resetsAtLabel(usage?.resetsAt ?? undefined)}`;
+      }
     }
 
     const caps = capsForUsage(user.tier, usage ?? undefined);
@@ -539,8 +577,26 @@ export function initPopup(): void {
    * would create a write-loop and mask reconciliation bugs.
    */
   function applyState(s: Partial<State>, fromCache = false) {
+    // W5 Cold-SW no-regress guard (AC14):
+    // If the incoming state has signedInUser=null AND hydrating=true AND the popup
+    // currently renders a signed-in user → do NOT regress to signed-out. The SW
+    // is mid-network-fetch; a later BACKGROUND_STATE_UPDATE will carry the real user.
+    const isHydrating = (s.hydrating === true) || (state.hydrating === true && !("hydrating" in s));
+    if (
+      s.signedInUser === null &&
+      isHydrating &&
+      state.signedInUser != null
+    ) {
+      // Accept other fields (status, etc.) but preserve the current user.
+      const { signedInUser: _dropped, ...rest } = s;
+      void _dropped;
+      s = { ...rest, signedInUser: state.signedInUser };
+    }
+
     state = { ...state, ...s };
-    if (!fromCache) cachePopupState(state);
+    // Do NOT persist cache while hydrating — avoids poisoning the optimistic cache
+    // with a transient signed-out snapshot.
+    if (!fromCache && !state.hydrating) cachePopupState(state);
 
     const acct = decideAccountState(state.signedInUser);
     setAccountClass(acct);
@@ -707,15 +763,30 @@ export function initPopup(): void {
   /** Sync DOM to state.advanced. Idempotent. */
   function renderAdvanced() {
     const adv = effectiveAdv();
+    const canStyle = canUseSubtitleStyling(state.signedInUser?.tier);
     for (const seg of document.querySelectorAll<HTMLElement>(".segmented[data-setting]")) {
       const setting = seg.dataset.setting;
       if (!setting) continue;
       const buttons = Array.from(seg.querySelectorAll<HTMLButtonElement>("button"));
       let activeValue: string | null = null;
-      if (setting === "captionPosition") activeValue = adv.captionPosition;
+      let isStyleSeg = true;
+      if (setting === "captionPosition") {
+        activeValue = adv.captionPosition;
+        isStyleSeg = false;
+      } else if (setting === "captionFontSize") {
+        activeValue = adv.captionFontSize ?? DEFAULT_ADVANCED.captionFontSize;
+      } else if (setting === "captionBgOpacity") {
+        activeValue = adv.captionBgOpacity ?? DEFAULT_ADVANCED.captionBgOpacity;
+      } else if (setting === "captionFontWeight") {
+        activeValue = adv.captionFontWeight ?? DEFAULT_ADVANCED.captionFontWeight;
+      } else {
+        isStyleSeg = false;
+      }
       for (const b of buttons) {
         if (b.dataset.value === activeValue) b.setAttribute("aria-pressed", "true");
         else b.removeAttribute("aria-pressed");
+        // Style segments are Pro/Max-gated; other segments are never disabled here.
+        if (isStyleSeg) b.disabled = !canStyle;
       }
     }
 
@@ -748,6 +819,17 @@ export function initPopup(): void {
     const dirty = !!state.advancedDirty;
     document.body.dataset.advancedDirty = dirty ? "true" : "false";
     if (advDirtyPill) (advDirtyPill as HTMLElement).hidden = !dirty;
+
+    // ── Subtitle style group (W6, Pro/Max gate) ───────────────────────────
+    // The three style segmented controls themselves are rendered/gated in the
+    // .segmented loop above; here we only flag the group + upgrade hint.
+    const subtitleStyleGroup = $("subtitle-style-group");
+    if (subtitleStyleGroup) {
+      subtitleStyleGroup.dataset.canStyle = canStyle ? "true" : "false";
+    }
+    const upgradeHint = $("subtitle-style-upgrade-hint");
+    if (upgradeHint) (upgradeHint as HTMLElement).hidden = canStyle;
+    if (subtitleStyleReset) subtitleStyleReset.disabled = !canStyle;
   }
 
   // ── Settings push ─────────────────────────────────────────────────────
@@ -1100,6 +1182,12 @@ export function initPopup(): void {
 
         if (setting === "captionPosition") {
           void dispatchAdvancedPatch({ captionPosition: value as CaptionPosition });
+        } else if (setting === "captionFontSize") {
+          void dispatchAdvancedPatch({ captionFontSize: value as CaptionFontSize });
+        } else if (setting === "captionBgOpacity") {
+          void dispatchAdvancedPatch({ captionBgOpacity: value as CaptionBgOpacity });
+        } else if (setting === "captionFontWeight") {
+          void dispatchAdvancedPatch({ captionFontWeight: value as CaptionFontWeight });
         }
       });
     }
@@ -1125,9 +1213,28 @@ export function initPopup(): void {
     });
   }
 
-  // Reset to defaults — replace global advanced with DEFAULT_ADVANCED.
+  // Subtitle style (W6) is wired through the generic .segmented loop above —
+  // the three style segments dispatch captionFontSize/BgOpacity/FontWeight.
+
+  // Card-scoped reset: only the 3 style keys (mirrors the Advanced panel's
+  // panel-scoped reset; auto-save means there is no Save counterpart).
+  subtitleStyleReset?.addEventListener("click", () => {
+    void dispatchAdvancedPatch({
+      captionFontSize: DEFAULT_ADVANCED.captionFontSize,
+      captionBgOpacity: DEFAULT_ADVANCED.captionBgOpacity,
+      captionFontWeight: DEFAULT_ADVANCED.captionFontWeight,
+    });
+  });
+
+  // Reset to defaults — panel-scoped: resets ONLY the Advanced panel's own
+  // keys. The Subtitle style card below is a separate surface and must not
+  // be silently reset from here.
   advReset?.addEventListener("click", () => {
-    void dispatchAdvancedPatch({ ...DEFAULT_ADVANCED });
+    void dispatchAdvancedPatch({
+      captionPosition: DEFAULT_ADVANCED.captionPosition,
+      autoStartHosts: state.currentDomain ? { [state.currentDomain]: false } : {},
+      outputDeviceId: DEFAULT_ADVANCED.outputDeviceId,
+    });
   });
 
   // Save for this site — snapshot current advanced into the per-site override.

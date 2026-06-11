@@ -453,14 +453,37 @@ describe("setCaptionPosition — live preset hot-swap", () => {
     expect(root.classList.contains("ec-caption-top")).toBe(false);
   });
 
-  it("setCaptionPosition does NOT write LAYOUT_KEY (user's drag still wins)", () => {
+  it("setCaptionPosition PERSISTS the placement (the synced setting is the source of truth)", () => {
     const ov = createOverlay();
     ov.buildOverlay(makeCallbacks());
-    expect(localStorage.getItem(LAYOUT_KEY)).toBeNull();
     ov.setCaptionPosition("top");
-    expect(localStorage.getItem(LAYOUT_KEY)).toBeNull();
-    ov.setCaptionPosition("float");
-    expect(localStorage.getItem(LAYOUT_KEY)).toBeNull();
+    const stored = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") as {
+      captionPlacement?: string;
+    };
+    expect(stored.captionPlacement).toBe("top");
+    ov.setCaptionPosition("bottom");
+    const stored2 = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") as {
+      captionPlacement?: string;
+    };
+    expect(stored2.captionPlacement).toBe("bottom");
+  });
+
+  it("the synced captionPosition setting OVERRIDES a stale persisted placement at mount", () => {
+    // The 'stuck at top' bug: a persisted layout pinned captionPlacement
+    // forever and the Advanced setting was silently ignored on mount.
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ captionPlacement: "top" }));
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks(), "bottom");
+    const root = document.body.querySelector(".ec-root") as HTMLElement;
+    expect(root.classList.contains("ec-caption-top")).toBe(false);
+  });
+
+  it("with NO setting provided, the persisted placement still applies at mount", () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ captionPlacement: "top" }));
+    const ov = createOverlay();
+    ov.buildOverlay(makeCallbacks(), null);
+    const root = document.body.querySelector(".ec-root") as HTMLElement;
+    expect(root.classList.contains("ec-caption-top")).toBe(true);
   });
 
   it("setCaptionPosition is a safe no-op when the overlay is unmounted", () => {
@@ -506,6 +529,7 @@ describe("syncFromSettings", () => {
       advancedVersion: 0,
       advancedDirty: false,
       currentDomain: null,
+      hydrating: false,
     });
     const lang = document.body.querySelector(
       "[data-ec-language]",
@@ -556,6 +580,7 @@ describe("syncFromSettings", () => {
       advancedVersion: 0,
       advancedDirty: false,
       currentDomain: null,
+      hydrating: false,
     });
     const voice = document.body.querySelector(
       "[data-ec-voice]",

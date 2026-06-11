@@ -172,6 +172,7 @@ function makeState(overrides: Partial<State> = {}): State {
     advancedVersion: 1,
     advancedDirty: false,
     currentDomain: null,
+    hydrating: false,
     ...overrides,
   };
 }

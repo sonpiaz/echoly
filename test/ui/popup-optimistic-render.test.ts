@@ -147,6 +147,7 @@ function makeState(overrides: Partial<State> = {}): State {
     advancedVersion: 1,
     advancedDirty: false,
     currentDomain: null,
+    hydrating: false,
     ...overrides,
   };
 }
@@ -363,5 +364,75 @@ describe("popup — B3 optimistic render from cache", () => {
 
     const cacheWritesAfterGetState = setCalls.filter((c) => POPUP_STATE_CACHE_KEY in c);
     expect(cacheWritesAfterGetState.length).toBeGreaterThan(0);
+  });
+
+  // ── W5/AC14 — cold-SW no-regress + cache suppression while hydrating ───────
+
+  it("does NOT regress a rendered signed-in user when signedInUser:null arrives while hydrating", async () => {
+    // Cached signed-in render first (cold SW path).
+    fakeStore[POPUP_STATE_CACHE_KEY] = {
+      running: false,
+      signedInUser: { email: "cached@test.com", tier: "pro" },
+      tier: "standard",
+      targetLanguage: "vi",
+    };
+    fakeStore[HAS_EVER_SIGNED_IN_KEY] = true;
+
+    // GET_STATE replies instantly with the cold-SW snapshot: signed-out + hydrating.
+    getStateResult = { ok: true, state: makeState({ signedInUser: null, hydrating: true }) };
+
+    initPopup();
+    await flush(10);
+
+    // The popup must keep the signed-in render — no flash to signed-out.
+    expect(document.body.dataset.account).toBe("in");
+
+    // The eventual broadcast carries the real user and hydrating=false → reconciles.
+    const chrome = (globalThis as unknown as {
+      chrome: { runtime: { onMessage: { addListener: ReturnType<typeof vi.fn> } } };
+    }).chrome;
+    const listener = chrome.runtime.onMessage.addListener.mock.calls[0]?.[0] as
+      | ((msg: unknown) => void)
+      | undefined;
+    expect(listener).toBeDefined();
+    listener!({
+      type: "BACKGROUND_STATE_UPDATE",
+      state: makeState({ signedInUser: { email: "live@test.com", tier: "pro" }, hydrating: false }),
+    });
+    await flush(10);
+    expect(document.body.dataset.account).toBe("in");
+  });
+
+  it("suppresses popup cache writes while hydrating, resumes after hydrating=false", async () => {
+    const setCalls: Array<Record<string, unknown>> = [];
+    const chrome = (globalThis as unknown as {
+      chrome: {
+        runtime: { onMessage: { addListener: ReturnType<typeof vi.fn> } };
+        storage: { local: { set: ReturnType<typeof vi.fn> } };
+      };
+    }).chrome;
+    const origSet = chrome.storage.local.set;
+    chrome.storage.local.set = vi.fn(async (obj: Record<string, unknown>) => {
+      setCalls.push({ ...obj });
+      return (origSet as (obj: Record<string, unknown>) => Promise<void>)(obj);
+    });
+
+    // GET_STATE replies with a signed-in but still-hydrating snapshot.
+    getStateResult = { ok: true, state: makeState({ hydrating: true }) };
+
+    initPopup();
+    await flush(10);
+
+    // No cache write while hydrating (poisoning guard).
+    expect(setCalls.filter((c) => POPUP_STATE_CACHE_KEY in c)).toHaveLength(0);
+
+    // Hydration completes via broadcast → cache write resumes.
+    const listener = chrome.runtime.onMessage.addListener.mock.calls[0]?.[0] as
+      | ((msg: unknown) => void)
+      | undefined;
+    expect(listener).toBeDefined();
+    listener!({ type: "BACKGROUND_STATE_UPDATE", state: makeState({ hydrating: false }) });
+    await flush(10);
+    expect(setCalls.filter((c) => POPUP_STATE_CACHE_KEY in c).length).toBeGreaterThan(0);
   });
 });

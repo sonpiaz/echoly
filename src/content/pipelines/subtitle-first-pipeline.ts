@@ -88,6 +88,12 @@ export class SubtitleFirstPipeline {
       "standard",
     );
     overlay.syncFromSettings(incomingSettings);
+    // W6 — first-frame subtitle style (the WebRTC paths apply it in
+    // startSession/startWebRtcSession; this is the subtitle-first equivalent —
+    // without it, custom styling never applied on the Standard VOD dub path).
+    // Optional call: style is cosmetic and partial test fakes omit it — a
+    // missing apply must never block session start.
+    this.app.applySubtitleStyle?.(incomingSettings);
     overlay.setStatusText("Loading captions");
     overlay.setOverlayState("connecting");
 

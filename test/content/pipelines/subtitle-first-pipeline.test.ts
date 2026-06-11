@@ -190,6 +190,7 @@ function makeApp(adapter: PlatformAdapter) {
     startWebRtcStandard,
     stopSession,
     applySourceVisibility,
+    applySubtitleStyle: vi.fn(),
     startSessionTimer,
     bindCommonVideoListeners,
   };

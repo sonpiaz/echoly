@@ -107,6 +107,13 @@ export interface OverlayView {
   setDubSyncReadout(
     readout: import("@/lib/dub-playback-sync").DubSyncReadout | null,
   ): void;
+  /** Apply custom subtitle styling CSS custom properties to the overlay root.
+   *  Values must already be gated by the caller (free tier → defaults). */
+  setSubtitleStyle(style: {
+    fontSize: import("@/shared/advanced").CaptionFontSize;
+    bgOpacity: import("@/shared/advanced").CaptionBgOpacity;
+    fontWeight: import("@/shared/advanced").CaptionFontWeight;
+  }): void;
 }
 
 /** Factory exported by `@/content/overlay`. The content-logic agent imports the

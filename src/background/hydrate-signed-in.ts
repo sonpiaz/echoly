@@ -12,20 +12,28 @@ let hydrateInFlight: Promise<void> | null = null;
 export function scheduleHydrateSignedIn(
   store: Store,
   settings?: SettingsClient,
+  onApplied?: () => void,
 ): void {
   if (hydrateTimer) clearTimeout(hydrateTimer);
   hydrateTimer = setTimeout(() => {
     hydrateTimer = null;
-    void hydrateSignedIn(store, settings);
+    void hydrateSignedIn(store, settings, onApplied);
   }, HYDRATE_DEBOUNCE_MS);
 }
 
-/** One bootstrap + optional settings fetch per burst. */
+/** One bootstrap + optional settings fetch per burst.
+ *  `onApplied` fires only when a CHANGED server bundle was applied — callers
+ *  with session context use it to relay CONTENT_UPDATE_SETTINGS so subtitle
+ *  styling (W6) lands live on a running tab. Single-flight note: a join on an
+ *  in-flight hydrate does not run its own onApplied (the original caller's
+ *  callback covers the apply). */
 export async function hydrateSignedIn(
   store: Store,
   settings?: SettingsClient,
+  onApplied?: () => void,
 ): Promise<void> {
   if (hydrateInFlight) return hydrateInFlight;
+  store.setHydrating(true);
   hydrateInFlight = (async () => {
     try {
       await store.refreshAuth();
@@ -33,12 +41,18 @@ export async function hydrateSignedIn(
       if (!settings || !store.state.signedInUser) return;
       const bundle = await settings.fetchBundle().catch(() => null);
       if (bundle) {
-        store.applyServerBundle(bundle);
-        await store.persistAdvanced();
-        store.broadcast();
+        const changed = await store.applyServerBundle(bundle);
+        if (changed) {
+          await store.persistAdvanced();
+          store.broadcast();
+          onApplied?.();
+        }
       }
     } finally {
+      store.setHydrating(false);
       hydrateInFlight = null;
+      // Broadcast the hydrating=false so popup can reconcile.
+      store.broadcast();
     }
   })();
   return hydrateInFlight;

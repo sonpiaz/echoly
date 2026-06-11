@@ -12,6 +12,9 @@ const SAMPLE_BUNDLE: SettingsBundle = {
     captionPosition: "bottom",
     autoStartHosts: {},
     outputDeviceId: "",
+    captionFontSize: "medium",
+    captionBgOpacity: "high",
+    captionFontWeight: "semibold",
   },
   siteOverrides: { "youtube.com": { captionPosition: "top" } },
   version: 3,
@@ -37,7 +40,7 @@ describe("hydrateSignedIn", () => {
     vi.spyOn(store, "refreshAuth").mockImplementation(async () => {
       store.state.signedInUser = { email: "u@e.com", tier: "max" };
     });
-    vi.spyOn(store, "applyServerBundle").mockImplementation(() => {});
+    vi.spyOn(store, "applyServerBundle").mockResolvedValue(true);
     vi.spyOn(store, "persistAdvanced").mockResolvedValue();
   });
 
@@ -101,7 +104,7 @@ describe("scheduleHydrateSignedIn", () => {
     vi.spyOn(store, "refreshAuth").mockImplementation(async () => {
       store.state.signedInUser = { email: "u@e.com", tier: "pro" };
     });
-    vi.spyOn(store, "applyServerBundle").mockImplementation(() => {});
+    vi.spyOn(store, "applyServerBundle").mockResolvedValue(true);
     vi.spyOn(store, "persistAdvanced").mockResolvedValue();
     vi.spyOn(store, "broadcast").mockImplementation(() => {});
   });
@@ -111,7 +114,7 @@ describe("scheduleHydrateSignedIn", () => {
     resetHydrateSignedInState();
   });
 
-  it("debounces 300ms and broadcasts once", async () => {
+  it("debounces 300ms and broadcasts 3 times (after-auth + after-bundle + finally)", async () => {
     const settings = makeSettingsClient();
     scheduleHydrateSignedIn(store, settings);
     scheduleHydrateSignedIn(store, settings);
@@ -123,6 +126,7 @@ describe("scheduleHydrateSignedIn", () => {
 
     vi.advanceTimersByTime(1);
     await vi.waitFor(() => expect(store.refreshAuth).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(store.broadcast).toHaveBeenCalledTimes(2));
+    // 3 broadcasts: (1) after refreshAuth, (2) after bundle change, (3) finally (hydrating=false).
+    await vi.waitFor(() => expect(store.broadcast).toHaveBeenCalledTimes(3));
   });
 });

@@ -142,7 +142,10 @@ export type ContentToBgMessage =
     }
   | { type: "UPDATE_SETTINGS"; settings: Partial<Settings> }
   | { type: "GET_YT_CC_URL"; videoId: string }
-  | { type: "GET_YT_PLAYER_RESPONSE" };
+  | { type: "GET_YT_PLAYER_RESPONSE" }
+  /** Marker content script relays this after the web page dispatches
+   *  `echoly:settings-updated` — triggers a settings refetch/hydrate (C4). */
+  | { type: "REFRESH_SETTINGS" };
 
 /** A single caption track as exposed by YouTube's player response (MAIN-world
  *  `movie_player.getPlayerResponse().captions.playerCaptionsTracklistRenderer
@@ -181,6 +184,7 @@ export interface ContentToBgResponse {
   GET_YT_PLAYER_RESPONSE: YtPlayerResponseResult;
   START_REQUEST: Ok;
   GET_LAUNCH_STATE: LaunchStateResult;
+  REFRESH_SETTINGS: Ok;
 }
 
 // ───── Convenience: everything the background onMessage listener can receive ─

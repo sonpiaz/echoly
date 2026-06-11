@@ -50,6 +50,12 @@ export interface SignedInUser {
   email: string;
   tier: AccountTier;
   cancel_at_period_end?: boolean;
+  /** Original (dot-preserving) email for display. Falls back to `email` when absent. */
+  email_display?: string;
+  /** Subscription billing cadence, or "free" for non-subscribers. */
+  billing_cycle?: "monthly" | "annual" | "free";
+  /** ISO timestamp when the subscription renews. Non-null only for active/trialing subs. */
+  renews_at?: string | null;
 }
 
 export interface Usage {
@@ -108,6 +114,10 @@ export interface State extends Settings {
    *  YouTube tab for START; used for per-site override lookup + auto-start
    *  matching. null when no active tab. */
   currentDomain: string | null;
+  /** True while a hydrateSignedIn() call is in flight. The popup uses this to
+   *  avoid regressing a rendered signed-in user to signed-out during the
+   *  network fetch on cold SW open. */
+  hydrating: boolean;
 }
 
 /** Verbatim initial in-memory state (legacy/background.js:170-183). */
@@ -131,6 +141,7 @@ export const INITIAL_STATE: State = {
   advancedVersion: 0,
   advancedDirty: false,
   currentDomain: null,
+  hydrating: false,
   ...DEFAULT_SETTINGS,
 };
 

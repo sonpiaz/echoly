@@ -30,8 +30,10 @@ import {
 import {
   DEFAULT_ADVANCED,
   mergeAdvanced as mergeAdvancedSettings,
+  sanitizeSiteOverrideMap,
   type AdvancedPatch,
   type AdvancedSettings,
+  type ServerSettingsBundle,
   type SiteOverrideMap,
 } from "@/shared/advanced";
 import { deriveApiModeLabel } from "@/lib/api-mode";
@@ -126,8 +128,14 @@ export class Store {
           ...DEFAULT_ADVANCED.autoStartHosts,
           ...(e.settings?.autoStartHosts ?? {}),
         },
+        // Ensure new style keys default if missing from old persisted data
+        captionFontSize: e.settings?.captionFontSize ?? DEFAULT_ADVANCED.captionFontSize,
+        captionBgOpacity: e.settings?.captionBgOpacity ?? DEFAULT_ADVANCED.captionBgOpacity,
+        captionFontWeight: e.settings?.captionFontWeight ?? DEFAULT_ADVANCED.captionFontWeight,
       };
-      this.state.siteOverrides = e.siteOverrides ?? {};
+      // Self-heal: strip global-only style keys that the pre-fix saveSiteDefault
+      // pinned into per-site overrides (they mask global style edits forever).
+      this.state.siteOverrides = sanitizeSiteOverrideMap(e.siteOverrides ?? {});
       this.state.advancedVersion = typeof e.version === "number" ? e.version : 0;
       this.state.advancedDirty = e.dirty === true;
       return;
@@ -159,16 +167,90 @@ export class Store {
 
   /** Replace the local Advanced bundle with the server-authoritative one and
    *  clear the dirty flag. Used on sign-in fetch, on successful PUT, and on
-   *  409-conflict resolution (the server's body IS the current bundle). */
-  applyServerBundle(bundle: {
-    settings: AdvancedSettings;
+   *  409-conflict resolution (the server's body IS the current bundle).
+   *
+   *  SPLIT behaviour (C7): the server returns 13 keys in `bundle.settings`.
+   *  We partition them:
+   *   • 6 Advanced keys → state.advanced (captionPosition, autoStartHosts,
+   *     outputDeviceId, captionFontSize, captionBgOpacity, captionFontWeight)
+   *   • 7 synced Settings keys → flat state.tier / targetLanguage / … (with
+   *     realtime coercion for non-Max users)
+   *
+   *  SHORT-CIRCUIT: returns false (no writes, no broadcast) when
+   *  bundle.version === state.advancedVersion && !state.advancedDirty.
+   *
+   *  WRITE-ORDER: saveSettings is awaited before version is persisted so a SW
+   *  death mid-persist cannot strand version-equal+clean with unapplied flat
+   *  settings.
+   *
+   *  This method NEVER triggers a push — it is a pure local-apply used by
+   *  pull paths (hydrateSignedIn) and 409 resolution.
+   *
+   *  Returns true when changes were applied, false when short-circuited.
+   */
+  async applyServerBundle(bundle: {
+    settings: AdvancedSettings | ServerSettingsBundle;
     siteOverrides: SiteOverrideMap;
     version: number;
-  }): void {
-    this.state.advanced = { ...bundle.settings };
-    this.state.siteOverrides = { ...bundle.siteOverrides };
-    this.state.advancedVersion = bundle.version;
+  }): Promise<boolean> {
+    // Short-circuit: no change needed.
+    if (
+      bundle.version === this.state.advancedVersion &&
+      !this.state.advancedDirty
+    ) {
+      return false;
+    }
+
+    const s = bundle.settings as ServerSettingsBundle;
+
+    // 6 Advanced keys → state.advanced (3 legacy + 3 style)
+    const advanced: AdvancedSettings = {
+      captionPosition: s.captionPosition ?? this.state.advanced.captionPosition ?? DEFAULT_ADVANCED.captionPosition,
+      autoStartHosts: {
+        ...DEFAULT_ADVANCED.autoStartHosts,
+        ...(s.autoStartHosts ?? this.state.advanced.autoStartHosts),
+      },
+      outputDeviceId: s.outputDeviceId ?? this.state.advanced.outputDeviceId ?? DEFAULT_ADVANCED.outputDeviceId,
+      captionFontSize: s.captionFontSize ?? this.state.advanced.captionFontSize ?? DEFAULT_ADVANCED.captionFontSize,
+      captionBgOpacity: s.captionBgOpacity ?? this.state.advanced.captionBgOpacity ?? DEFAULT_ADVANCED.captionBgOpacity,
+      captionFontWeight: s.captionFontWeight ?? this.state.advanced.captionFontWeight ?? DEFAULT_ADVANCED.captionFontWeight,
+    };
+    this.state.advanced = advanced;
+    // Belt-and-braces: server overrides should already be 3-key, but heal any
+    // style keys so effectiveAdvanced can never pin styles per-site.
+    this.state.siteOverrides = sanitizeSiteOverrideMap(bundle.siteOverrides);
     this.state.advancedDirty = false;
+
+    // 7 synced Settings keys → flat state fields
+    if (s.mode !== undefined) {
+      // Coerce mode: non-Max users cannot use realtime.
+      const wantsRealtime = s.mode === TIER_REALTIME;
+      const canRt = canUseRealtime(this.state.signedInUser?.tier);
+      this.state.tier = wantsRealtime && !canRt ? TIER_STANDARD : s.mode;
+    }
+    if (s.targetLanguage !== undefined) this.state.targetLanguage = s.targetLanguage;
+    if (s.sourceLanguage !== undefined) this.state.sourceLanguage = s.sourceLanguage;
+    if (s.standardVoice !== undefined) this.state.standardVoice = s.standardVoice;
+    if (s.realtimeVoice !== undefined) this.state.realtimeVoice = s.realtimeVoice;
+    if (s.showSource !== undefined) this.state.showSource = s.showSource;
+    if (s.showTargetCaptions !== undefined) this.state.showTargetCaptions = s.showTargetCaptions;
+
+    // WRITE-ORDER: persist flat settings BEFORE version so SW crash between
+    // the two leaves version=old (dirty retry) instead of version=new+no-data.
+    await saveSettings({
+      tier: this.state.tier,
+      targetLanguage: this.state.targetLanguage,
+      sourceLanguage: this.state.sourceLanguage,
+      standardVoice: this.state.standardVoice,
+      realtimeVoice: this.state.realtimeVoice,
+      showSource: this.state.showSource,
+      showTargetCaptions: this.state.showTargetCaptions,
+    });
+
+    // Persist version only after flat settings are durable.
+    this.state.advancedVersion = bundle.version;
+
+    return true;
   }
 
   /** Set or update a per-site override. Shallow-merge into the existing entry
@@ -335,6 +417,10 @@ export class Store {
 
   setError(errorMessage: string): void {
     this.state.errorMessage = errorMessage;
+  }
+
+  setHydrating(hydrating: boolean): void {
+    this.state.hydrating = hydrating;
   }
 
   setApiMode(apiMode: ApiMode): void {

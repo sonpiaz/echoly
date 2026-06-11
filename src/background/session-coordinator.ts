@@ -12,8 +12,12 @@ import {
   effectiveAdvanced,
   normalizeDomain,
   sanitizePatch,
+  sanitizeSiteOverridePatch,
+  SYNCED_SETTINGS_KEYS,
   type AdvancedPatch,
+  type ServerSettingsPatch,
 } from "@/shared/advanced";
+import type { SettingsBundle } from "./settings-client";
 import { resolveApiMode } from "@/lib/api-mode";
 import type { Store } from "./store";
 import type { EcholyAuth } from "./auth";
@@ -77,7 +81,7 @@ export class SessionCoordinator {
   ): Promise<void> {
     try {
       const bundle = await op();
-      this.store.applyServerBundle(bundle);
+      await this.store.applyServerBundle(bundle);
     } catch (err) {
       // 409 conflict: server returns the CURRENT bundle in the error body —
       // adopt it (the user's local edit is dropped in favour of the server's
@@ -95,7 +99,7 @@ export class SessionCoordinator {
           typeof body.version === "number" &&
           body.siteOverrides
         ) {
-          this.store.applyServerBundle({
+          await this.store.applyServerBundle({
             settings: body.settings,
             siteOverrides: body.siteOverrides,
             version: body.version,
@@ -324,7 +328,9 @@ export class SessionCoordinator {
     this.store.setTabId(null);
     this.store.broadcast();
     if (this.settingsClient && this.store.state.signedInUser) {
-      scheduleHydrateSignedIn(this.store, this.settingsClient);
+      scheduleHydrateSignedIn(this.store, this.settingsClient, () =>
+        this.relaySettingsToContent(),
+      );
     }
     if (wasActive && !relayOk) {
       return {
@@ -337,16 +343,64 @@ export class SessionCoordinator {
 
   /** Persist + relay settings live to the running content tab (legacy
    *  handleUpdateSettings 349-365). Reads optional reply.state back (content
-   *  may not send it). */
+   *  may not send it). Also diffs the 7 synced Settings keys and pushes any
+   *  change to the server (debounced ~800ms, retry-once on 409). */
   async updateSettings(settings?: Partial<Settings>): Promise<StateResult> {
+    // Snapshot the PREVIOUS synced-key values before we apply the patch.
+    const prev: Settings = {
+      tier: this.store.state.tier,
+      targetLanguage: this.store.state.targetLanguage,
+      sourceLanguage: this.store.state.sourceLanguage,
+      standardVoice: this.store.state.standardVoice,
+      realtimeVoice: this.store.state.realtimeVoice,
+      showSource: this.store.state.showSource,
+      showTargetCaptions: this.store.state.showTargetCaptions,
+      originalVolume: this.store.state.originalVolume,
+      voiceVolume: this.store.state.voiceVolume,
+      apiBearer: this.store.state.apiBearer,
+    };
+
     await this.store.persistSettings(settings ?? {});
     this.store.broadcast();
+
+    // Diff the 7 synced keys and push when signed in and there's a change.
+    if (this.settingsClient && this.store.state.signedInUser && settings) {
+      const next: Settings = {
+        tier: this.store.state.tier,
+        targetLanguage: this.store.state.targetLanguage,
+        sourceLanguage: this.store.state.sourceLanguage,
+        standardVoice: this.store.state.standardVoice,
+        realtimeVoice: this.store.state.realtimeVoice,
+        showSource: this.store.state.showSource,
+        showTargetCaptions: this.store.state.showTargetCaptions,
+        originalVolume: this.store.state.originalVolume,
+        voiceVolume: this.store.state.voiceVolume,
+        apiBearer: this.store.state.apiBearer,
+      };
+      // Only push if any of the SYNCED_SETTINGS_KEYS changed.
+      // Use explicit comparisons to avoid the index-signature TS error.
+      const hasSyncedChange =
+        prev.tier !== next.tier ||
+        prev.targetLanguage !== next.targetLanguage ||
+        prev.sourceLanguage !== next.sourceLanguage ||
+        prev.standardVoice !== next.standardVoice ||
+        prev.realtimeVoice !== next.realtimeVoice ||
+        prev.showSource !== next.showSource ||
+        prev.showTargetCaptions !== next.showTargetCaptions;
+      if (hasSyncedChange) {
+        const diff = this.diffSyncedSettings(prev, next);
+        if (Object.keys(diff).length > 0) {
+          this.pushSyncedSettings(diff);
+        }
+      }
+    }
+
     const { state } = this.store;
     if (state.tabId != null && (state.running || state.connecting)) {
       try {
         const reply = await relayToContent(state.tabId, {
           type: "CONTENT_UPDATE_SETTINGS",
-          settings: this.store.snapshot(),
+          settings: this.snapshotForContent(),
         });
         if (reply?.state) this.store.mergeFromContent(reply.state);
       } catch (err) {
@@ -355,6 +409,25 @@ export class SessionCoordinator {
       }
     }
     return { ok: true, state: this.store.snapshot() };
+  }
+
+  /**
+   * Snapshot for CONTENT relays — `advanced` resolved to the EFFECTIVE values
+   * (global merged with the current domain's override), EXACTLY like the
+   * session-START path. Relaying the raw snapshot leaked the GLOBAL
+   * captionPosition to content: with a site override pinning the placement,
+   * any unrelated advanced edit (e.g. a subtitle-style change) relayed
+   * global "top" and visibly yanked the caption away from its override
+   * position ("đổi style → sub nhảy lên top").
+   */
+  private snapshotForContent(): ReturnType<Store["snapshot"]> {
+    const snapshot = this.store.snapshot();
+    snapshot.advanced = effectiveAdvanced(
+      snapshot.advanced,
+      snapshot.siteOverrides,
+      snapshot.currentDomain,
+    );
+    return snapshot;
   }
 
   /** Apply + persist volume, relay to the content tab. Falls back to the active
@@ -407,6 +480,95 @@ export class SessionCoordinator {
     return { ok: true };
   }
 
+  // ── Synced settings push (W3) ─────────────────────────────────────────────
+  // When the user edits one of the 7 synced Settings keys (tier/language/voice/
+  // show*), we diff vs. the previous state and debounce-push the delta to the
+  // server. On 409 we adopt the fresh bundle, then retry the user's patch once
+  // (user-edit-wins semantic). On second failure we fall back to advancedDirty.
+
+  private pushSyncedTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingSyncedPatch: ServerSettingsPatch | null = null;
+
+  /**
+   * Compute a patch of the 7 synced keys by diffing `next` against `prev`.
+   * Returns an empty object when nothing changed.
+   */
+  private diffSyncedSettings(
+    prev: import("@/shared/types").Settings,
+    next: import("@/shared/types").Settings,
+  ): ServerSettingsPatch {
+    const patch: ServerSettingsPatch = {};
+    // Map state.tier → bundle "mode"
+    if (prev.tier !== next.tier) patch.mode = next.tier as "standard" | "realtime";
+    if (prev.targetLanguage !== next.targetLanguage) patch.targetLanguage = next.targetLanguage;
+    if (prev.sourceLanguage !== next.sourceLanguage) patch.sourceLanguage = next.sourceLanguage;
+    if (prev.standardVoice !== next.standardVoice) patch.standardVoice = next.standardVoice;
+    if (prev.realtimeVoice !== next.realtimeVoice) patch.realtimeVoice = next.realtimeVoice;
+    if (prev.showSource !== next.showSource) patch.showSource = next.showSource;
+    if (prev.showTargetCaptions !== next.showTargetCaptions) patch.showTargetCaptions = next.showTargetCaptions;
+    return patch;
+  }
+
+  /**
+   * Debounced (~800 ms) push of a synced-settings patch to the server.
+   * Retries once on 409 (user-edit-wins). Falls back to advancedDirty flag
+   * on a second failure or other error.
+   */
+  private pushSyncedSettings(patch: ServerSettingsPatch): void {
+    // Coalesce rapid edits into one push: accumulate the diff.
+    this.pendingSyncedPatch = { ...this.pendingSyncedPatch, ...patch };
+    if (this.pushSyncedTimer) clearTimeout(this.pushSyncedTimer);
+    this.pushSyncedTimer = setTimeout(() => {
+      this.pushSyncedTimer = null;
+      const merged = this.pendingSyncedPatch;
+      this.pendingSyncedPatch = null;
+      if (!merged || Object.keys(merged).length === 0) return;
+      // Note: no `!this.settingsClient` guard needed — the field is readonly and
+      // the only call site (pushSyncedSettings) is always guarded by a settingsClient
+      // check in updateSettings. Belt-and-suspenders check here anyway.
+      void this.executePushSynced(merged, false);
+    }, 800);
+  }
+
+  /** Execute the actual server PUT; retryOnce=false → first attempt; true → retry. */
+  private async executePushSynced(patch: ServerSettingsPatch, isRetry: boolean): Promise<void> {
+    const version = this.store.state.advancedVersion;
+    try {
+      const bundle = await this.settingsClient!.putGlobal(patch, version);
+      await this.store.applyServerBundle(bundle as SettingsBundle);
+      await this.store.persistAdvanced();
+      this.store.broadcast();
+    } catch (err) {
+      if (err instanceof SettingsHttpError && err.status === 409 && !isRetry) {
+        // Adopt fresh bundle then retry the user's patch once.
+        const body = err.body as {
+          settings?: import("@/shared/advanced").AdvancedSettings;
+          siteOverrides?: import("@/shared/advanced").SiteOverrideMap;
+          version?: number;
+          updatedAt?: string;
+        } | null;
+        if (body?.settings && typeof body.version === "number") {
+          await this.store.applyServerBundle({
+            settings: body.settings,
+            siteOverrides: body.siteOverrides ?? {},
+            version: body.version,
+          });
+          await this.store.persistAdvanced();
+          this.store.broadcast();
+          // Retry once with the same patch but fresh version.
+          await this.executePushSynced(patch, true);
+        } else {
+          this.store.setAdvancedDirty(true);
+          await this.store.persistAdvanced();
+        }
+      } else {
+        // Second failure or network/5xx: mark dirty.
+        this.store.setAdvancedDirty(true);
+        await this.store.persistAdvanced();
+      }
+    }
+  }
+
   // ── Advanced settings (server-authoritative, per-user) ─────────────────────
   // Each mutator follows the same pattern:
   //   1. apply the change locally (in-memory + persist to chrome.storage),
@@ -415,13 +577,60 @@ export class SessionCoordinator {
   //      on failure (network/5xx) set the dirty flag for retry.
   // The local edit is never lost — even offline the popup looks responsive.
 
+  /**
+   * Relay CONTENT_UPDATE_SETTINGS to the active translation tab when a session
+   * is running or connecting. Used after both popup advanced edits and server-bundle
+   * applies so the content script's subtitle styling updates live. Fire-and-forget.
+   */
+  relaySettingsToContent(): void {
+    const { tabId, running, connecting } = this.store.state;
+    if (tabId == null || (!running && !connecting)) return;
+    void relayToContent(tabId, {
+      type: "CONTENT_UPDATE_SETTINGS",
+      settings: this.snapshotForContent(),
+    }).catch(() => {
+      // Content script unavailable — acceptable, re-applied on next start.
+    });
+  }
+
   /** Merge an AdvancedPatch into global state. Server-PUTs the patch under
-   *  optimistic concurrency. */
+   *  optimistic concurrency. Relays to content when a session is active.
+   *
+   *  WHAT-YOU-SEE-IS-WHAT-YOU-EDIT: the popup renders EFFECTIVE values
+   *  (site override over global). If the current site's override already pins
+   *  one of the patched keys, a global write would be masked by that pin and
+   *  the control would appear dead (the "stuck on Float" bug). So keys pinned
+   *  by the current domain's override are routed INTO that override; the rest
+   *  follow the normal global flow. Style keys can never be pinned (overrides
+   *  are healed to the legacy 3 keys), so they always go global. */
   async updateAdvancedSettings(patch: AdvancedPatch): Promise<StateResult> {
-    const safe = sanitizePatch(patch);
+    let safe = sanitizePatch(patch);
+    const domain = this.store.state.currentDomain;
+    const override = domain ? this.store.state.siteOverrides[domain] : undefined;
+    if (domain && override) {
+      const pinned: AdvancedPatch = {};
+      const globalRest: AdvancedPatch = {};
+      for (const key of Object.keys(safe) as (keyof AdvancedPatch)[]) {
+        if (key in override) {
+          (pinned as Record<string, unknown>)[key] = safe[key];
+        } else {
+          (globalRest as Record<string, unknown>)[key] = safe[key];
+        }
+      }
+      if (Object.keys(pinned).length > 0) {
+        await this.updateSiteOverride(domain, pinned);
+        if (Object.keys(globalRest).length === 0) {
+          this.relaySettingsToContent();
+          return { ok: true, state: this.store.snapshot() };
+        }
+        safe = globalRest;
+      }
+    }
     this.store.mergeAdvanced(safe);
     await this.store.persistAdvanced();
     this.store.broadcast();
+    // Relay to content so subtitle styling takes effect live (W6).
+    this.relaySettingsToContent();
     if (this.settingsClient) {
       const version = this.store.state.advancedVersion;
       await this.syncOrDirty(() =>
@@ -442,7 +651,12 @@ export class SessionCoordinator {
   ): Promise<StateResult> {
     const norm = normalizeDomain(domain);
     if (!norm) return { ok: false, error: "Invalid domain." };
-    const safe = sanitizePatch(patch);
+    // Site overrides carry ONLY the 3 legacy keys — the server strict-rejects
+    // style keys in site overrides with a 400 (audit P2-1).
+    const safe = sanitizeSiteOverridePatch(patch);
+    if (Object.keys(safe).length === 0) {
+      return { ok: true, state: this.store.snapshot() };
+    }
     this.store.setSiteOverride(norm, safe);
     await this.store.persistAdvanced();
     this.store.broadcast();
@@ -478,14 +692,28 @@ export class SessionCoordinator {
     return { ok: true, state: this.store.snapshot() };
   }
 
-  /** "Save as default for this site" — snapshot the FULL current Advanced
-   *  values into siteOverrides[domain]. The override is a partial in shape,
-   *  but stores every field so the site is fully pinned to the current setup
-   *  (not just the most-recent diff). */
+  /** "Save as default for this site" — snapshot the SITE-SCOPED Advanced
+   *  values (captionPosition / autoStartHosts / outputDeviceId) into
+   *  siteOverrides[domain]. The 3 subtitle-style keys are GLOBAL-only and
+   *  must NOT be pinned per-site (the server strict-rejects them in site
+   *  overrides, and a local pin would block global style edits on the site). */
   async saveSiteDefault(domain: string): Promise<StateResult> {
     const norm = normalizeDomain(domain);
     if (!norm) return { ok: false, error: "Invalid domain." };
-    const fullSnapshot: AdvancedPatch = { ...this.store.state.advanced };
+    // Snapshot the EFFECTIVE values for this domain (global merged with any
+    // existing override) — NOT raw global. The popup renders effective, so
+    // pinning raw global would visibly revert the user's on-screen choices
+    // (the "press Save → Captions jumps back to Top" bug).
+    const eff = effectiveAdvanced(
+      this.store.state.advanced,
+      this.store.state.siteOverrides,
+      norm,
+    );
+    const fullSnapshot: AdvancedPatch = {
+      captionPosition: eff.captionPosition,
+      autoStartHosts: { ...eff.autoStartHosts },
+      outputDeviceId: eff.outputDeviceId,
+    };
     this.store.setSiteOverride(norm, fullSnapshot);
     await this.store.persistAdvanced();
     this.store.broadcast();
@@ -504,7 +732,8 @@ export class SessionCoordinator {
 
   /** Force a GET /me/settings and replace local state with the server's bundle.
    *  Idempotent — useful when the popup re-opens and wants to be sure it has
-   *  the freshest values (e.g. after the user edited from another device). */
+   *  the freshest values (e.g. after the user edited from another device).
+   *  Relays to content when a session is active so subtitle styling applies live. */
   async refreshSettings(): Promise<StateResult> {
     if (!this.settingsClient) {
       return { ok: true, state: this.store.snapshot() };
@@ -512,8 +741,12 @@ export class SessionCoordinator {
     try {
       const bundle = await this.settingsClient.fetchBundle();
       if (bundle) {
-        this.store.applyServerBundle(bundle);
-        await this.store.persistAdvanced();
+        const changed = await this.store.applyServerBundle(bundle);
+        if (changed) {
+          await this.store.persistAdvanced();
+          // Relay to content so subtitle styling takes effect live (W6).
+          this.relaySettingsToContent();
+        }
       }
     } catch (err) {
       // Network/5xx: keep current state; surface error message on state.

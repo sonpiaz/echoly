@@ -82,6 +82,22 @@ export function daysLeftLabel(
   return `· ${n} day${n === 1 ? "" : "s"} left`;
 }
 
+/**
+ * Format a renewal date ISO string as short-form en-US date with year,
+ * e.g. "Jun 4, 2027". Used for annual-plan popup display.
+ */
+export function renewsAtLabel(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "";
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
 export function shade(hex: string, pct: number): string {
   const num = parseInt(hex.replace("#", ""), 16);
   const r = Math.max(0, Math.min(255, (num >> 16) + pct * 2.55));

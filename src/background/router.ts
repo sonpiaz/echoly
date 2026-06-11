@@ -93,11 +93,18 @@ export function handleContentEvent(
     store.setStatus(message.reason || "Stopped");
     store.broadcast();
     if (deps.settings && store.state.signedInUser) {
-      scheduleHydrateSignedIn(store, deps.settings);
+      scheduleHydrateSignedIn(store, deps.settings, () =>
+        deps.session.relaySettingsToContent(),
+      );
     }
   }
   if (message.type === "UPDATE_SETTINGS" && message.settings) {
     void deps.session.updateSettings(message.settings);
+  }
+  // C4: REFRESH_SETTINGS from content script (e.g. marker content script relaying
+  // the echoly:settings-updated CustomEvent from the web page).
+  if (message.type === "REFRESH_SETTINGS") {
+    void deps.session.refreshSettings();
   }
 }
 
@@ -112,7 +119,9 @@ async function handlePopupMessage(
   switch (message.type) {
     case "GET_STATE":
       await store.loadSettings();
-      await hydrateSignedIn(store, deps.settings);
+      // Fire-and-forget: fresh data lands via BACKGROUND_STATE_UPDATE broadcast.
+      // Popup must NEVER block on a network call — return the local snapshot immediately.
+      void hydrateSignedIn(store, deps.settings, () => session.relaySettingsToContent());
       await session.refreshActiveSite();
       return { ok: true, state: store.snapshot() };
     case "SIGN_OUT_ECHOLY":
@@ -139,7 +148,7 @@ async function handlePopupMessage(
         //    or SW just woke). Read it; if present, hydrate and skip the tab.
         const token = await auth.getSessionToken();
         if (token) {
-          await hydrateSignedIn(store, deps.settings);
+          await hydrateSignedIn(store, deps.settings, () => session.relaySettingsToContent());
           if (store.state.signedInUser) return { ok: true };
         }
         // 3. Genuinely signed out. Reuse/focus an existing signin tab if one is

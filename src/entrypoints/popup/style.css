@@ -924,6 +924,8 @@ input[type="checkbox"]:focus-visible {
 }
 .segmented[data-count="2"] { grid-template-columns: repeat(2, 1fr); }
 .segmented[data-count="3"] { grid-template-columns: repeat(3, 1fr); }
+.segmented[data-count="4"] { grid-template-columns: repeat(4, 1fr); }
+.segmented button:disabled { cursor: not-allowed; opacity: .55; }
 .segmented button {
   padding: 5px 6px;
   border: 0;
@@ -1004,6 +1006,33 @@ input[type="checkbox"]:focus-visible {
 }
 .adv-select:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(242,91,23,.18); }
 .adv-select:hover { background: rgba(255,255,255,.90); }
+
+/* Open-state dropdown (Chromium 134+ customizable select): style the picker
+   frame + options to match the warm card design. Older Chromium silently
+   keeps the native picker — the closed control is unchanged either way. */
+@supports (appearance: base-select) {
+  .adv-select,
+  .adv-select::picker(select) { appearance: base-select; }
+  .adv-select::picker(select) {
+    background: #fffdf9;
+    border: 1px solid rgba(59, 42, 30, .14);
+    border-radius: 12px;
+    box-shadow: 0 14px 30px rgba(59, 42, 30, .16);
+    padding: 4px;
+    margin-top: 4px;
+  }
+}
+.adv-select option {
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--ec-cocoa);
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: transparent;
+}
+.adv-select option:hover,
+.adv-select option:focus { background: rgba(59, 42, 30, .06); }
+.adv-select option:checked { background: rgba(242, 91, 23, .12); font-weight: 600; }
 
 /* Dirty-state pill */
 .dirty-pill {
@@ -1203,6 +1232,24 @@ body[data-state="paused"]     .session-card.idle-only { display: none !important
 body[data-state="connecting"] .advanced.idle-only,
 body[data-state="active"]     .advanced.idle-only,
 body[data-state="paused"]     .advanced.idle-only { display: none !important; }
+
+/* Subtitle style is its OWN collapsible card (reuses the .advanced /
+   .advanced-body styling, see index.html) but deliberately has NO idle-only
+   class — the .advanced.idle-only hide rule never matches it, so it stays
+   visible and editable mid-session for live style tweaking (W6). */
+/* .shell--main is an order-driven flex column (session-card 1 … advanced 8,
+   mid-session .action 9). The shared .advanced rule sets order:8; this later
+   rule overrides to 10 = bottom-most in every popup state. */
+.subtitle-style-section { order: 10; }
+.subtitle-style-group { display: block; }
+.subtitle-style-group[data-can-style="false"] .segmented { opacity: 0.6; }
+.subtitle-style-group[data-can-style="false"] .adv-hint--upgrade { display: block; }
+.adv-hint--upgrade {
+  color: var(--ec-cocoa-soft);
+  font-size: 11px;
+  margin-top: 4px;
+  display: none;
+}
 body[data-state="connecting"] .usage-hint-row,
 body[data-state="active"]     .usage-hint-row,
 body[data-state="paused"]     .usage-hint-row { display: none; }

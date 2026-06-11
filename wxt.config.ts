@@ -58,8 +58,12 @@ export default defineConfig({
       hostPermForOrigin(ECHOLY_API_ORIGIN),
       hostPermForOrigin(ECHOLY_WEB_ORIGIN),
       // Dev convenience: always allow local stack even if .env points elsewhere.
+      // NOTE: Chrome match patterns CANNOT contain a port ("Hostname cannot
+      // include a port") — the old ":8787"/":4321" entries were malformed and
+      // ignored/rejected. A port-less pattern matches EVERY port, so these
+      // cover the local api (:8787) and web (:4321) servers.
       ...(mode === "development"
-        ? ["http://localhost:8787/*", "http://localhost:4321/*"]
+        ? ["http://localhost/*", "http://127.0.0.1/*"]
         : []),
     ],
     // CSP — strict by default ('script-src 'self''), relaxed in dev to allow

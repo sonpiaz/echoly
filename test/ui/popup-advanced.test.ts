@@ -98,6 +98,35 @@ const FIXTURE_HTML = `
       </div>
     </details>
 
+    <details class="advanced subtitle-style-section">
+      <summary>Subtitle style</summary>
+      <div class="advanced-body">
+        <div id="subtitle-style-group" class="subtitle-style-group">
+          <div class="segmented" data-count="4" data-setting="captionFontSize">
+            <button type="button" data-value="small">S</button>
+            <button type="button" data-value="medium">M</button>
+            <button type="button" data-value="large">L</button>
+            <button type="button" data-value="xlarge">XL</button>
+          </div>
+          <div class="segmented" data-count="4" data-setting="captionBgOpacity">
+            <button type="button" data-value="transparent">None</button>
+            <button type="button" data-value="low">Low</button>
+            <button type="button" data-value="medium">Med</button>
+            <button type="button" data-value="high">High</button>
+          </div>
+          <div class="segmented" data-count="3" data-setting="captionFontWeight">
+            <button type="button" data-value="normal">Normal</button>
+            <button type="button" data-value="semibold">Semi</button>
+            <button type="button" data-value="bold">Bold</button>
+          </div>
+          <div class="adv-hint adv-hint--upgrade" id="subtitle-style-upgrade-hint" hidden></div>
+          <div class="adv-footer">
+            <button type="button" class="adv-footer-link" id="subtitleStyleResetBtn">Reset to defaults</button>
+          </div>
+        </div>
+      </div>
+    </details>
+
     <footer class="status-footer">
       <span class="status-text">
         <span class="status-dot"></span>
@@ -162,6 +191,7 @@ function makeState(overrides: Partial<State> = {}): State {
     advancedVersion: 1,
     advancedDirty: false,
     currentDomain: null,
+    hydrating: false,
     ...overrides,
   };
 }
@@ -238,13 +268,48 @@ describe("popup Advanced section — dispatch contract", () => {
     expect(updates[updates.length - 1]!.patch).toEqual({ captionPosition: "top" });
   });
 
-  it("reset to defaults → UPDATE_ADVANCED_SETTINGS with full DEFAULT_ADVANCED patch", async () => {
+  it("subtitle-style segmented (Max) → font size L dispatches { captionFontSize: 'large' }", async () => {
+    const btn = document.querySelector<HTMLButtonElement>(
+      '.segmented[data-setting="captionFontSize"] button[data-value="large"]',
+    );
+    expect(btn).not.toBeNull();
+    expect(btn!.disabled).toBe(false); // tier max → enabled
+    btn!.click();
+    await flush();
+    const updates = sent.filter((m) => m.type === "UPDATE_ADVANCED_SETTINGS");
+    expect(updates[updates.length - 1]!.patch).toEqual({ captionFontSize: "large" });
+  });
+
+  it("subtitle-style reset is CARD-scoped: resets exactly the 3 style keys, never the Advanced keys", async () => {
+    const reset = document.querySelector<HTMLButtonElement>("#subtitleStyleResetBtn");
+    expect(reset).not.toBeNull();
+    expect(reset!.disabled).toBe(false); // tier max → enabled
+    reset!.click();
+    await flush();
+    const updates = sent.filter((m) => m.type === "UPDATE_ADVANCED_SETTINGS");
+    expect(updates[updates.length - 1]!.patch).toEqual({
+      captionFontSize: DEFAULT_ADVANCED.captionFontSize,
+      captionBgOpacity: DEFAULT_ADVANCED.captionBgOpacity,
+      captionFontWeight: DEFAULT_ADVANCED.captionFontWeight,
+    });
+  });
+
+  it("reset to defaults is PANEL-scoped: resets the 3 Advanced keys, never the subtitle-style keys", async () => {
     const reset = document.querySelector<HTMLButtonElement>("#advResetBtn");
     reset!.click();
     await flush();
     const updates = sent.filter((m) => m.type === "UPDATE_ADVANCED_SETTINGS");
     expect(updates.length).toBeGreaterThanOrEqual(1);
-    expect(updates[updates.length - 1]!.patch).toEqual({ ...DEFAULT_ADVANCED });
+    const patch = updates[updates.length - 1]!.patch as Record<string, unknown>;
+    expect(patch.captionPosition).toBe(DEFAULT_ADVANCED.captionPosition);
+    expect(patch.outputDeviceId).toBe(DEFAULT_ADVANCED.outputDeviceId);
+    // autoStartHosts: current domain explicitly off (or {} when no domain) —
+    // server-side autoStartHosts merge means {} alone would not clear the host.
+    expect(patch.autoStartHosts).toEqual({ "youtube.com": false });
+    // Style keys belong to the separate Subtitle style card — must be absent.
+    expect("captionFontSize" in patch).toBe(false);
+    expect("captionBgOpacity" in patch).toBe(false);
+    expect("captionFontWeight" in patch).toBe(false);
   });
 
   it("save-for-site dispatches SAVE_SITE_DEFAULT with the current domain", async () => {

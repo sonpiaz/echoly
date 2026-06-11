@@ -4,6 +4,40 @@ import { parseServerError } from "@/lib/server-errors";
 import { pipelineToastFromServer, isPipelineToastError } from "@/lib/pipeline-error";
 import type { CaptionSentence } from "@/lib/caption-utils";
 
+/** Backoff for the single too_many_inflight retry (transient burst admission). */
+const INFLIGHT_RETRY_DELAY_MS = 1500;
+
+/**
+ * If `res` is a 429 whose body code is `too_many_inflight`, wait briefly and
+ * re-run `doFetch` ONCE (callers reuse the same request id, so the server's
+ * idempotency layer makes the retry double-billing-safe). Any other response
+ * — or an abort during the backoff — returns the original response untouched.
+ */
+async function retryOnceOnInflight429(
+  res: Response,
+  doFetch: () => Promise<Response>,
+  signal?: AbortSignal,
+): Promise<Response> {
+  if (res.status !== 429 || signal?.aborted) return res;
+  let code: string | undefined;
+  try {
+    const peek = (await res.clone().json()) as
+      | { code?: string; error?: { code?: string } }
+      | null;
+    code = peek?.error?.code ?? peek?.code;
+  } catch {
+    return res;
+  }
+  if (code !== "too_many_inflight") return res;
+  await new Promise((r) => setTimeout(r, INFLIGHT_RETRY_DELAY_MS));
+  if (signal?.aborted) return res;
+  try {
+    return await doFetch();
+  } catch {
+    return res;
+  }
+}
+
 // Re-export so existing importers that do `import { isPipelineToastError } from "@/lib/echoly-api"` keep working.
 export { isPipelineToastError };
 
@@ -70,7 +104,7 @@ export async function renderSubtitleDubBatch(opts: {
 }): Promise<SubtitleDubBatchLine[] | typeof ALREADY_PROCESSED> {
   const lines = opts.sentences.map((s) => s.text);
   const reqId = opts.requestId ?? newRequestId("sf_dub");
-  const res = await fetch(`${opts.apiBase}/translate/subtitles`, {
+  const doFetch = () => fetch(`${opts.apiBase}/translate/subtitles`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${opts.bearer}`,
@@ -89,6 +123,12 @@ export async function renderSubtitleDubBatch(opts: {
     }),
     signal: opts.signal,
   });
+  let res = await doFetch();
+
+  // 429 too_many_inflight is TRANSIENT (burst admission, e.g. a just-stopped
+  // session's batches still settling server-side). Retry ONCE after a short
+  // backoff with the SAME request id (server idempotency makes this safe).
+  res = await retryOnceOnInflight429(res, doFetch, opts.signal);
 
   // ── Idempotency replay: already processed (SOLUTION §4 WS5) ─────────────────
   // 409 already_processed: a retry raced the in-flight original past the
@@ -207,9 +247,7 @@ export async function* renderSubtitleDubStream(opts: {
 }): AsyncGenerator<SubtitleDubStreamLine | typeof ALREADY_PROCESSED> {
   const lines = opts.sentences.map((s) => s.text);
   const reqId = opts.requestId ?? newRequestId("sf_dub_s");
-  let res: Response;
-  try {
-    res = await fetch(`${opts.apiBase}/translate/subtitles/stream`, {
+  const openStream = () => fetch(`${opts.apiBase}/translate/subtitles/stream`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${opts.bearer}`,
@@ -228,6 +266,11 @@ export async function* renderSubtitleDubStream(opts: {
       }),
       signal: opts.signal,
     });
+  let res: Response;
+  try {
+    res = await openStream();
+    // 429 too_many_inflight: transient burst — retry once (same reqId).
+    res = await retryOnceOnInflight429(res, openStream, opts.signal);
   } catch (err) {
     // Intentional Stop (AbortError) — rethrow so the caller tears down cleanly.
     if (opts.signal?.aborted || (err as Error | undefined)?.name === "AbortError") {

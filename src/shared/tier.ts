@@ -11,3 +11,10 @@ export function canUseRealtime(
 ): boolean {
   return accountTier === "max";
 }
+
+/** True iff the account plan may use custom subtitle styling (Pro or Max). */
+export function canUseSubtitleStyling(
+  accountTier: AccountTier | string | null | undefined,
+): boolean {
+  return accountTier === "pro" || accountTier === "max";
+}

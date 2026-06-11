@@ -72,8 +72,11 @@ export async function fetchSessionBootstrap(
       user?: {
         id?: string;
         email?: string;
+        email_display?: string;
         tier?: SignedInUser["tier"];
         cancel_at_period_end?: boolean;
+        billing_cycle?: "monthly" | "annual" | "free";
+        renews_at?: string | null;
       };
       usage?: BootstrapUsage | null;
       languagePairs?: Record<string, object | string | number | boolean | null> | null;
@@ -87,8 +90,11 @@ export async function fetchSessionBootstrap(
       user: {
         id: body.user.id,
         email: body.user.email,
+        email_display: body.user.email_display,
         tier: body.user.tier,
         cancel_at_period_end: body.user.cancel_at_period_end,
+        billing_cycle: body.user.billing_cycle,
+        renews_at: body.user.renews_at,
       },
       usage: parseUsage(body.usage),
       catalog,

@@ -20,6 +20,8 @@ import type { BgToContentMessage, BgToContentResponse } from "@/shared/protocol"
 import type { HistoryTurn, StartSettings } from "@/shared/types";
 import type { OverlayCallbacks, OverlayView } from "@/shared/ports";
 import type { PlatformAdapter } from "@/shared/platform-ports";
+import { canUseSubtitleStyling } from "@/shared/tier";
+import { DEFAULT_ADVANCED, effectiveAdvanced as effectiveAdv } from "@/shared/advanced";
 // Agent C's concrete factory. May be unresolved during Agent D's solo run; the
 // LOCKED CreateOverlay/OverlayView/OverlayCallbacks types let us build against
 // it now. The orchestrator resolves this at the integration gate.
@@ -526,6 +528,7 @@ export class ContentApp {
         tier,
       );
       overlay.syncFromSettings(incomingSettings);
+      this.applySubtitleStyle(incomingSettings);
       overlay.setOverlayState("ad-wait");
       overlay.setStatusText(STATUS_AD_WAIT);
 
@@ -654,6 +657,7 @@ export class ContentApp {
         tier,
       );
       overlay.syncFromSettings(settings);
+      this.applySubtitleStyle(settings);
       // SF8 only for Realtime — Standard adjusts rate via dub sync (dock hint).
       if (tier === TIER_REALTIME) capture.bindRateChangeWarn(video);
       overlay.setStatusText(STATUS_CONNECTING);
@@ -1168,6 +1172,7 @@ export class ContentApp {
     //  • outputDeviceId  → hot-swap setSinkId on the active <audio> element.
     //  • captionPosition → re-position the overlay (user's drag still wins on
     //                       subsequent persistence — no LAYOUT_KEY write).
+    //  • captionFontSize / captionBgOpacity / captionFontWeight → subtitle style.
     //  • captionPosition / outputDeviceId → overlay layout + setSinkId on handover.
     if ("advanced" in newSettings && newSettings.advanced) {
       const nextAdv = newSettings.advanced;
@@ -1184,7 +1189,39 @@ export class ContentApp {
       ) {
         overlay.setCaptionPosition(nextAdv.captionPosition);
       }
+      // W6: apply subtitle style when any of the 3 style keys changed.
+      if (
+        nextAdv.captionFontSize !== prevAdv?.captionFontSize ||
+        nextAdv.captionBgOpacity !== prevAdv?.captionBgOpacity ||
+        nextAdv.captionFontWeight !== prevAdv?.captionFontWeight
+      ) {
+        this.applySubtitleStyle(sm.settings);
+      }
     }
+  }
+
+  /**
+   * W6 — Compute and apply the effective subtitle style to the overlay.
+   * Gate: free tier always renders defaults (tier from signedInUser in the snapshot).
+   * Called from applySettingsLive (live edits) and startSession (first frame).
+   */
+  applySubtitleStyle(settings: Partial<StartSettings> | null): void {
+    if (!this.overlay.isMounted()) return;
+    const tier = (settings as { signedInUser?: { tier?: string } } | null)
+      ?.signedInUser?.tier;
+    // Compute effective advanced (with per-site overrides for the legacy 3 keys;
+    // site-overrides never contain style keys so the merge is safe).
+    const base = (settings as Partial<StartSettings>)?.advanced ?? DEFAULT_ADVANCED;
+    const overrides = (settings as Partial<StartSettings>)?.siteOverrides ?? {};
+    const domain = (settings as Partial<StartSettings>)?.currentDomain ?? null;
+    const adv = effectiveAdv(base, overrides, domain);
+
+    const canStyle = canUseSubtitleStyling(tier);
+    this.overlay.setSubtitleStyle({
+      fontSize: canStyle ? (adv.captionFontSize ?? DEFAULT_ADVANCED.captionFontSize) : DEFAULT_ADVANCED.captionFontSize,
+      bgOpacity: canStyle ? (adv.captionBgOpacity ?? DEFAULT_ADVANCED.captionBgOpacity) : DEFAULT_ADVANCED.captionBgOpacity,
+      fontWeight: canStyle ? (adv.captionFontWeight ?? DEFAULT_ADVANCED.captionFontWeight) : DEFAULT_ADVANCED.captionFontWeight,
+    });
   }
 
   applyVolumes(originalVolume: number, voiceVolume: number): void {

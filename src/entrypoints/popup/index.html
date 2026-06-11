@@ -326,6 +326,70 @@
       </div>
     </details>
 
+    <!-- SUBTITLE STYLE (Pro/Max) — same collapsible card pattern as the
+         Advanced panel above (shared .advanced/.advanced-body styling), but
+         deliberately WITHOUT idle-only so it stays visible and editable
+         mid-session (live style tweaking is the point of W6). -->
+    <details class="advanced subtitle-style-section">
+      <summary>
+        <svg class="ico" viewBox="0 0 14 14" aria-hidden="true">
+          <path d="M2 11L4.9 3.6h.9L8.7 11M3.2 8.6h4.3" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M9.6 11l1.5-3.8h.7L13.3 11" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="adv-label">Subtitle style</span>
+        <span class="adv-meta">
+          <span class="adv-count">size &amp; look</span>
+          <svg class="adv-chev" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+      </summary>
+
+      <div class="advanced-body">
+        <div id="subtitle-style-group" class="subtitle-style-group">
+          <div class="adv-row">
+            <div class="adv-row-label">Font size</div>
+            <div class="segmented" data-count="4" data-setting="captionFontSize">
+              <button type="button" data-value="small" aria-label="Small">S</button>
+              <button type="button" data-value="medium" aria-label="Medium">M</button>
+              <button type="button" data-value="large" aria-label="Large">L</button>
+              <button type="button" data-value="xlarge" aria-label="X-Large">XL</button>
+            </div>
+            <div class="adv-hint">subtitle text size on video</div>
+          </div>
+          <div class="adv-row">
+            <div class="adv-row-label">Background</div>
+            <div class="segmented" data-count="4" data-setting="captionBgOpacity">
+              <button type="button" data-value="transparent" aria-label="Transparent">None</button>
+              <button type="button" data-value="low" aria-label="Low">Low</button>
+              <button type="button" data-value="medium" aria-label="Medium">Med</button>
+              <button type="button" data-value="high" aria-label="High">High</button>
+            </div>
+            <div class="adv-hint">subtitle card opacity</div>
+          </div>
+          <div class="adv-row">
+            <div class="adv-row-label">Weight</div>
+            <div class="segmented" data-count="3" data-setting="captionFontWeight">
+              <button type="button" data-value="normal" aria-label="Normal">Normal</button>
+              <button type="button" data-value="semibold" aria-label="Semibold">Semi</button>
+              <button type="button" data-value="bold" aria-label="Bold">Bold</button>
+            </div>
+            <div class="adv-hint">subtitle font weight</div>
+          </div>
+          <div class="adv-hint adv-hint--upgrade" id="subtitle-style-upgrade-hint" hidden>
+            Pro feature — upgrade to customize
+          </div>
+          <!-- Card-scoped reset: only the 3 style keys. There is no "Save"
+               (every change auto-saves + syncs instantly) and no
+               "Save for this site" (subtitle style is global-only by design —
+               the server rejects style keys in per-site overrides). -->
+          <div class="adv-footer">
+            <button type="button" class="adv-footer-link" id="subtitleStyleResetBtn">Reset to defaults</button>
+          </div>
+        </div>
+      </div>
+    </details>
+
   </div>
   <!-- end .settings-group -->
 

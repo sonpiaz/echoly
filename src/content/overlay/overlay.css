@@ -431,8 +431,8 @@
   max-width: 100%;
   max-height: calc(1.4em * 2);
   padding: 0 6px;
-  font-size: 15px;
-  font-weight: 600;
+  font-size: var(--ec-caption-font-size, 15px);
+  font-weight: var(--ec-caption-font-weight, 600);
   line-height: 1.4;
   letter-spacing: 0.005em;
   color: #fffdfb;
@@ -455,16 +455,18 @@
   box-sizing: border-box;
   max-width: 100%;
   min-height: 0;
-  max-height: calc(12px + 1.42em * 2);
+  /* em-safe max-height: old 12px padding allowance = 0.8em at the 15px default,
+     + 2 lines at the current font size — scales with --ec-caption-font-size */
+  max-height: calc(0.8em + 1.42em * 2);
   padding: 7px 16px;
   border-radius: 12px;
   text-align: center;
-  font-size: 15px;
-  font-weight: 600;
+  font-size: var(--ec-caption-font-size, 15px);
+  font-weight: var(--ec-caption-font-weight, 600);
   line-height: 1.42;
   letter-spacing: 0.005em;
   color: var(--ec-glass-text);
-  background: var(--ec-glass-bg);
+  background: rgba(26,20,15, var(--ec-caption-bg-opacity, .82));
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--ec-glass-border);
@@ -479,6 +481,20 @@
   scrollbar-width: none;
   -ms-overflow-style: none;
   pointer-events: auto;
+}
+
+/* Transparent bg (ec-cap-flat on the root): the caption renders as PLAIN TEXT
+   over the video — same treatment as .ec-cap-src. Without the dark card the
+   white text needs its own contrast shadow (otherwise it vanishes on bright
+   scenes), and the orange accent bar would float oddly with no card behind it. */
+.ec-root.ec-cap-flat .ec-caption {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-left-color: transparent;
+  box-shadow: none;
+  text-shadow:
+    0 1px 3px rgba(0,0,0,.85),
+    0 0 6px rgba(0,0,0,.5);
 }
 
 .ec-caption.ec-caption--rolling {
@@ -1195,6 +1211,34 @@
   border-color: rgba(255,122,60,.50);
   box-shadow: 0 0 0 3px rgba(255,122,60,.18);
 }
+
+/* Open-state dropdown for the dark glass panel (Language/Voice selects).
+   Chromium honors option background/color even in the NATIVE picker, so the
+   option rules below already fix the white-on-white list pre-134; Chromium
+   134+ additionally gets the fully styled dark picker frame via base-select. */
+@supports (appearance: base-select) {
+  .ec-select,
+  .ec-select::picker(select) { appearance: base-select; }
+  .ec-select::picker(select) {
+    background: #211a14;
+    border: 1px solid rgba(255,255,255,.14);
+    border-radius: 10px;
+    box-shadow: 0 14px 30px rgba(0,0,0,.5);
+    padding: 4px;
+    margin-top: 4px;
+  }
+}
+.ec-select option {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ec-glass-text);
+  background: #211a14;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.ec-select option:hover,
+.ec-select option:focus { background: rgba(255,255,255,.10); }
+.ec-select option:checked { background: rgba(255,122,60,.22); }
 
 /* ec-btn (was hidden) */
 .ec-btn {

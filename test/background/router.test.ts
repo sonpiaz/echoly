@@ -94,10 +94,43 @@ describe("routeMessage — popup dispatch reaches the right handler", () => {
     resetHydrateSignedInState();
   });
 
-  it("GET_STATE → loads settings + refreshes auth, replies {ok:true, state}", async () => {
-    const { ret } = route(deps, { type: "GET_STATE" }, POPUP_SENDER);
+  it("GET_STATE → replies {ok:true, state} immediately (fire-and-forget hydration)", async () => {
+    // W5 contract: GET_STATE returns the local snapshot without waiting for
+    // network hydration. sendResponse is called after loadSettings +
+    // refreshActiveSite (both local). hydrateSignedIn is fire-and-forget.
+    vi.spyOn(deps.store, "refreshAuth").mockResolvedValue();
+
+    let captured: unknown;
+    const sendResponse = vi.fn((r?: unknown) => {
+      captured = r;
+    });
+    const ret = routeMessage(deps, { type: "GET_STATE" }, POPUP_SENDER, sendResponse);
     expect(ret).toBe(true);
-    await vi.waitFor(() => expect(chromeMock.runtime.sendMessage).toHaveBeenCalled());
+
+    // Wait for the async GET_STATE handler to complete (loadSettings + refreshActiveSite).
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+    const reply = captured as { ok: boolean; state: object };
+    expect(reply.ok).toBe(true);
+    expect(reply.state).toBeDefined();
+  });
+
+  it("GET_STATE → does NOT wait for network: returns before refreshAuth resolves", async () => {
+    // Prove the fire-and-forget contract: sendResponse is called even if
+    // refreshAuth is never resolved (blocked promise).
+    let resolveRefreshAuth!: () => void;
+    vi.spyOn(deps.store, "refreshAuth").mockReturnValue(
+      new Promise<void>((r) => { resolveRefreshAuth = r; }),
+    );
+
+    let captured: unknown;
+    const sendResponse = vi.fn((r?: unknown) => { captured = r; });
+    routeMessage(deps, { type: "GET_STATE" }, POPUP_SENDER, sendResponse);
+
+    // sendResponse IS called even though refreshAuth never resolves.
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+    expect((captured as { ok?: boolean })?.ok).toBe(true);
+    // Unblock the pending refreshAuth to avoid dangling promise leaks.
+    resolveRefreshAuth();
   });
 });
 

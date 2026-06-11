@@ -207,9 +207,12 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   // snapshot so no resize update is lost.
   const onWindowResize = () => { if (!dragActive) applyLayout(); };
 
-  /** Load persisted Layout, optionally seeding from the Advanced caption-position
-   *  preset when nothing is persisted. The user's drag still wins — localStorage
-   *  takes precedence over the preset. (Caption-position Advanced setting.) */
+  /** Load persisted Layout. The persisted layout restores chrome positions
+   *  (panel, dock drag) — but `captionPlacement` is now driven by the SYNCED
+   *  Advanced captionPosition setting (web + popup are the source of truth):
+   *  when the setting is provided it OVERRIDES the persisted placement.
+   *  (The old "localStorage placement wins forever" rule made the Captions
+   *  Top/Bottom/Float setting permanently inert once any layout was saved.) */
   function loadLayout(captionPosition: CaptionPosition | null): Layout {
     let stored: Partial<Layout> = {};
     let hasStored = false;
@@ -223,7 +226,7 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
       /* localStorage may throw on access — fall through to defaults */
     }
     if (hasStored) {
-      return {
+      const base: Layout = {
         ...DEFAULT_LAYOUT,
         ...stored,
         panelExpanded:
@@ -235,6 +238,9 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
         captionOnVideo:
           stored.captionOnVideo ?? DEFAULT_LAYOUT.captionOnVideo,
       };
+      return captionPosition
+        ? applyCaptionPositionPreset(base, captionPosition)
+        : base;
     }
     if (captionPosition) {
       return applyCaptionPositionPreset({ ...DEFAULT_LAYOUT }, captionPosition);
@@ -1045,13 +1051,13 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     if (elements.langSelect) elements.langSelect.value = lang;
   }
 
-  /** Apply a caption-position preset live (Advanced setting hot-swap). Writes
-   *  the preset's left/top into the in-memory Layout + re-applies — does NOT
-   *  call saveLayout, so the user's subsequent drag still wins on the next
-   *  session via the LAYOUT_KEY persistence path. Safe to call when unmounted. */
+  /** Apply a caption-position preset live (Advanced setting hot-swap) AND
+   *  persist it — the setting is the source of truth for placement, so the
+   *  stored layout must follow it (loadLayout also prefers the setting). */
   function setCaptionPosition(pos: CaptionPosition): void {
     layout = applyCaptionPositionPreset(layout, pos);
     if (root) applyLayout();
+    saveLayout();
   }
 
   // Toast — built via DOM APIs (NEVER innerHTML). Default 8000ms; replaces any
@@ -1177,6 +1183,45 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     return root != null;
   }
 
+  // ── Subtitle style CSS custom properties (W6) ────────────────────────────
+  // Map enum values to concrete CSS values and set them on .ec-root so overlay.css
+  // var() references pick them up immediately. No writes when root is not mounted.
+
+  const FONT_SIZE_MAP: Record<import("@/shared/advanced").CaptionFontSize, string> = {
+    small: "12px",
+    medium: "15px",
+    large: "18px",
+    xlarge: "22px",
+  };
+  const BG_OPACITY_MAP: Record<import("@/shared/advanced").CaptionBgOpacity, string> = {
+    transparent: "0",
+    low: ".35",
+    medium: ".60",
+    high: ".82",
+  };
+  const FONT_WEIGHT_MAP: Record<import("@/shared/advanced").CaptionFontWeight, string> = {
+    normal: "400",
+    semibold: "600",
+    bold: "700",
+  };
+
+  function setSubtitleStyle(style: {
+    fontSize: import("@/shared/advanced").CaptionFontSize;
+    bgOpacity: import("@/shared/advanced").CaptionBgOpacity;
+    fontWeight: import("@/shared/advanced").CaptionFontWeight;
+  }): void {
+    if (!root) return;
+    root.style.setProperty("--ec-caption-font-size", FONT_SIZE_MAP[style.fontSize] ?? "15px");
+    root.style.setProperty("--ec-caption-bg-opacity", BG_OPACITY_MAP[style.bgOpacity] ?? ".82");
+    root.style.setProperty("--ec-caption-font-weight", FONT_WEIGHT_MAP[style.fontWeight] ?? "600");
+    // For transparent: disable backdrop-filter by toggling a class.
+    if (style.bgOpacity === "transparent") {
+      root.classList.add("ec-cap-flat");
+    } else {
+      root.classList.remove("ec-cap-flat");
+    }
+  }
+
   function setDubSyncReadout(
     readout: import("@/lib/dub-playback-sync").DubSyncReadout | null,
   ): void {
@@ -1233,5 +1278,6 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     applyCaptionOnVideo,
     isMounted,
     setDubSyncReadout,
+    setSubtitleStyle,
   };
 };
