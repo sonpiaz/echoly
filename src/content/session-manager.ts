@@ -63,6 +63,54 @@ export interface SubtitleFirstSession extends BaseSession {
    * `undefined` when the adapter returned no title.
    */
   videoTitle?: string;
+  /**
+   * Stable idempotency ids for in-progress rolling renderer batches, keyed by
+   * `{startIdx}-{endIdx}` (the batch range). Reused across retries of the same
+   * range so the server's idempotency check prevents double-billing.
+   * Cleared when renderCursor advances past a batch (the batch has committed).
+   */
+  _batchRequestIds: Map<string, string>;
+
+  /**
+   * Maps a batch range key `"${startIdx}-${endIdx}"` to the requestId that was
+   * used when that range was LAST sent to the server.  Used by the retry-boundary
+   * fix: on failure, `#renderBatch` retries with the ORIGINAL requestId first so
+   * the server's idempotency replay avoids re-billing already-committed lines.
+   * Entries are removed once a batch completes successfully or on seek (same as
+   * `_batchRequestIds`).
+   */
+  _sentBatchRanges: Map<string, string>;
+
+  // ── Coalescing state (batch-coalescing rolling renderer) ─────────────────
+  /**
+   * Set of sentence indices waiting to be flushed as a single coalesced batch.
+   * The rolling renderer accumulates cache-miss lines here instead of requesting
+   * each one immediately.  Flushed when ≥3 lines pending, the earliest pending
+   * line is within 8 s of the playhead, or 6 s have elapsed since the first
+   * pending line was queued.
+   */
+  _pendingLines: Set<number>;
+  /**
+   * wall-clock timestamp (Date.now()) when the FIRST line was added to
+   * `_pendingLines` in the current accumulation run.  Used to implement the
+   * 6-second elapsed-time flush guard.  Reset to 0 when the set is flushed.
+   */
+  _pendingFirstQueuedAt: number;
+  /**
+   * Epoch counter incremented on every seek. The rolling renderer captures the
+   * epoch at the start of each in-flight request; when it completes it checks
+   * that the epoch has not changed before advancing renderCursor — preventing a
+   * seek-updated renderCursor from being clobbered by a stale in-flight response.
+   */
+  _renderEpoch: number;
+  /**
+   * The adapter-derived video id for this session (adapter.getVideoId result).
+   * Used as the first component of render-cache keys so cache entries are
+   * isolated by video — auto-next to a different video is naturally separated
+   * (different videoId → different key prefix). Set once in start()/restart()
+   * before the first #renderBatch call.
+   */
+  _videoId?: string;
 }
 
 export type Session = WebRtcSession | SubtitleFirstSession;
@@ -203,14 +251,40 @@ export class SessionManager {
     const url = `${this.apiBase}/rtc/translate/${rtcSessionId}/heartbeat`;
     this.heartbeatTimer = setInterval(() => {
       if (!this.session) return;
-      fetch(url, {
-        method: "POST",
-        headers: { Authorization: "Bearer " + apiBearer, "Content-Type": "application/json" },
-        // Billing freeze: paused iff user || ad (NOT system-buffer / switching) —
-        // lifecycle.effectivePaused, surfaced via the userPaused getter.
-        body: JSON.stringify({ paused: this.userPaused }),
-      }).catch(() => {});
+      const paused = this.userPaused;
+      const body = JSON.stringify({ paused });
+      const headers: HeadersInit = { Authorization: "Bearer " + apiBearer, "Content-Type": "application/json" };
+      // One retry with 1.5s backoff on failure (SOLUTION WS5.4): a single network
+      // blip can cause the server to miss a pause=true, billing one extra interval.
+      // Retry-once ensures the pause-freeze is delivered without burning the heartbeat.
+      const attemptFetch = (): Promise<Response> =>
+        fetch(url, { method: "POST", headers, body });
+      attemptFetch().catch(() =>
+        // 1.5s backoff before the single retry (not a hard loop — one attempt only).
+        new Promise<void>((resolve) => setTimeout(resolve, 1500)).then(() =>
+          attemptFetch().catch(() => {})
+        )
+      );
     }, HEARTBEAT_MS);
+  }
+
+  /**
+   * POST a pause signal to the server heartbeat endpoint using `keepalive:true`
+   * so the request is sent even if the page is being unloaded (tab close / nav).
+   * Used when the user pauses the source video to freeze server-side billing
+   * immediately rather than waiting for the next heartbeat interval.
+   *
+   * Fire-and-forget — errors are silently swallowed.
+   */
+  sendPauseKeepalive(rtcSessionId: string | null, apiBearer: string): void {
+    if (!rtcSessionId || !apiBearer) return;
+    const url = `${this.apiBase}/rtc/translate/${rtcSessionId}/heartbeat`;
+    fetch(url, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + apiBearer, "Content-Type": "application/json" },
+      body: JSON.stringify({ paused: true }),
+      keepalive: true,
+    }).catch(() => {});
   }
 
   stopHeartbeat(): void {

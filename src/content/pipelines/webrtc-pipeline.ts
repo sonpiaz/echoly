@@ -4,13 +4,13 @@
 import {
   TIER_REALTIME,
   TIER_STANDARD,
-  RTC_LIVE_DURATION_HINT_SEC,
+  RTC_LIVE_DURATION_HINT_CAP_SEC,
   type TranslationTier,
 } from "@/shared/constants";
 import { resolveLangName } from "@/lib/resolve-lang-name";
 import { parseServerError } from "@/lib/server-errors";
 import { pipelineToastFromServer } from "@/lib/pipeline-error";
-import { notifyQuotaToBackground } from "@/lib/quota-notify";
+import { notifyQuotaToBackground, refreshUsageAfterExhaustion } from "@/lib/quota-notify";
 import { RTC_METADATA_CHANNEL } from "@/shared/rtc-metadata";
 import { currentSiteHost } from "@/shared/site-host";
 import { ECHOLY_WEB_URLS } from "@/shared/echoly-config";
@@ -439,10 +439,16 @@ export class WebRtcPipeline {
           cta: upgradeUrl,
           ctaLabel: evt.code === "unauthorized" ? "Sign in" : "Upgrade",
         });
-        // Notify the background so it can mark the session as not running and
-        // reflect the quota state in the popup (no numeric fields available from
-        // the data-channel frame, but setRunning(false) is still useful).
+        // Notify the background so it can mark the session as not running.
+        // Also post CONTENT_QUOTA without numeric fields for the session-stop
+        // path; the real numbers are refreshed below via /v1/usage.
         post({ type: "CONTENT_QUOTA" });
+        // quota_exhausted via data-channel: the server's frame carries no credit
+        // numbers. Fetch /v1/usage once to refresh the popup meter so the user
+        // sees their actual current balance (SOLUTION WS5.5 / S5-F9).
+        if (evt.code === "quota_exhausted" && sm.session?.apiBearer) {
+          refreshUsageAfterExhaustion(sm.session.apiBearer);
+        }
       }
       overlay.setStatusText(msg);
       this.app.stopSession(STOP_REASON.SERVER_ERROR);
@@ -533,7 +539,15 @@ export class WebRtcPipeline {
         void sm.endRtcSession(session.rtcSessionId, session.apiBearer);
       }
     } else {
-      // Standard: quiesce dub-sync before detaching the peer.
+      // Standard-WebRTC auto-next: call /end on the old session so the server
+      // closes billing deterministically (SOLUTION WS5.3 / S5-F2, S5-F7).
+      // Without this the server relies solely on ICE disconnect detection which
+      // can leave a session open for seconds. endRtcSession uses keepalive:true
+      // so it survives the session teardown.
+      if (session.rtcSessionId && session.apiBearer) {
+        void sm.endRtcSession(session.rtcSessionId, session.apiBearer);
+      }
+      // Quiesce dub-sync before detaching the peer.
       this.app.prepareStandardHandover();
     }
     detachOutgoingPeer(session);
@@ -567,12 +581,12 @@ export class WebRtcPipeline {
     const durationHintSec =
       pipeline === TIER_REALTIME
         ? live
-          ? RTC_LIVE_DURATION_HINT_SEC
+          ? RTC_LIVE_DURATION_HINT_CAP_SEC
           : isFinite(video.duration) && video.duration > 0
-            ? Math.ceil(video.duration)
+            ? Math.max(1, Math.ceil(video.duration - video.currentTime))
             : undefined
         : isFinite(video.duration) && video.duration > 0
-          ? Math.ceil(video.duration)
+          ? Math.max(1, Math.ceil(video.duration - video.currentTime))
           : undefined;
 
     let newSession: WebRtcSession;

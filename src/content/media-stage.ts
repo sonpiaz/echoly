@@ -84,7 +84,7 @@ export function findPrimaryVideo(): HTMLVideoElement | null {
 export function stageInsets(platform: MediaPlatform): MediaStageInsets {
   switch (platform) {
     case "youtube":
-      return { bottom: 72, top: 52, side: 20 };
+      return { bottom: 56, top: 10, side: 12 };
     default:
       return { bottom: 56, top: 44, side: 16 };
   }
@@ -118,15 +118,33 @@ export function captionAnchorStyles(
   };
 }
 
+/** Player chrome rect for overlay anchoring (may differ from <video> when letterboxed). */
+export function resolveStageRect(
+  video: HTMLVideoElement,
+  platformId?: string,
+): DOMRectReadOnly {
+  if (platformId === "youtube") {
+    const player =
+      video.closest<HTMLElement>(".html5-video-player") ??
+      document.getElementById("movie_player");
+    if (player) return player.getBoundingClientRect();
+  }
+  const wrapper = video.closest<HTMLElement>(
+    ".video-player, .vjs-tech-parent, [data-media-player], .html5-video-container",
+  );
+  if (wrapper && wrapper !== video) return wrapper.getBoundingClientRect();
+  return video.getBoundingClientRect();
+}
+
 /** Default dock: top-right inside the video stage (any site with a <video>). */
 export function defaultDockPosition(
   snapshot: MediaStageSnapshot,
-  dockW = 220,
-  dockH = 46,
+  dockW = 210,
+  dockH = 32,
 ): { left: number; top: number } {
   const { rect, insets } = snapshot;
   const padX = insets.side;
-  const padTop = Math.min(insets.top, 14);
+  const padTop = Math.min(insets.top, 10);
   return {
     left: rect.right - dockW - padX,
     top: rect.top + padTop,
@@ -137,12 +155,12 @@ export function clampDockToStage(
   left: number,
   top: number,
   snapshot: MediaStageSnapshot,
-  dockW = 220,
-  dockH = 46,
+  dockW = 210,
+  dockH = 32,
 ): { left: number; top: number } {
   const { rect, insets } = snapshot;
   const padX = insets.side;
-  const padTop = Math.min(insets.top, 14);
+  const padTop = Math.min(insets.top, 10);
   const padBottom = insets.bottom;
   return {
     left: Math.min(Math.max(rect.left + padX, left), rect.right - dockW - padX),
@@ -202,7 +220,7 @@ export function watchMediaStage(onUpdate: MediaStageListener): () => void {
       ? adapter.stageInsets(video)
       : stageInsets(detectMediaPlatform());
     onUpdate({
-      rect: video.getBoundingClientRect(),
+      rect: resolveStageRect(video, adapter?.id),
       insets,
     });
   };

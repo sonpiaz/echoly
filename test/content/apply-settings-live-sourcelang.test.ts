@@ -122,6 +122,11 @@ function makeSubtitleFirstSession(): SubtitleFirstSession {
     currentSource: null, currentPlayingIdx: null,
     playbackTimer: null, renderCursor: 0,
     rollingInFlight: false, stopFlag: false,
+    _batchRequestIds: new Map(),
+    _sentBatchRanges: new Map(),
+    _renderEpoch: 0,
+    _pendingLines: new Set(),
+    _pendingFirstQueuedAt: 0,
   } as SubtitleFirstSession;
 }
 

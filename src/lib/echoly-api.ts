@@ -12,9 +12,22 @@ const HDR_SESSION_ID = "x-echoly-session-id";
 const HDR_SITE_HOST = "x-echoly-site-host";
 const HDR_VIDEO_TITLE = "x-echoly-video-title";
 
-function newRequestId(prefix: string): string {
+export function newRequestId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID()}`;
 }
+
+/**
+ * Sentinel returned by renderSubtitleDubBatch / renderSubtitleDubStream when
+ * the server replies that the request was already processed (idempotency replay).
+ * Callers MUST check `result === ALREADY_PROCESSED` before using the array.
+ *
+ * Both server shapes are terminal success — callers must NOT retry:
+ *   • 200 `{already_processed:true}` — post-commit replay (idempotency hit after
+ *     the original request fully committed; may carry cached body or flag-only).
+ *   • 409 `already_processed` — a retry raced the still-in-flight original past
+ *     the idempotency point-read.
+ */
+export const ALREADY_PROCESSED: unique symbol = Symbol("already_processed");
 
 export interface SubtitleDubBatchLine {
   text: string;
@@ -24,6 +37,11 @@ export interface SubtitleDubBatchLine {
 /**
  * One server call: Gemini translate (structured) + MiniMax TTS per line.
  * POST /v1/translate/subtitles — prompts and models are server-controlled.
+ *
+ * Pass a stable `requestId` (same across retries of the same batch range) for
+ * idempotency. If the server returns 200 `{already_processed:true}` or 409
+ * `already_processed`, returns the sentinel `ALREADY_PROCESSED` — callers MUST
+ * treat this as a terminal success-skip and NOT retry.
  */
 export async function renderSubtitleDubBatch(opts: {
   apiBase: string;
@@ -41,15 +59,23 @@ export async function renderSubtitleDubBatch(opts: {
   siteHost?: string;
   /** Video title URL-encoded by the caller — stored as video_title in usage_events. */
   videoTitle?: string;
+  /**
+   * Stable request id for this batch. Reuse the SAME id on retries of the same
+   * range so the server's idempotency check prevents double-billing. When omitted
+   * a fresh UUID is generated (old behaviour — retained for back-compat with
+   * callers that don't yet supply stable ids).
+   */
+  requestId?: string;
   signal?: AbortSignal;
-}): Promise<SubtitleDubBatchLine[]> {
+}): Promise<SubtitleDubBatchLine[] | typeof ALREADY_PROCESSED> {
   const lines = opts.sentences.map((s) => s.text);
+  const reqId = opts.requestId ?? newRequestId("sf_dub");
   const res = await fetch(`${opts.apiBase}/translate/subtitles`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${opts.bearer}`,
       "Content-Type": "application/json",
-      [HDR_REQUEST_ID]: newRequestId("sf_dub"),
+      [HDR_REQUEST_ID]: reqId,
       ...(opts.sessionId ? { [HDR_SESSION_ID]: opts.sessionId } : {}),
       ...(opts.siteHost ? { [HDR_SITE_HOST]: opts.siteHost } : {}),
       ...(opts.videoTitle ? { [HDR_VIDEO_TITLE]: opts.videoTitle } : {}),
@@ -63,14 +89,46 @@ export async function renderSubtitleDubBatch(opts: {
     }),
     signal: opts.signal,
   });
+
+  // ── Idempotency replay: already processed (SOLUTION §4 WS5) ─────────────────
+  // 409 already_processed: a retry raced the in-flight original past the
+  // idempotency point-read. Terminal success-skip — do NOT retry.
+  if (res.status === 409) {
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* non-JSON 409 — treat as already_processed too */
+    }
+    if (!body || body["code"] === "already_processed" || (body["error"] as Record<string, unknown>)?.["code"] === "already_processed") {
+      return ALREADY_PROCESSED;
+    }
+    // Other 409 (e.g. conflict) — fall through to error handling.
+    const parsed = await parseServerError(res);
+    const toast = pipelineToastFromServer(parsed);
+    throw Object.assign(new Error(toast.user), toast);
+  }
+
   if (!res.ok) {
     const parsed = await parseServerError(res);
     const toast = pipelineToastFromServer(parsed);
     throw Object.assign(new Error(toast.user), toast);
   }
+
   const json = (await res.json()) as {
+    already_processed?: boolean;
     lines?: { text?: string; audio?: string }[];
   };
+
+  // 200 {already_processed:true}: post-commit replay. The server may or may not
+  // include the cached body; either way this is terminal success — no provider
+  // re-work, no reserve, no retry.
+  if (json.already_processed === true && !json.lines) {
+    return ALREADY_PROCESSED;
+  }
+  // 200 with already_processed + body: replay with cached lines — use them.
+  // Fall through to normal line-mapping so the caller gets real audio back.
+
   const out = json.lines ?? [];
   const mapped = lines.map((src, i) => {
     const row = out[i];
@@ -117,6 +175,7 @@ export interface SubtitleDubStreamLine extends SubtitleDubBatchLine {
 /** Shared buffered-path fallback for the streaming generator (404 / network error). */
 async function* bufferedFallbackLines(opts: Parameters<typeof renderSubtitleDubBatch>[0]): AsyncGenerator<SubtitleDubStreamLine> {
   const buffered = await renderSubtitleDubBatch(opts);
+  if (buffered === ALREADY_PROCESSED) return; // terminal success-skip — yield nothing
   for (let i = 0; i < buffered.length; i++) {
     yield {
       index: i,
@@ -139,9 +198,15 @@ export async function* renderSubtitleDubStream(opts: {
   sessionId?: string;
   siteHost?: string;
   videoTitle?: string;
+  /**
+   * Stable request id for this batch. Reuse the SAME id on retries of the same
+   * range for idempotency. When omitted a fresh UUID is generated.
+   */
+  requestId?: string;
   signal?: AbortSignal;
-}): AsyncGenerator<SubtitleDubStreamLine> {
+}): AsyncGenerator<SubtitleDubStreamLine | typeof ALREADY_PROCESSED> {
   const lines = opts.sentences.map((s) => s.text);
+  const reqId = opts.requestId ?? newRequestId("sf_dub_s");
   let res: Response;
   try {
     res = await fetch(`${opts.apiBase}/translate/subtitles/stream`, {
@@ -149,7 +214,7 @@ export async function* renderSubtitleDubStream(opts: {
       headers: {
         Authorization: `Bearer ${opts.bearer}`,
         "Content-Type": "application/json",
-        [HDR_REQUEST_ID]: newRequestId("sf_dub_s"),
+        [HDR_REQUEST_ID]: reqId,
         ...(opts.sessionId ? { [HDR_SESSION_ID]: opts.sessionId } : {}),
         ...(opts.siteHost ? { [HDR_SITE_HOST]: opts.siteHost } : {}),
         ...(opts.videoTitle ? { [HDR_VIDEO_TITLE]: opts.videoTitle } : {}),
@@ -170,13 +235,32 @@ export async function* renderSubtitleDubStream(opts: {
     }
     // Network/CORS failure (e.g. "Failed to fetch") — degrade to the buffered
     // path so dubbing still works instead of breaking the whole session.
-    yield* bufferedFallbackLines(opts);
+    yield* bufferedFallbackLines({ ...opts, requestId: reqId });
     return;
+  }
+
+  // ── Idempotency replay: already processed ────────────────────────────────────
+  // 409 already_processed: retry raced the in-flight original. Terminal success.
+  if (res.status === 409) {
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* non-JSON 409 — treat as already_processed */
+    }
+    if (!body || body["code"] === "already_processed" || (body["error"] as Record<string, unknown>)?.["code"] === "already_processed") {
+      yield ALREADY_PROCESSED;
+      return;
+    }
+    // Other 409 — error path.
+    const parsed = await parseServerError(res);
+    const toast = pipelineToastFromServer(parsed);
+    throw Object.assign(new Error(toast.user), toast);
   }
 
   // Back-compat: older server without the streaming route → fall back to buffered.
   if (res.status === 404) {
-    yield* bufferedFallbackLines(opts);
+    yield* bufferedFallbackLines({ ...opts, requestId: reqId });
     return;
   }
 
@@ -184,6 +268,26 @@ export async function* renderSubtitleDubStream(opts: {
     const parsed = await parseServerError(res);
     const toast = pipelineToastFromServer(parsed);
     throw Object.assign(new Error(toast.user), toast);
+  }
+
+  // 200 {already_processed:true} on stream endpoint — the body may be a minimal JSON.
+  // Peek the Content-Type: if not SSE (text/event-stream), try parsing as JSON.
+  const contentType = res.headers.get("Content-Type") ?? "";
+  if (!contentType.includes("text/event-stream")) {
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* ignore */
+    }
+    if (body?.["already_processed"] === true) {
+      yield ALREADY_PROCESSED;
+      return;
+    }
+    // Unexpected non-SSE — fall back to buffered using the body data if lines present.
+    // This shouldn't happen in practice; safest is to degrade gracefully.
+    yield* bufferedFallbackLines({ ...opts, requestId: reqId });
+    return;
   }
 
   // Parse SSE over ReadableStream (Chrome ≥116 supports streaming in content scripts).

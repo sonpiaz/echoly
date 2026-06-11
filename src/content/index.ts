@@ -6,7 +6,7 @@ import {
   ECHOLY_VERSION,
   HISTORY_MAX,
   ECHOLY_PROXY_BASE,
-  RTC_LIVE_DURATION_HINT_SEC,
+  RTC_LIVE_DURATION_HINT_CAP_SEC,
   TIER_REALTIME,
   TIER_STANDARD,
   AD_WAIT_POLL_MS,
@@ -686,12 +686,22 @@ export class ContentApp {
       const durationHintSec =
         pipeline === TIER_REALTIME
           ? live
-            ? RTC_LIVE_DURATION_HINT_SEC
+            // Live streams: send a capped hint instead of 3600 to avoid
+            // over-reserving credits at session start. The server clamps at
+            // RESERVE_HINT_CAP_CMIN (≈10 min) anyway; sending a smaller cap
+            // makes intent explicit and avoids any future server clamp changes
+            // affecting reserve sizing (SOLUTION WS5.2 / S5-F1).
+            ? RTC_LIVE_DURATION_HINT_CAP_SEC
+            // VOD: use REMAINING time (duration − currentTime), not total duration,
+            // so a user starting at minute 90 of a 2h video sends 30 min not 120 min
+            // (SOLUTION WS5.2 / research F-8). Minimum 1 second so the server can
+            // still distinguish clip-vs-live mode.
             : isFinite(video.duration) && video.duration > 0
-              ? Math.ceil(video.duration)
+              ? Math.max(1, Math.ceil(video.duration - video.currentTime))
               : undefined
+          // Standard-WebRTC: same remaining-time logic as Realtime VOD.
           : isFinite(video.duration) && video.duration > 0
-            ? Math.ceil(video.duration)
+            ? Math.max(1, Math.ceil(video.duration - video.currentTime))
             : undefined;
       newSession = await this.webrtc.buildSession(token, stream, {
         apiBearer: settings.apiBearer,

@@ -10,8 +10,14 @@
 // ahead and updates the live subtitle display.
 
 import { computeGain } from "@/lib/audio";
-import { isPipelineToastError, renderSubtitleDubBatch, renderSubtitleDubStream } from "@/lib/echoly-api";
+import { isPipelineToastError, renderSubtitleDubBatch, renderSubtitleDubStream, ALREADY_PROCESSED, newRequestId } from "@/lib/echoly-api";
 import { STANDARD_DEFAULT_VOICE } from "@/shared/constants";
+import {
+  cacheKey,
+  cacheGet,
+  cacheSet,
+  clearVideoCache,
+} from "@/content/render-cache";
 import type { StartSettings } from "@/shared/types";
 import {
   getPrefetchedCaptions,
@@ -124,6 +130,12 @@ export class SubtitleFirstPipeline {
       renderCursor: 0,
       rollingInFlight: false,
       stopFlag: false,
+      _batchRequestIds: new Map(),
+      _sentBatchRanges: new Map(),
+      _renderEpoch: 0,
+      _videoId: videoId,
+      _pendingLines: new Set(),
+      _pendingFirstQueuedAt: 0,
     };
     sm.session = newSession;
     sm.settings = { ...incomingSettings };
@@ -402,6 +414,17 @@ export class SubtitleFirstPipeline {
       }
     }
 
+    // ── Render-cache: evict old video's entries when navigating to a new one ──
+    // The new video has a different videoId → its sentences are at different
+    // indices and the text content is different, so old entries would never
+    // match. Clearing them frees memory and prevents stale-key confusion.
+    if (oldS && oldS.kind === "subtitle-first") {
+      const oldVid = (oldS as SubtitleFirstSession)._videoId;
+      if (oldVid && oldVid !== newVideoId) {
+        clearVideoCache(oldVid);
+      }
+    }
+
     // Reuse the audio graph from the old session so there is no teardown glitch.
     const reuseCtx =
       oldS && oldS.kind === "subtitle-first"
@@ -464,6 +487,12 @@ export class SubtitleFirstPipeline {
       rollingInFlight: false,
       stopFlag: false,
       _bufferWaitStartedAt: undefined,
+      _batchRequestIds: new Map(),
+      _sentBatchRanges: new Map(),
+      _renderEpoch: 0,
+      _videoId: newVideoId,
+      _pendingLines: new Set(),
+      _pendingFirstQueuedAt: 0,
     };
 
     // ── Atomic swap: old loops will see sm.session !== oldS and exit ──────────
@@ -669,15 +698,67 @@ export class SubtitleFirstPipeline {
     const { sm } = this.app;
     const voiceId = sm.settings?.standardVoice || STANDARD_DEFAULT_VOICE;
     const lang = sm.settings?.targetLanguage || "vi";
+    const videoId = s._videoId ?? "";
     for (let i = startIdx; i < endIdx; i += SUBFIRST_BATCH_SIZE) {
       if (sm.session !== s || s.stopFlag) return;
       const sliceEnd = Math.min(i + SUBFIRST_BATCH_SIZE, endIdx);
       const slice = s.sentences.slice(i, sliceEnd);
+
+      // ── Render-cache: resolve hits before touching the network ─────────────
+      // For each line in the slice, check the page-lifetime cache. A hit means
+      // this line was already rendered (and paid for) in a previous session on
+      // this page — replay for free. Collect only the misses for the server.
+      //
+      // missMap: sliceOffset (0-based within slice) → original sliceOffset
+      // so we can map the server's 0-based `item.index` back to the global idx.
+      const missOffsets: number[] = []; // which offsets in the slice are misses
+      for (let k = 0; k < slice.length; k++) {
+        const globalIdx = i + k;
+        const sent = slice[k]!;
+        const key = cacheKey(videoId, globalIdx, sent.text, lang, voiceId);
+        const hit = cacheGet(key);
+        if (hit) {
+          // Cache HIT — replay immediately without a server request.
+          // Stale guard: do NOT write if this session has been evicted.
+          if (sm.session !== s || s.stopFlag) return;
+          s.translations[globalIdx] = hit.text;
+          // Prefer the pre-decoded AudioBuffer stored in the entry; fall back to
+          // re-decoding from the b64 bytes (e.g. after a page reload when the
+          // AudioBuffer is gone). If neither produces audio, _buffer stays
+          // undefined — the playback tick will skip the cue (same as a failed
+          // TTS decode).
+          if (hit.buffer) {
+            s.sentences[globalIdx]!._buffer = hit.buffer;
+          } else if (hit.audioB64.length > 0 && s.audioCtx) {
+            try {
+              const binary = atob(hit.audioB64);
+              const bytes = new Uint8Array(binary.length);
+              for (let j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j);
+              const decoded = await s.audioCtx.decodeAudioData(bytes.buffer.slice(0));
+              if (sm.session !== s || s.stopFlag) return; // stale guard after async
+              s.sentences[globalIdx]!._buffer = decoded;
+              hit.buffer = decoded; // promote into the cache entry for next time
+            } catch {
+              /* ignore decode failure — _buffer stays undefined */
+            }
+          }
+        } else {
+          missOffsets.push(k);
+        }
+      }
+
+      // If every line was a cache hit, skip the server entirely for this batch.
+      if (missOffsets.length === 0) continue;
+
+      // ── Build the server sub-slice (only misses) ──────────────────────────
+      const missSlice = missOffsets.map((k) => slice[k]!);
       // Per-line cue slot = gap to the next sentence (fallback cue length), min
       // 0.6s, so the server can speed-fit the dub into the slot (isochrony).
-      const cueDurationsMs = slice.map((sent, k) => {
-        const idx = i + k;
-        const next = s.sentences[idx + 1];
+      // Use the global indices so the slot math is correct for the full sentence array.
+      const cueDurationsMs = missOffsets.map((k) => {
+        const globalIdx = i + k;
+        const sent = s.sentences[globalIdx]!;
+        const next = s.sentences[globalIdx + 1];
         const slotSec = next ? next.start - sent.start : sent.end - sent.start;
         return Math.round(Math.max(0.6, slotSec) * 1000);
       });
@@ -687,44 +768,159 @@ export class SubtitleFirstPipeline {
         .filter((t): t is string => typeof t === "string" && t.trim().length > 0);
       const siteHost = currentSiteHost() ?? undefined;
 
-      // E-4: pass abortController.signal on EVERY batch so Stop halts server synthesis.
-      // E-5: populate s.sentences[idx]._buffer in STRICT index order as lines arrive
-      //      (the SSE generator yields line 0 first, then 1, then 2, …) so
-      //      onResumeCheck's "next due cue buffered?" check behaves identically to
-      //      the buffered path.
-      for await (const item of renderSubtitleDubStream({
-        apiBase: sm.apiBase,
-        bearer: s.apiBearer,
-        sentences: slice,
-        targetLanguage: lang,
-        voiceId,
-        cueDurationsMs,
-        priorLines,
-        sessionId: `sf_${s.token}`,
-        siteHost,
-        videoTitle: s.videoTitle,
-        signal: s.abortController.signal,  // E-4: always thread the signal
-      })) {
-        // Check stale/stopped BEFORE writing each decoded buffer so we bail
-        // promptly when Stop is pressed mid-stream.
-        if (sm.session !== s || s.stopFlag) return;
-
-        // item.index is the 0-based index WITHIN the slice — map to global idx.
-        const idx = i + item.index;
-        s.translations[idx] = item.text;
-
-        // E-5: write _buffer in strict index order (the generator yields in order).
-        if (item.audioMp3.byteLength > 0 && s.audioCtx) {
-          try {
-            s.sentences[idx]!._buffer = await s.audioCtx.decodeAudioData(item.audioMp3.slice(0));
-          } catch {
-            /* ignore decode failure — _buffer stays undefined; playback tick skips */
-          }
+      // ── Retry-boundary fix ────────────────────────────────────────────────
+      // batchKey for the current SLICE range (i..sliceEnd).
+      // _sentBatchRanges records the requestId used when this range was last sent.
+      // On a fresh request the key is absent → generate a new id and record it.
+      // On a retry for the SAME range the same id is reused (idempotency).
+      //
+      // Shifted retry: if a previous batch for a WIDER range [P,Q) partially
+      // committed and then failed, the next call to #renderBatch arrives here with
+      // a narrower range [i, sliceEnd) that starts at the first MISSING index
+      // (not P). The batchKey "i-sliceEnd" differs from "P-sliceEnd", so without
+      // the _sentBatchRanges lookup it would generate a NEW requestId — re-billing
+      // lines [P..i-1] that the server already committed.
+      //
+      // The fix: look for any existing _sentBatchRanges entry whose range CONTAINS
+      // the current slice [i, sliceEnd) (i.e., parentStart ≤ i && sliceEnd ≤
+      // parentEnd). If one exists, try the parent requestId first. The server
+      // replays the already-committed result. Then re-examine still-missing lines
+      // (cache misses) — if any remain, request ONLY those under a fresh id.
+      const batchKey = `${i}-${sliceEnd}`;
+      let parentReqId: string | undefined;
+      for (const [rangeKey, rid] of s._sentBatchRanges) {
+        const dash = rangeKey.indexOf("-");
+        if (dash === -1) continue;
+        const pStart = parseInt(rangeKey.slice(0, dash), 10);
+        const pEnd = parseInt(rangeKey.slice(dash + 1), 10);
+        if (pStart <= i && sliceEnd <= pEnd) {
+          parentReqId = rid;
+          break;
         }
-
-        // Re-check after async decodeAudioData — an abort may have fired.
-        if (sm.session !== s || s.stopFlag) return;
       }
+
+      let batchReqId = s._batchRequestIds.get(batchKey);
+      if (!batchReqId) {
+        // Fresh request: if a parent range exists try its id first (replay).
+        batchReqId = parentReqId ?? newRequestId("sf_dub_s");
+        s._batchRequestIds.set(batchKey, batchReqId);
+      }
+
+      // Record this batch in _sentBatchRanges so future shifted retries can find it.
+      s._sentBatchRanges.set(batchKey, batchReqId);
+
+      // ── Inner helper: stream one set of sentences and write results ──────────
+      const streamAndWrite = async (
+        sentences: typeof missSlice,
+        offsets: number[],    // global-index offset for each sentence in the slice
+        sliceBase: number,    // i (for batchKey derivation)
+        reqId: string,
+      ): Promise<"ok" | "already_processed" | "stale"> => {
+        const cueDurs = offsets.map((k) => {
+          const globalIdx = sliceBase + k;
+          const sent = s.sentences[globalIdx]!;
+          const next = s.sentences[globalIdx + 1];
+          const slotSec = next ? next.start - sent.start : sent.end - sent.start;
+          return Math.round(Math.max(0.6, slotSec) * 1000);
+        });
+        const prior = s.translations
+          .slice(Math.max(0, sliceBase - 4), sliceBase)
+          .filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+
+        for await (const item of renderSubtitleDubStream({
+          apiBase: sm.apiBase,
+          bearer: s.apiBearer,
+          sentences,
+          targetLanguage: lang,
+          voiceId,
+          cueDurationsMs: cueDurs,
+          priorLines: prior,
+          sessionId: `sf_${s.token}`,
+          siteHost,
+          videoTitle: s.videoTitle,
+          requestId: reqId,
+          signal: s.abortController.signal,
+        })) {
+          if (sm.session !== s || s.stopFlag) return "stale";
+
+          if (item === ALREADY_PROCESSED) {
+            return "already_processed";
+          }
+
+          const missK = offsets[item.index];
+          if (missK === undefined) continue;
+          const globalIdx = sliceBase + missK;
+          s.translations[globalIdx] = item.text;
+
+          let decoded: AudioBuffer | undefined;
+          if (item.audioMp3.byteLength > 0 && s.audioCtx) {
+            try {
+              decoded = await s.audioCtx.decodeAudioData(item.audioMp3.slice(0));
+            } catch {
+              /* ignore decode failure */
+            }
+          }
+
+          if (sm.session !== s || s.stopFlag) return "stale";
+
+          if (decoded) {
+            s.sentences[globalIdx]!._buffer = decoded;
+          }
+
+          const sent = s.sentences[globalIdx]!;
+          const key = cacheKey(videoId, globalIdx, sent.text, lang, voiceId);
+          let audioB64 = "";
+          if (item.audioMp3.byteLength > 0) {
+            try {
+              const bytes = new Uint8Array(item.audioMp3);
+              let bin = "";
+              for (let j = 0; j < bytes.length; j++) bin += String.fromCharCode(bytes[j]!);
+              audioB64 = btoa(bin);
+            } catch { /* ignore */ }
+          }
+          cacheSet(key, { audioB64, text: item.text, ts: Date.now(), buffer: decoded });
+        }
+        return "ok";
+      };
+
+      // E-4: pass abortController.signal on EVERY batch so Stop halts server synthesis.
+      // E-5: populate s.sentences[idx]._buffer in STRICT index order as lines arrive.
+
+      // First attempt: send with batchReqId (possibly the parent requestId for
+      // a retry-boundary scenario, or a fresh id for a new request).
+      const result = await streamAndWrite(missSlice, missOffsets, i, batchReqId);
+
+      if (result === "stale") return;
+
+      if (result === "already_processed") {
+        // Server replayed the original batch. Check which lines are STILL missing
+        // (cache misses + no translation yet) — these are lines the server committed
+        // but we never received in the original request.
+        const stillMissingOffsets = missOffsets.filter((k) => {
+          const globalIdx = i + k;
+          return !s.translations[globalIdx] || !s.sentences[globalIdx]?._buffer;
+        });
+        if (stillMissingOffsets.length > 0) {
+          // Re-request ONLY the unreceived lines under a FRESH requestId so we
+          // pay only for what we never got, not the whole shifted tail.
+          const freshId = newRequestId("sf_dub_retry");
+          const freshSlice = stillMissingOffsets.map((k) => slice[k]!);
+          const freshResult = await streamAndWrite(freshSlice, stillMissingOffsets, i, freshId);
+          if (freshResult === "stale") return;
+          // Record the fresh id for this range in case of further retries.
+          s._sentBatchRanges.set(batchKey, freshId);
+        }
+        // Regardless of whether we had to re-request, the original batch is done.
+        s._batchRequestIds.delete(batchKey);
+        // already_processed is a terminal success for the outer for-loop; continue
+        // to the next slice (not return) so sibling slices still render.
+        continue;
+      }
+
+      // Batch completed successfully — clear its requestId so a future seek to
+      // this range gets a fresh id (re-render is a distinct request).
+      s._batchRequestIds.delete(batchKey);
+      s._sentBatchRanges.delete(batchKey);
     }
   }
 
@@ -1084,6 +1280,18 @@ export class SubtitleFirstPipeline {
       // renderer's firstMissing scan still skips cues that already hold a _buffer.
       s.renderCursor = anchor.index;
     }
+    // Epoch guard (SOLUTION WS5.6 / S5-F9): bump the epoch so any in-flight
+    // rolling-renderer completion can detect that the seek happened and must NOT
+    // advance renderCursor past the seek-corrected position.
+    s._renderEpoch += 1;
+    // Clear in-progress batch ids on seek: the new position constitutes a new
+    // range intent; stale ids would match against a different range.
+    s._batchRequestIds.clear();
+    s._sentBatchRanges.clear();
+    // Clear coalescing state on seek — pending lines from the old position are
+    // stale; the rolling renderer will re-accumulate from the new anchor.
+    s._pendingLines.clear();
+    s._pendingFirstQueuedAt = 0;
     this.#stopCurrent(s);
     // Play the cue at the new position promptly rather than waiting for the next tick.
     this.#playbackTick(s);
@@ -1104,6 +1312,17 @@ export class SubtitleFirstPipeline {
       overlay.setSourceText(source.slice(-220));
     }
   }
+
+  // ── Rolling-renderer batch-coalescing constants ─────────────────────────────
+  // Flush the pending set when ANY of these is true:
+  //   (a) ≥ COALESCE_MIN_LINES lines are pending
+  //   (b) the earliest pending line's cue start is within COALESCE_URGENT_SEC
+  //       of the playhead (never starve playback)
+  //   (c) ≥ COALESCE_MAX_AGE_MS have elapsed since the first pending line was queued
+
+  static readonly COALESCE_MIN_LINES = 3;
+  static readonly COALESCE_URGENT_SEC = 8;
+  static readonly COALESCE_MAX_AGE_MS = 6000;
 
   async #runRollingRenderer(s: SubtitleFirstSession, video: HTMLVideoElement): Promise<void> {
     const { sm } = this.app;
@@ -1136,24 +1355,80 @@ export class SubtitleFirstPipeline {
 
       const start = s.renderCursor;
       const end = targetIdx;
+
+      // ── Accumulate cache-miss lines into the pending coalesce set ────────────
+      // Walk the window [start, end) and collect indices that are genuine misses
+      // (no translation + no buffer yet). Cache hits were handled by #renderBatch
+      // on previous passes — skip them here so only un-rendered lines accumulate.
+      for (let i = start; i < end; i++) {
+        if (!s.translations[i] || !s.sentences[i]?._buffer) {
+          if (!s._pendingLines.has(i)) {
+            s._pendingLines.add(i);
+            if (s._pendingFirstQueuedAt === 0) {
+              s._pendingFirstQueuedAt = Date.now();
+            }
+          }
+        }
+      }
+
+      if (s._pendingLines.size === 0) {
+        // All lines in window already rendered — advance cursor.
+        const epochAtStart = s._renderEpoch;
+        if (s._renderEpoch === epochAtStart) {
+          s.renderCursor = end;
+        }
+        continue;
+      }
+
+      // ── Flush decision ────────────────────────────────────────────────────────
+      // Evaluate whether to flush the accumulated pending set or keep waiting.
+      const pendingSorted = [...s._pendingLines].sort((a, b) => a - b);
+      const earliestIdx = pendingSorted[0]!;
+      const earliestStart = s.sentences[earliestIdx]?.start ?? Infinity;
+      const urgentFlush = earliestStart - t <= SubtitleFirstPipeline.COALESCE_URGENT_SEC;
+      const ageFlush = s._pendingFirstQueuedAt > 0 &&
+        (Date.now() - s._pendingFirstQueuedAt) >= SubtitleFirstPipeline.COALESCE_MAX_AGE_MS;
+      const sizeFlush = s._pendingLines.size >= SubtitleFirstPipeline.COALESCE_MIN_LINES;
+
+      if (!urgentFlush && !ageFlush && !sizeFlush) {
+        // Not time to flush yet — keep accumulating on the next tick.
+        continue;
+      }
+
+      // ── Flush: render the full pending set as ONE batch ───────────────────────
+      // Determine the contiguous range that covers all pending lines.
+      // #renderBatch handles the cache-miss filter internally, so we pass the
+      // full [min, max+1) range; it skips already-rendered lines via the cache.
+      const flushStart = pendingSorted[0]!;
+      const flushEnd = pendingSorted[pendingSorted.length - 1]! + 1;
+
+      // Reset coalescing state NOW (before the async call) so a seek during the
+      // batch resets the accumulator to the new anchor rather than keeping stale
+      // pending indices from the old position.
+      s._pendingLines.clear();
+      s._pendingFirstQueuedAt = 0;
+
+      const epochAtStart = s._renderEpoch;
       s.rollingInFlight = true;
       try {
-        const firstMissing = s.translations.findIndex(
-          (v, i) => i >= start && i < end && (!v || !s.sentences[i]?._buffer),
-        );
-        const batchStart = firstMissing === -1 ? end : firstMissing;
-        if (batchStart < end) {
-          await this.#renderBatch(s, batchStart, end);
-        }
+        await this.#renderBatch(s, flushStart, flushEnd);
         if (sm.session !== s || s.stopFlag) return;
-        s.renderCursor = end;
+        // Epoch guard (SOLUTION WS5.6): only advance renderCursor if no seek has
+        // happened since we captured epochAtStart. A seek increments _renderEpoch
+        // and resets renderCursor to the anchor; overwriting it here would re-clobber
+        // the seek-corrected position and send the playback pump back to the
+        // stale pre-seek region (silent dub bug S5-F5 / S5-F9).
+        if (s._renderEpoch === epochAtStart) {
+          s.renderCursor = Math.max(s.renderCursor, flushEnd);
+        }
+        // If the epoch changed, leave renderCursor at the seek-corrected value;
+        // the next rolling tick will pick up from the new position naturally.
       } catch {
         // A transient render error (network blip, 5xx) must NOT kill the rolling
-        // renderer for the rest of the session. Swallow it and retry the same
-        // range on the next 1s iteration (renderCursor is left unadvanced). On a
-        // persistent outage the cue stays un-buffered and the playback driver's
-        // stall cap (SUBFIRST_BUFFER_WAIT_MAX_MS) eventually skips it — bounded,
-        // never an infinite hang.
+        // renderer for the rest of the session. Swallow it; the pending set was
+        // already cleared so the next tick re-adds missed indices from scratch.
+        // The playback driver's stall cap (SUBFIRST_BUFFER_WAIT_MAX_MS) ensures
+        // we never hang forever even on persistent failures.
       } finally {
         s.rollingInFlight = false;
       }

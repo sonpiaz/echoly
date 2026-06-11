@@ -43,6 +43,8 @@ import {
   applyCaptionPositionPreset,
   clampLayout,
   DEFAULT_LAYOUT,
+  DOCK_H,
+  DOCK_W,
   OVERLAY_TEMPLATE,
   PANEL_H,
   PANEL_W,
@@ -176,6 +178,21 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   let standardVoiceOptions: readonly LangPair[] = offlineStandardVoices();
   let stageSnapshot: MediaStageSnapshot | null = null;
   let unwatchStage: (() => void) | null = null;
+  // ── Drag fast-path state ──────────────────────────────────────────────────
+  // dragActive gates the watchMediaStage callback and onWindowResize: when true,
+  // both store stageSnapshot but skip applyLayout() — killing the MutationObserver
+  // feedback loop (R4) and the first-drag stage-override bug (R3).
+  let dragActive = false;
+  // Dimensions cached at pointerdown (one BCR each for dock + panel). The fast
+  // path uses these throughout the drag so getBoundingClientRect is never called
+  // on a hot pointermove (kills R2).
+  let dragDims: {
+    dock: { w: number; h: number };
+    panel: { w: number; h: number };
+  } | null = null;
+  // Pending rAF handle — used for coalescing: only one applyDragPosition frame
+  // is ever in-flight at a time.
+  let dragRafId: number | null = null;
   let elapsedInterval: ReturnType<typeof setInterval> | null = null;
   let sessionStartedAt: number | null = null;
   let overlayCallbacks: OverlayCallbacks | null = null;
@@ -185,11 +202,10 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   // showToast auto-removes this minimal host when the toast expires.
   let toastOnlyRoot = false;
 
-  const DOCK_W = 248;
-  const DOCK_H = 46;
-
   // Keep a stable bound reference so removeOverlay can unbind the window listener.
-  const onWindowResize = () => applyLayout();
+  // Deferred while dragging — the drop commit calls applyLayout() with the latest
+  // snapshot so no resize update is lost.
+  const onWindowResize = () => { if (!dragActive) applyLayout(); };
 
   /** Load persisted Layout, optionally seeding from the Advanced caption-position
    *  preset when nothing is persisted. The user's drag still wins — localStorage
@@ -242,12 +258,26 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     return sourceOn || history.length > 0;
   }
 
+  function measuredChrome(
+    el: HTMLElement | null,
+    fallbackW: number,
+    fallbackH: number,
+  ): { w: number; h: number } {
+    if (!el) return { w: fallbackW, h: fallbackH };
+    const r = el.getBoundingClientRect();
+    return {
+      w: r.width > 1 ? r.width : fallbackW,
+      h: r.height > 1 ? r.height : fallbackH,
+    };
+  }
+
   function anchorChrome(
     el: HTMLElement | null,
-    w: number,
-    h: number,
+    fallbackW: number,
+    fallbackH: number,
   ): void {
     if (!el) return;
+    const { w, h } = measuredChrome(el, fallbackW, fallbackH);
     if (!stageSnapshot) {
       const left = layout.left ?? Math.max(8, window.innerWidth - w - 12);
       const top = layout.top ?? 12;
@@ -753,7 +783,9 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     bindDragResize(elements.panelDrag);
     unwatchStage = watchMediaStage((snapshot) => {
       stageSnapshot = snapshot;
-      applyLayout();
+      // While dragging: store the snapshot (fast path reads stageSnapshot) but
+      // skip applyLayout — the drop commit will call it with the latest snapshot.
+      if (!dragActive) applyLayout();
     });
     applyLayout();
     paintTargetPane();
@@ -780,7 +812,54 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     lastRenderedCaption = "";
   }
 
-  // ───── Drag + resize (legacy bindDragResize, content.js:363-418) ─────
+  // ───── Drag fast path (R1–R4 fix) ──────────────────────────────────────────
+  // During an active drag we bypass the full applyLayout() pipeline: no BCR,
+  // no caption sync, no class toggles. A single rAF-coalesced applyDragPosition()
+  // writes style.left/top on the ONE visible element (dock or panel). Transitions
+  // are suppressed via .ec-dragging (kills R1). A single BCR pair is taken at
+  // pointerdown and cached for the whole drag (kills R2). The trackVideo branch
+  // in anchorChrome is never consulted mid-drag, and layout.left/top is never
+  // overwritten with the stage default (fixes R3). Stage-update and resize
+  // callbacks skip applyLayout() while dragActive (kills R4).
+  // Full applyLayout() runs exactly once at drop (endDrag).
+
+  /** rAF-coalesced position writer for the drag fast path.
+   *  Resolves requestAnimationFrame/cancelAnimationFrame at call time (globals)
+   *  so a manual-flush test stub can intercept it without module-load aliasing. */
+  function applyDragPosition(): void {
+    dragRafId = null;
+    if (!root || !dragDims) return;
+    layout = clampLayout(layout, window.innerWidth, window.innerHeight);
+    // Single visible element rule: when the panel is open the dock is display:none
+    // (.ec-panel-open .ec-dock) — write panel only; else write dock only.
+    const expanded = !!layout.panelExpanded;
+    const el = expanded
+      ? (root.querySelector<HTMLElement>(".ec-panel") ?? null)
+      : (root.querySelector<HTMLElement>(".ec-dock") ?? null);
+    if (!el) return;
+    const dims = expanded ? dragDims.panel : dragDims.dock;
+    let left: number;
+    let top: number;
+    if (stageSnapshot) {
+      const p = clampDockToStage(
+        layout.left ?? Math.max(8, window.innerWidth - dims.w - 12),
+        layout.top ?? 12,
+        stageSnapshot,
+        dims.w,
+        dims.h,
+      );
+      left = p.left;
+      top = p.top;
+    } else {
+      // No stage yet — mirror anchorChrome's no-stage fallback (null-guarded).
+      left = layout.left ?? Math.max(8, window.innerWidth - dims.w - 12);
+      top = layout.top ?? 12;
+    }
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.right = "auto";
+  }
+
   function bindDragResize(handle: HTMLElement | null): void {
     if (!root || !handle) return;
     let dragging = false;
@@ -789,26 +868,87 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     handle.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       if ((e.target as Element).closest("button, select, input, label")) return;
-      dragging = true;
+      // §A·2 strict ordering:
+      // (1) Add .ec-dragging to both dock + panel — CSS transition: none takes effect.
+      const dockEl = root!.querySelector<HTMLElement>(".ec-dock");
+      const panelEl = elements.panel;
+      dockEl?.classList.add("ec-dragging");
+      panelEl?.classList.add("ec-dragging");
+      // (2) Force reflow: flushes transition: none, snapping any in-flight 150 ms
+      //     transition so rendered position == layout.left at the moment of grab.
+      void dockEl?.offsetWidth;
+      // (3) Capture pointer origin (one BCR on the handle — layout.left ?? rect.left).
       pointer = capturePointer(e, handle);
+      // (4) Cache drag dims — the only BCRs of the entire drag; dims are stable
+      //     mid-drag (no resize path) so we never call BCR again until drop.
+      dragDims = {
+        dock: measuredChrome(dockEl, DOCK_W, DOCK_H),
+        panel: measuredChrome(panelEl, PANEL_W, PANEL_H),
+      };
+      // (5) setPointerCapture, set dragActive.
       handle.setPointerCapture?.(e.pointerId);
+      dragActive = true;
+      dragging = true;
       e.preventDefault();
     });
 
     handle.addEventListener("pointermove", (e) => {
       if (!dragging || !pointer) return;
+      // Update shared layout coords from pointer delta (unchanged math).
       layout.left = pointer.left + (e.clientX - pointer.x);
       layout.top = pointer.top + (e.clientY - pointer.y);
-      applyLayout();
+      // rAF coalescing: cancel any pending frame and schedule a fresh one.
+      // requestAnimationFrame/cancelAnimationFrame resolved at call time (globals)
+      // so tests can install a manual-flush stub before this line runs.
+      if (dragRafId !== null) cancelAnimationFrame(dragRafId);
+      dragRafId = requestAnimationFrame(applyDragPosition);
     });
 
     const endDrag = (): void => {
-      if (dragging) {
-        layout.dockUserPlaced = true;
-        saveLayout();
-      }
+      if (!dragging) return;
       dragging = false;
       pointer = null;
+      // §A·5 strict drop-commit ordering:
+      // (1) Cancel pending rAF + flush applyDragPosition once for the final position.
+      if (dragRafId !== null) {
+        cancelAnimationFrame(dragRafId);
+        dragRafId = null;
+      }
+      applyDragPosition();
+      // (2) Clamp write-back — when stage exists AND coords are non-null, clamp
+      //     layout.left/top back inside the stage rect by construction, so the
+      //     >48 px reset in anchorChrome cannot fire on the drop's applyLayout().
+      if (dragDims && stageSnapshot && layout.left != null && layout.top != null) {
+        const expanded = !!layout.panelExpanded;
+        const dims = expanded ? dragDims.panel : dragDims.dock;
+        const p = clampDockToStage(
+          layout.left,
+          layout.top,
+          stageSnapshot,
+          dims.w,
+          dims.h,
+        );
+        layout.left = p.left;
+        layout.top = p.top;
+      }
+      // (3) Mark user-placed, persist.
+      layout.dockUserPlaced = true;
+      saveLayout();
+      // (4) Re-enable stage/resize callbacks, then run full applyLayout().
+      dragActive = false;
+      dragDims = null;
+      applyLayout();
+      // (5) Force reflow on the visible element so the re-applied inline position
+      //     is committed before we remove the class.
+      const expanded = !!layout.panelExpanded;
+      const visibleEl = expanded
+        ? elements.panel
+        : root?.querySelector<HTMLElement>(".ec-dock") ?? null;
+      void visibleEl?.offsetWidth;
+      // (6) Remove .ec-dragging AFTER the reflow — inverting would re-animate the
+      //     commit over 150 ms (the original drop-jank bug).
+      root?.querySelector<HTMLElement>(".ec-dock")?.classList.remove("ec-dragging");
+      elements.panel?.classList.remove("ec-dragging");
     };
     handle.addEventListener("pointerup", endDrag);
     handle.addEventListener("pointercancel", endDrag);

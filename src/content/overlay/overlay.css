@@ -61,10 +61,13 @@
   left: 0;
   right: auto;
   z-index: 2;
-  display: flex;
+  box-sizing: border-box;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 16px 9px 11px;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 8px;
+  line-height: 1;
   border-radius: 100px;
   background: var(--ec-glass-bg);
   backdrop-filter: blur(16px) saturate(120%);
@@ -73,18 +76,54 @@
   box-shadow: var(--ec-shadow-island);
   cursor: grab;
   user-select: none;
-  transition: left 0.15s ease, top 0.15s ease, opacity 0.2s ease;
+  transition: left 0.15s ease, top 0.15s ease, opacity 0.15s ease;
+}
+
+.ec-dock > span,
+.ec-dock > button {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.ec-dock button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .ec-dock:active {
   cursor: grabbing;
 }
 
+/* Drag fast path — suppress transitions while dragging so the element tracks
+   the pointer frame-perfect. Wins specificity over the base left/top transition
+   via the compound selector; the base transitions stay for non-drag re-anchoring
+   (stage updates, window resize, fullscreen). */
+.ec-dock.ec-dragging,
+.ec-panel.ec-dragging {
+  transition: none;
+}
+
+/* Logo + Live label — one vertically centered unit */
+.ec-dock-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 20px;
+}
+
 /* Orb — the glowing tangerine sphere */
 .ec-dock-mark {
   position: relative;
-  width: 26px;
-  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--ec-grad-orb);
@@ -100,12 +139,13 @@
 
 /* SVG icon inside the mark */
 .ec-dock-mark svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  padding: 5px;
+  position: static;
+  display: block;
+  width: 12px;
+  height: 12px;
+  padding: 0;
   color: #fff;
+  flex-shrink: 0;
 }
 
 /* Live indicator dot — now minimal, hidden (orb already signals state) */
@@ -185,20 +225,35 @@
 
 /* Label area */
 .ec-dock-live {
-  font-size: 13px;
-  font-weight: 700;
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
   letter-spacing: -0.01em;
   color: var(--ec-glass-text);
   white-space: nowrap;
 }
 
+/* Status + EQ — compact middle cluster */
+.ec-dock-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
 .ec-state {
-  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  height: 11px;
+  font-size: 8px;
   font-weight: 600;
-  letter-spacing: .12em;
+  line-height: 1;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ec-glass-text-dim);
-  max-width: 80px;
+  max-width: 66px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -207,21 +262,21 @@
 /* EQ bars — 4 bars, tangerine gradient, Island EQ animation */
 .ec-dock-eq {
   display: flex;
-  gap: 2.5px;
+  gap: 1.5px;
   align-items: center;
-  height: 20px;
+  height: 12px;
   flex-shrink: 0;
 }
 .ec-dock-eq i {
-  width: 3px;
-  border-radius: 3px;
+  width: 2.5px;
+  border-radius: 2px;
   background: linear-gradient(180deg, var(--ec-glow), var(--ec-tangerine));
   animation: ec-eq 1s ease-in-out infinite;
 }
-.ec-dock-eq i:nth-child(1) { height: 8px; }
-.ec-dock-eq i:nth-child(2) { height: 16px; animation-delay: .13s; }
-.ec-dock-eq i:nth-child(3) { height: 11px; animation-delay: .26s; }
-.ec-dock-eq i:nth-child(4) { height: 18px; animation-delay: .39s; }
+.ec-dock-eq i:nth-child(1) { height: 5px; }
+.ec-dock-eq i:nth-child(2) { height: 10px; animation-delay: .13s; }
+.ec-dock-eq i:nth-child(3) { height: 7px; animation-delay: .26s; }
+.ec-dock-eq i:nth-child(4) { height: 12px; animation-delay: .39s; }
 
 @keyframes ec-eq {
   0%,100% { transform: scaleY(.40); }
@@ -235,22 +290,63 @@
   opacity: 0.40;
 }
 
-/* Small action buttons inside the dock */
-.ec-dock-caption {
-  min-width: 20px;
+/* Action buttons — CC/stop 20px; expand 22px (primary quick tap) */
+.ec-dock-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+
+.ec-dock-actions .ec-dock-action {
+  box-sizing: border-box;
+  width: 20px;
   height: 20px;
-  padding: 0 5px;
+  min-width: 20px;
+  max-width: 20px;
+  min-height: 20px;
+  max-height: 20px;
+  flex: 0 0 20px;
+  padding: 0;
+  margin: 0;
   border: none;
-  border-radius: 100px;
-  background: rgba(255,255,255,.18);
+  border-radius: 50%;
   color: var(--ec-glass-text);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.3px;
+  font-size: 0;
   line-height: 1;
   cursor: pointer;
+  position: relative;
+  overflow: visible;
+  transition: background 0.15s, transform 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.ec-dock-action-label {
+  display: block;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  pointer-events: none;
+  user-select: none;
+}
+
+.ec-dock-action-icon {
+  display: block;
+  width: 12px;
+  height: 3px;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+.ec-dock-caption {
+  background: rgba(255,255,255,.18);
   font-family: inherit;
-  transition: background 0.15s;
 }
 
 .ec-dock-caption[aria-pressed="false"] {
@@ -259,57 +355,58 @@
 }
 
 .ec-dock-expand {
-  width: 20px;
-  height: 20px;
-  border: none;
-  border-radius: 100px;
-  background: rgba(255,255,255,.12);
-  color: var(--ec-glass-text);
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0;
-  transition: background 0.15s;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  max-width: 22px;
+  min-height: 22px;
+  max-height: 22px;
+  flex: 0 0 22px;
+  background: rgba(255,255,255,.17);
+}
+
+.ec-dock-expand .ec-dock-action-icon {
+  width: 13px;
+  height: 3px;
 }
 
 .ec-dock-stop {
-  width: 20px;
-  height: 20px;
-  border: none;
-  border-radius: 100px;
   background: rgba(255,255,255,.14);
-  color: var(--ec-glass-text);
-  cursor: pointer;
-  margin-left: 2px;
-  position: relative;
-  transition: background 0.15s;
 }
 
 .ec-dock-stop::after {
   content: "";
   position: absolute;
-  left: 7px;
-  top: 7px;
+  left: 50%;
+  top: 50%;
   width: 6px;
   height: 6px;
+  transform: translate(-50%, -50%);
   background: currentColor;
   border-radius: 1px;
 }
 
-.ec-dock-caption:hover,
-.ec-dock-expand:hover,
-.ec-dock-stop:hover {
-  background: rgba(255,255,255,.22);
+.ec-dock-actions .ec-dock-action:hover {
+  background: rgba(255,255,255,.26);
+}
+
+.ec-dock-expand:hover {
+  background: rgba(255,255,255,.28);
+}
+
+.ec-dock-actions .ec-dock-action:active {
+  transform: scale(0.94);
 }
 
 /* Sync hint (matching dub / catching up) */
 .ec-dock-sync {
-  font-size: 10px;
+  font-size: 8px;
   font-weight: 600;
   color: var(--ec-warning);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
+  line-height: 1;
   white-space: nowrap;
-  max-width: 9rem;
+  max-width: 7rem;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -456,47 +553,153 @@
   50%     { transform: scale(1);    opacity: 1;   }
 }
 
-/* Quick-start launcher — tangerine squircle pull-tab on the right edge */
+/* Quick-start launcher — compact fixed-size tab docked flush to the right
+   viewport edge (classic side-button extension look: small, simple, unobtrusive).
+   Lives outside .ec-root, so colors and host-page button resets are declared here.
+   All colors are hard-coded literals (--ec-* vars are scoped to .ec-root and not
+   inherited outside it). DOM contract: button.ec-launcher > [ span.ec-launcher-mark
+   > svg, span.ec-launcher-label ] — label is a sibling of the mark inside the button. */
 .ec-launcher {
   position: fixed;
-  right: 0;
+  /* right/top are written as inline styles by launcher.ts #applyPos; the CSS
+     provides defaults only as fallback — the JS default is right:0, top:50%. */
   top: 50%;
   transform: translateY(-50%);
   z-index: 2147483646;
-  padding: 0;
+  box-sizing: border-box;
+  /* Invisible click halo: the button (hit target) extends 8px above/below and
+     10px left of the painted mark — easier to hit without looking bulkier.
+     Right stays 0 so the mark sits flush against the viewport edge. */
+  padding: 8px 0 8px 10px;
   margin: 0;
   border: none;
   background: transparent;
-  cursor: pointer;
-  display: flex;
+  cursor: grab;
+  touch-action: none;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  transition: transform 0.16s ease;
+  justify-content: flex-end;
+  min-width: 0;
+  min-height: 0;
+  font: inherit;
+  line-height: 1;
+  appearance: none;
+  -webkit-appearance: none;
+  /* Opacity fade on the button itself (entrance + hover); the MARK gets the
+     translateX entrance so the button's inline translateY(-50%) is never overridden. */
+  transition: opacity 0.16s ease;
+  opacity: 0.85;
+  /* `backwards` (NOT `both`/`forwards`): a filling animation would pin the
+     final keyframe values forever and override later hover/inline styles. */
+  animation: ec-launcher-in-opacity 0.22s ease-out backwards;
 }
 .ec-launcher:hover {
-  transform: translateY(-50%) translateX(-3px);
+  opacity: 1;
 }
-.ec-launcher:active {
-  transform: translateY(-50%) scale(0.95);
+.ec-launcher:active:not(.ec-launcher-dragging) {
+  opacity: 1;
+}
+.ec-launcher.ec-launcher-dragging {
+  cursor: grabbing;
+  opacity: 1;
+  transition: none;
 }
 .ec-launcher[disabled] {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: default;
 }
+.ec-launcher:focus-visible {
+  outline: 2px solid #FF7A3C;
+  outline-offset: 2px;
+}
+
+/* Compact docked tab mark — fixed 42×46 (near-square for balance), left corners
+   rounded, right edge flush to the viewport (the button's default inline
+   position is right: 0). The button's transparent padding extends the real hit
+   area to ~52×62. */
 .ec-launcher-mark {
-  width: 34px;
-  height: 38px;
-  border-radius: 11px 0 0 11px;
-  background: var(--ec-grad-brand);
-  box-shadow: -3px 3px 14px rgba(26,20,15,.30);
+  box-sizing: border-box;
+  width: 42px;
+  height: 46px;
+  border-radius: 14px 0 0 14px;
+  /* Brand gradient — #FF7A3C → #F25B17, slightly translucent so it sits quiet */
+  background: linear-gradient(135deg, rgba(255,122,60,.92), rgba(242,91,23,.94));
+  border: 1px solid rgba(255,255,255,.2);
+  border-right: none;
+  /* Soft, small shadow — a docked tab, not a floating blob */
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.22),
+    -1px 2px 8px rgba(26,20,15,.22);
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
+  color: #fff;
+  pointer-events: none;
+  transition: box-shadow 0.16s ease;
+  /* Entrance: slide in from the right edge + fade; the button parent carries
+     opacity only. `backwards` so the keyframe transform is released after the
+     run (a filling animation would override hover/inline transforms forever). */
+  animation: ec-launcher-in 0.22s ease-out backwards;
+}
+/* Hover affordance — shadow deepens (safe: box-shadow is not in the keyframes). */
+.ec-launcher:hover .ec-launcher-mark,
+.ec-launcher:focus-visible .ec-launcher-mark {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.22),
+    -2px 3px 12px rgba(26,20,15,.3);
 }
 .ec-launcher-mark svg {
+  display: block;
   width: 20px;
   height: 20px;
+  flex-shrink: 0;
+  overflow: visible;
+}
+.ec-launcher-mark svg path {
+  stroke: #fff;
+  fill: none;
+}
+
+/* Floating label chip — absolutely positioned LEFT of the mark; never changes
+   the button's box size so clamping/drag math stay correct. */
+.ec-launcher-label {
+  position: absolute;
+  right: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  background: rgba(26,20,15,.92);
   color: #fff;
+  font: 600 11px/1.4 system-ui, -apple-system, sans-serif;
+  padding: 4px 10px;
+  border-radius: 8px;
+  /* Fade in on hover/focus-visible */
+  transition: opacity .16s ease;
+}
+.ec-launcher:hover .ec-launcher-label,
+.ec-launcher:focus-visible .ec-launcher-label {
+  opacity: 1;
+}
+/* Label hidden while dragging — prevents stale tooltip during the drag arc. */
+.ec-launcher-dragging .ec-launcher-label {
+  opacity: 0 !important;
+  transition: none;
+}
+
+/* Entrance animation — translateX on .ec-launcher-mark (not the button, which
+   would override its inline translateY(-50%) centering during the animation). */
+@keyframes ec-launcher-in {
+  from { transform: translateX(8px); opacity: 0; }
+  to   { transform: translateX(0);   opacity: 1; }
+}
+/* Opacity-only fade on the button itself (no transform that conflicts with
+   the inline translateY(-50%) centering). */
+@keyframes ec-launcher-in-opacity {
+  from { opacity: 0; }
+  to   { opacity: 0.85; }
 }
 
 /* Error state caption */
@@ -526,7 +729,7 @@
   position: fixed;
   top: 0;
   left: 0;
-  width: 280px;
+  width: 256px;
   z-index: 3;
   border-radius: 18px;
   background: rgba(26,20,15,.80);
@@ -550,8 +753,8 @@
 .ec-panel-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 7px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--ec-glass-border);
   cursor: grab;
   user-select: none;
@@ -567,11 +770,22 @@
   flex-shrink: 0;
 }
 
+/* Logo + wordmark — vertically centered as one unit */
+.ec-panel-brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+}
+
 /* Panel orb — same as dock mark */
 .ec-panel-mark {
   position: relative;
-  width: 22px;
-  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--ec-grad-orb);
@@ -579,17 +793,17 @@
 }
 
 .ec-panel-mark svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  padding: 4px;
+  position: static;
+  width: 12px;
+  height: 12px;
+  padding: 0;
   color: #fff;
 }
 
 .ec-panel-brand {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
+  line-height: 1;
   color: var(--ec-glass-text);
   letter-spacing: -0.01em;
 }
@@ -597,12 +811,12 @@
 .ec-panel-live {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
+  gap: 4px;
+  padding: 2px 8px;
   border-radius: 100px;
   background: rgba(255,122,60,.24);
   border: 1px solid rgba(255,122,60,.35);
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: .12em;
   text-transform: uppercase;
@@ -1028,5 +1242,14 @@
   .ec-caption-loader-mark {
     transform: none;
     opacity: 1;
+  }
+  /* Launcher — disable entrance animation and hover/focus transitions. */
+  .ec-launcher,
+  .ec-launcher-mark {
+    animation: none !important;
+    transition: none !important;
+  }
+  .ec-launcher-label {
+    transition: none !important;
   }
 }

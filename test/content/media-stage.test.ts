@@ -5,6 +5,7 @@ import {
   clampDockToStage,
   defaultDockPosition,
   findPrimaryVideo,
+  resolveStageRect,
 } from "@/content/media-stage";
 
 beforeEach(() => {
@@ -56,9 +57,26 @@ describe("media-stage", () => {
     } as DOMRect;
     const insets = { bottom: 56, top: 44, side: 16 };
     const pos = defaultDockPosition({ rect, insets });
-    expect(pos.left).toBe(800 - 220 - 16);
-    expect(pos.top).toBe(14);
+    expect(pos.left).toBe(800 - 210 - 16);
+    expect(pos.top).toBe(10);
     const clamped = clampDockToStage(pos.left, pos.top, { rect, insets: { bottom: 56, top: 44, side: 16 } });
     expect(clamped.left).toBe(pos.left);
+  });
+
+  it("resolveStageRect prefers YouTube player container over letterboxed video", () => {
+    const player = document.createElement("div");
+    player.className = "html5-video-player";
+    const video = document.createElement("video");
+    player.appendChild(video);
+    document.body.append(player);
+    Object.defineProperty(player, "getBoundingClientRect", {
+      value: () => ({ left: 0, top: 0, right: 900, bottom: 500, width: 900, height: 500 }),
+    });
+    Object.defineProperty(video, "getBoundingClientRect", {
+      value: () => ({ left: 50, top: 20, right: 850, bottom: 480, width: 800, height: 460 }),
+    });
+    const stage = resolveStageRect(video, "youtube");
+    expect(stage.width).toBe(900);
+    expect(stage.left).toBe(0);
   });
 });

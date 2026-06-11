@@ -4,7 +4,7 @@ import type {
   WebRtcSession,
   WebRtcSignalingPipeline,
 } from "@/content/session-manager";
-import { RTC_LIVE_DURATION_HINT_SEC } from "@/shared/constants";
+import { RTC_LIVE_DURATION_HINT_CAP_SEC } from "@/shared/constants";
 
 /**
  * Timeout (ms) the driver allows the remote audio to keep playing after a
@@ -124,7 +124,10 @@ export function handoverDurationHintSec(
 ): number | undefined {
   if (!video) return undefined;
   if (pipeline === "realtime") {
-    if (isLive) return RTC_LIVE_DURATION_HINT_SEC;
+    // credit-flow-review WS5.2: live handover sends a capped hint (≤ server
+    // RESERVE_HINT_CAP_CMIN clamp) instead of 3600 — over-reserve is handled by
+    // the server's top-up machinery, not a giant up-front hold.
+    if (isLive) return RTC_LIVE_DURATION_HINT_CAP_SEC;
     if (isFinite(video.duration) && video.duration > 0) {
       return Math.ceil(Math.max(1, video.duration - video.currentTime));
     }

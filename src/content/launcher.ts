@@ -15,6 +15,66 @@ import type { ContentApp } from "./index";
 
 const KEEPALIVE_MS = 20_000;
 const START_OPTIMISTIC_HIDE_MS = 3000;
+const LAUNCHER_POS_KEY = "echolyLauncherPos";
+const DRAG_THRESHOLD_PX = 5;
+// Fallback height used when getBoundingClientRect returns 0×0 (e.g. jsdom).
+// Keep in sync with overlay.css: 46px mark + 8px click-halo padding top/bottom.
+const LAUNCHER_H = 62;
+const VIEWPORT_PAD = 8;
+
+const LAUNCHER_MARK_SVG = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 9v6M11 6v12M15 8v8M19 11v2" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>`;
+
+// The launcher is ALWAYS docked flush to the right viewport edge; the user can
+// only slide it up/down, so the persisted position is the vertical center alone.
+// (Older records also carried a `left` — it is intentionally ignored on load,
+// which heals any stale mid-screen placement from the previous free-drag design.)
+interface LauncherPos {
+  /** Vertical center (px) when userPlaced. */
+  centerY: number | null;
+  userPlaced: boolean;
+}
+
+const DEFAULT_LAUNCHER_POS: LauncherPos = {
+  centerY: null,
+  userPlaced: false,
+};
+
+function loadLauncherPos(): LauncherPos {
+  try {
+    const raw = localStorage.getItem(LAUNCHER_POS_KEY);
+    if (!raw) return { ...DEFAULT_LAUNCHER_POS };
+    const parsed = JSON.parse(raw) as Partial<LauncherPos>;
+    if (!parsed.userPlaced) return { ...DEFAULT_LAUNCHER_POS };
+    return {
+      centerY: typeof parsed.centerY === "number" ? parsed.centerY : null,
+      userPlaced: true,
+    };
+  } catch {
+    return { ...DEFAULT_LAUNCHER_POS };
+  }
+}
+
+function saveLauncherPos(pos: LauncherPos): void {
+  try {
+    localStorage.setItem(LAUNCHER_POS_KEY, JSON.stringify(pos));
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+// Pure clamping helper — height is parameterized so the measured BCR value can
+// be passed in; LAUNCHER_H serves as the fallback for 0×0 environments.
+export function clampLauncherCenterY(
+  centerY: number,
+  vh: number,
+  h: number = LAUNCHER_H,
+): number {
+  const halfH = h / 2;
+  return Math.min(
+    Math.max(halfH + VIEWPORT_PAD, centerY),
+    vh - halfH - VIEWPORT_PAD,
+  );
+}
 
 export class QuickStartLauncher {
   #app: ContentApp;
@@ -23,6 +83,10 @@ export class QuickStartLauncher {
   #starting = false;
   #tickTimer: ReturnType<typeof setInterval> | null = null;
   #startResetTimer: ReturnType<typeof setTimeout> | null = null;
+  #resaveTimer: ReturnType<typeof setTimeout> | null = null;
+  #unbindDrag: (() => void) | null = null;
+  #pos: LauncherPos = loadLauncherPos();
+  #suppressClick = false;
   #destroyed = false;
 
   constructor(app: ContentApp) {
@@ -32,10 +96,9 @@ export class QuickStartLauncher {
   async init(): Promise<void> {
     await this.#refreshSignedIn();
     this.#update();
-    // Periodic re-evaluation (SPA nav adds/removes the video; sign-in may change)
-    // — each tick's GET_LAUNCH_STATE also keeps the SW warm on supported domains.
     this.#tickTimer = setInterval(() => void this.#tick(), KEEPALIVE_MS);
     document.addEventListener("visibilitychange", this.#onVisibility);
+    window.addEventListener("resize", this.#onResize);
   }
 
   /** Re-evaluate visibility now (called by the host on session start/stop). */
@@ -47,7 +110,12 @@ export class QuickStartLauncher {
     this.#destroyed = true;
     if (this.#tickTimer) clearInterval(this.#tickTimer);
     if (this.#startResetTimer) clearTimeout(this.#startResetTimer);
+    if (this.#resaveTimer) {
+      clearTimeout(this.#resaveTimer);
+      this.#resaveTimer = null;
+    }
     document.removeEventListener("visibilitychange", this.#onVisibility);
+    window.removeEventListener("resize", this.#onResize);
     this.#remove();
   }
 
@@ -55,9 +123,28 @@ export class QuickStartLauncher {
     if (document.visibilityState === "visible") void this.#tick();
   };
 
+  #onResize = (): void => {
+    if (!this.#el || !this.#pos.userPlaced) return;
+    if (this.#pos.centerY == null) return;
+    const centerY = clampLauncherCenterY(
+      this.#pos.centerY,
+      window.innerHeight,
+      this.#measuredHeight(),
+    );
+    this.#pos = { centerY, userPlaced: true };
+    this.#applyPos();
+    // Debounce the localStorage write ~150 ms to avoid spamming storage on
+    // rapid resize events (e.g. window-resize animation).
+    if (this.#resaveTimer !== null) clearTimeout(this.#resaveTimer);
+    this.#resaveTimer = setTimeout(() => {
+      this.#resaveTimer = null;
+      saveLauncherPos(this.#pos);
+    }, 150);
+  };
+
   async #tick(): Promise<void> {
     if (this.#destroyed) return;
-    await this.#refreshSignedIn(); // doubles as the SW keepalive ping
+    await this.#refreshSignedIn();
     this.#update();
   }
 
@@ -68,7 +155,7 @@ export class QuickStartLauncher {
       })) as { ok: true; signedIn: boolean } | { ok: false } | undefined;
       this.#signedIn = !!(reply && reply.ok && reply.signedIn);
     } catch {
-      // Service worker unreachable — keep the last known sign-in state.
+      /* keep last known sign-in state */
     }
   }
 
@@ -95,34 +182,127 @@ export class QuickStartLauncher {
     else this.#remove();
   }
 
+  /** Returns the button's rendered height; falls back to LAUNCHER_H when 0
+   *  (jsdom / not yet painted). */
+  #measuredHeight(): number {
+    if (!this.#el) return LAUNCHER_H;
+    const rect = this.#el.getBoundingClientRect();
+    return rect.height > 0 ? rect.height : LAUNCHER_H;
+  }
+
+  #applyPos(): void {
+    if (!this.#el) return;
+    // Always docked flush to the right viewport edge — only `top` is variable.
+    this.#el.style.left = "auto";
+    this.#el.style.right = "0";
+    if (this.#pos.userPlaced && this.#pos.centerY != null) {
+      const centerY = clampLauncherCenterY(
+        this.#pos.centerY,
+        window.innerHeight,
+        this.#measuredHeight(),
+      );
+      this.#el.style.top = `${centerY}px`;
+    } else {
+      this.#el.style.top = "50%";
+    }
+    this.#el.style.transform = "translateY(-50%)";
+  }
+
   #mount(): void {
     if (this.#el) return;
     const btn = document.createElement("button");
     btn.className = "ec-launcher";
     btn.type = "button";
-    btn.title = "Lồng tiếng với Echoly";
-    btn.setAttribute("aria-label", "Bắt đầu lồng tiếng với Echoly");
+    btn.title = "Dub with Echoly · drag up or down to move";
+    btn.setAttribute("aria-label", "Start dubbing with Echoly");
+
     const mark = document.createElement("span");
     mark.className = "ec-launcher-mark";
     mark.setAttribute("aria-hidden", "true");
-    const NS = "http://www.w3.org/2000/svg";
-    const svg = document.createElementNS(NS, "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("fill", "none");
-    svg.setAttribute("stroke", "currentColor");
-    svg.setAttribute("stroke-width", "2.2");
-    svg.setAttribute("stroke-linecap", "round");
-    const path = document.createElementNS(NS, "path");
-    path.setAttribute("d", "M7 9v6M11 6v12M15 8v8M19 11v2");
-    svg.appendChild(path);
-    mark.appendChild(svg);
+    mark.innerHTML = LAUNCHER_MARK_SVG;
     btn.appendChild(mark);
+
+    // Hover label — floating chip positioned to the left of the button.
+    // Created via createElement + textContent (no innerHTML) per contract.
+    const label = document.createElement("span");
+    label.className = "ec-launcher-label";
+    label.textContent = "Start dubbing";
+    btn.appendChild(label);
+
     btn.addEventListener("click", this.#onClick);
+    this.#bindDrag(btn);
     document.body.appendChild(btn);
     this.#el = btn;
+    this.#applyPos();
+  }
+
+  #bindDrag(btn: HTMLButtonElement): void {
+    let originCenterY = 0;
+    let startX = 0;
+    let startY = 0;
+    let lastCenterY = 0;
+    let dragging = false;
+
+    const onPointerDown = (e: PointerEvent): void => {
+      if (e.button !== 0) return;
+      dragging = false;
+      this.#suppressClick = false;
+      const rect = btn.getBoundingClientRect();
+      originCenterY = rect.top + rect.height / 2;
+      startX = e.clientX;
+      startY = e.clientY;
+      btn.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    };
+
+    // Vertical-only drag: the launcher never leaves the right edge — the
+    // horizontal pointer delta only counts toward the click-vs-drag threshold.
+    const onPointerMove = (e: PointerEvent): void => {
+      if (!btn.hasPointerCapture(e.pointerId)) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!dragging && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+      dragging = true;
+      this.#suppressClick = true;
+      btn.classList.add("ec-launcher-dragging");
+      lastCenterY = clampLauncherCenterY(
+        originCenterY + dy,
+        window.innerHeight,
+        this.#measuredHeight(),
+      );
+      btn.style.top = `${lastCenterY}px`;
+      btn.style.transform = "translateY(-50%)";
+    };
+
+    const onPointerEnd = (e: PointerEvent): void => {
+      if (!btn.hasPointerCapture(e.pointerId)) return;
+      btn.releasePointerCapture(e.pointerId);
+      btn.classList.remove("ec-launcher-dragging");
+      if (dragging) {
+        this.#pos = { centerY: lastCenterY, userPlaced: true };
+        saveLauncherPos(this.#pos);
+        this.#applyPos();
+        e.preventDefault();
+      }
+      dragging = false;
+    };
+
+    btn.addEventListener("pointerdown", onPointerDown);
+    btn.addEventListener("pointermove", onPointerMove);
+    btn.addEventListener("pointerup", onPointerEnd);
+    btn.addEventListener("pointercancel", onPointerEnd);
+
+    this.#unbindDrag = () => {
+      btn.removeEventListener("pointerdown", onPointerDown);
+      btn.removeEventListener("pointermove", onPointerMove);
+      btn.removeEventListener("pointerup", onPointerEnd);
+      btn.removeEventListener("pointercancel", onPointerEnd);
+    };
   }
 
   #remove(): void {
+    this.#unbindDrag?.();
+    this.#unbindDrag = null;
     if (this.#el) {
       this.#el.removeEventListener("click", this.#onClick);
       this.#el.remove();
@@ -130,9 +310,13 @@ export class QuickStartLauncher {
     }
   }
 
-  #onClick = (): void => {
-    // Optimistic hide so the click feels instant; the session will mount its own
-    // overlay. If the start fails (no session materialises), re-show after a beat.
+  #onClick = (e: MouseEvent): void => {
+    if (this.#suppressClick) {
+      this.#suppressClick = false;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     this.#starting = true;
     this.#remove();
     void chrome.runtime.sendMessage({ type: "START_REQUEST" })?.catch?.(() => {});

@@ -32,6 +32,44 @@ export interface CaptionSentence extends CaptionCue {
   _played?: boolean;
 }
 
+// ─── Caption tag filter ───────────────────────────────────────────────────────
+
+/**
+ * Regex for cues whose ENTIRE text is a bracketed/parenthesised annotation or
+ * pure music notes — e.g. [Music], [Applause], (laughs), ♪♪, [Âm nhạc].
+ * Conservative: matches only when the WHOLE text is a tag/music block so lines
+ * with real speech outside brackets are never dropped.
+ */
+const TAG_ONLY_RE = /^\s*[\[\(][^\]\)]{0,40}[\]\)]\s*$/u;
+const MUSIC_ONLY_RE = /^\s*[♪♫][\s♪♫]*$/u;
+
+/**
+ * Return `true` when the cue contains only a bracketed/parenthesised tag or
+ * pure music-note characters — i.e. no spoken text worth dubbing.
+ *
+ * Examples that return `true`:
+ *   "[Music]"  "[Applause]"  "[Âm nhạc]"  "(laughs)"  "♪ ♪"  "♫♫"
+ *
+ * Examples that return `false` (contain real words):
+ *   "[Music] Welcome"  "Hello ♪"  "He said [sighs] quietly"
+ */
+export function isTagOnlyCue(text: string): boolean {
+  return TAG_ONLY_RE.test(text) || MUSIC_ONLY_RE.test(text);
+}
+
+/**
+ * Strip leading and trailing ♪/♫ characters (and surrounding whitespace) from
+ * a caption text while preserving inner words.
+ *
+ * Examples:
+ *   "♪ Hello world ♪"  →  "Hello world"
+ *   "♫ Amazing grace"  →  "Amazing grace"
+ *   "Hello world"      →  "Hello world"  (unchanged)
+ */
+export function trimMusicNotes(text: string): string {
+  return text.replace(/^[\s♪♫]+/, "").replace(/[\s♪♫]+$/, "");
+}
+
 // ─── Batch/lookahead constants ────────────────────────────────────────────────
 
 /** Number of sentences fetched per TTS batch in the subtitle-first pipeline. */
@@ -135,7 +173,14 @@ export function regroupToSentences(captions: CaptionCue[]): CaptionSentence[] {
   const out: CaptionSentence[] = [];
   let acc: CaptionSentence | null = null;
 
-  for (const c of captions) {
+  for (const rawCue of captions) {
+    // Drop cues whose entire text is a bracketed tag or pure music notes.
+    // [Music], [Applause], (laughs), ♪♪ → translated+billed as "Âm nhạc" etc.
+    if (isTagOnlyCue(rawCue.text)) continue;
+    // Trim leading/trailing ♪/♫ from mixed lines ("♪ Hello world ♪" → "Hello world").
+    const c: CaptionCue = trimMusicNotes(rawCue.text) !== rawCue.text
+      ? { ...rawCue, text: trimMusicNotes(rawCue.text) }
+      : rawCue;
     if (!acc) {
       acc = { ...c };
       continue;

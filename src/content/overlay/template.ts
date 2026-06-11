@@ -37,24 +37,33 @@ export const DEFAULT_LAYOUT: Layout = {
   captionOnVideo: true,
 };
 
-export const PANEL_W = 280;
-export const PANEL_H = 320;
+export const PANEL_W = 256;
+export const PANEL_H = 296;
+/** Default dock chrome — keep in sync with `.ec-dock` in overlay.css. */
+export const DOCK_W = 212;
+export const DOCK_H = 32;
 
 export const OVERLAY_TEMPLATE = `
       <div class="ec-dock" data-ec-drag>
-        <span class="ec-dock-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-            <path d="M7 9v6M11 6v12M15 8v8M19 11v2"/>
-          </svg>
+        <span class="ec-dock-brand">
+          <span class="ec-dock-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+              <path d="M7 9v6M11 6v12M15 8v8M19 11v2"/>
+            </svg>
+          </span>
+          <span class="ec-dock-live">Live</span>
         </span>
         <span class="ec-live-dot" aria-hidden="true"></span>
-        <span class="ec-dock-live">Live</span>
-        <span class="ec-state" data-ec-status>Ready</span>
-        <span class="ec-dock-sync" data-ec-sync-hint hidden aria-live="polite"></span>
-        <span class="ec-dock-eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-        <button class="ec-dock-caption" type="button" data-ec-caption-toggle aria-pressed="true" aria-label="Subtitles on video" title="Subtitles on/off">CC</button>
-        <button class="ec-dock-expand" type="button" data-ec-expand aria-label="Expand controls" title="Expand">⋯</button>
-        <button class="ec-dock-stop" type="button" data-ec-stop aria-label="Stop dubbing" title="Stop dubbing"></button>
+        <span class="ec-dock-meta">
+          <span class="ec-state" data-ec-status>Ready</span>
+          <span class="ec-dock-sync" data-ec-sync-hint hidden aria-live="polite"></span>
+          <span class="ec-dock-eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        </span>
+        <span class="ec-dock-actions">
+          <button class="ec-dock-action ec-dock-caption" type="button" data-ec-caption-toggle aria-pressed="true" aria-label="Subtitles on video" title="Subtitles on/off"><span class="ec-dock-action-label">CC</span></button>
+          <button class="ec-dock-action ec-dock-expand" type="button" data-ec-expand aria-label="Expand controls" title="Expand"><svg class="ec-dock-action-icon" viewBox="0 0 16 4" width="12" height="3" aria-hidden="true"><circle cx="2" cy="2" r="1.35" fill="currentColor"/><circle cx="8" cy="2" r="1.35" fill="currentColor"/><circle cx="14" cy="2" r="1.35" fill="currentColor"/></svg></button>
+          <button class="ec-dock-action ec-dock-stop" type="button" data-ec-stop aria-label="Stop dubbing" title="Stop dubbing"></button>
+        </span>
       </div>
       <div class="ec-panel" data-ec-panel hidden>
         <div class="ec-panel-head" data-ec-panel-drag>
@@ -65,12 +74,14 @@ export const OVERLAY_TEMPLATE = `
               <circle cx="3" cy="12" r="1"/><circle cx="7" cy="12" r="1"/>
             </svg>
           </span>
-          <span class="ec-panel-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-              <path d="M7 9v6M11 6v12M15 8v8M19 11v2"/>
-            </svg>
+          <span class="ec-panel-brand-lockup">
+            <span class="ec-panel-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <path d="M7 9v6M11 6v12M15 8v8M19 11v2"/>
+              </svg>
+            </span>
+            <span class="ec-panel-brand">echoly</span>
           </span>
-          <span class="ec-panel-brand">echoly</span>
           <span class="ec-panel-live"><span class="ec-live-dot" aria-hidden="true"></span>Live</span>
           <div class="ec-panel-head-actions">
             <button type="button" class="ec-panel-collapse" data-ec-collapse aria-label="Collapse" title="Collapse">
@@ -161,8 +172,8 @@ export function clampLayout(
   vw: number,
   vh: number,
 ): Layout & { width: number; height: number } {
-  const dockW = 248;
-  const dockH = 46;
+  const dockW = DOCK_W;
+  const dockH = DOCK_H;
   const left =
     layout.left == null
       ? null

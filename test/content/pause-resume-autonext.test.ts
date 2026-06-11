@@ -291,6 +291,11 @@ describe("pause-controller — pauseSession", () => {
       renderCursor: 0,
       rollingInFlight: false,
       stopFlag: false,
+      _batchRequestIds: new Map(),
+      _sentBatchRanges: new Map(),
+      _renderEpoch: 0,
+      _pendingLines: new Set(),
+      _pendingFirstQueuedAt: 0,
     } as SubtitleFirstSession;
     const app = makeFakeApp(sfSess);
     pauseSession(app);
@@ -812,6 +817,11 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
       renderCursor: 0,
       rollingInFlight: false,
       stopFlag: false,
+      _batchRequestIds: new Map(),
+      _sentBatchRanges: new Map(),
+      _renderEpoch: 0,
+      _pendingLines: new Set(),
+      _pendingFirstQueuedAt: 0,
     };
     app.sm.session = sfSess;
     app.sm.pageToken = 1;
@@ -885,6 +895,11 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
       renderCursor: 0,
       rollingInFlight: false,
       stopFlag: false,
+      _batchRequestIds: new Map(),
+      _sentBatchRanges: new Map(),
+      _renderEpoch: 0,
+      _pendingLines: new Set(),
+      _pendingFirstQueuedAt: 0,
     };
     app.sm.session = sfSess;
     app.sm.pageToken = 1;
@@ -948,6 +963,11 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
       abortController: new AbortController(),
       sentences: [], translations: [], currentSource: null, currentPlayingIdx: null,
       playbackTimer: null, renderCursor: 0, rollingInFlight: false, stopFlag: false,
+      _batchRequestIds: new Map(),
+      _sentBatchRanges: new Map(),
+      _renderEpoch: 0,
+      _pendingLines: new Set(),
+      _pendingFirstQueuedAt: 0,
     };
     app.sm.session = sfSess;
     app.sm.pageToken = 1;
@@ -1057,6 +1077,11 @@ describe("SubtitleFirstPipeline.restart — old driver eviction", () => {
       renderCursor: 0,
       rollingInFlight: false,
       stopFlag: false,
+      _batchRequestIds: new Map(),
+      _sentBatchRanges: new Map(),
+      _renderEpoch: 0,
+      _pendingLines: new Set(),
+      _pendingFirstQueuedAt: 0,
     };
     sm.session = oldSess;
     sm.pageToken = 1;

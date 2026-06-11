@@ -64,10 +64,8 @@ export const youtubeAdapter: PlatformAdapter = {
   },
 
   stageInsets(_video: HTMLVideoElement): { top: number; bottom: number; side: number } {
-    // YouTube player chrome: 72px controls bar at bottom, 52px top chrome,
-    // 20px horizontal padding. Matches the legacy `stageInsets("youtube")` in
-    // `src/content/media-stage.ts`.
-    return { bottom: 72, top: 52, side: 20 };
+    // Player container rect (not letterboxed <video>) — small top/side pads inside chrome.
+    return { bottom: 56, top: 10, side: 12 };
   },
 
   async fetchCaptions(opts: {

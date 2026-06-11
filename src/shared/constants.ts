@@ -19,8 +19,16 @@ export const EC_SESSION_COOKIE = "ec_session";
 export const SESSION_LIMIT_MS = 60 * 60 * 1000;
 export const SESSION_WARNING_MS = 55 * 60 * 1000;
 export const HEARTBEAT_MS = 30_000;
-/** Realtime pipeline only: signals live mint at SDP (must exceed server CLIP_MAX_SEC). */
-export const RTC_LIVE_DURATION_HINT_SEC = 3600;
+/**
+ * Cap for the durationHintSec sent to /v1/rtc/translate for live streams.
+ * Matches the server-side RESERVE_HINT_CAP_CMIN default (≈10 min worth).
+ * A live stream hint no larger than this cap avoids over-reserving credits
+ * on session start; the server's top-up machinery handles the rest. It still
+ * exceeds server CLIP_MAX_SEC, so it keeps signaling live mint at SDP.
+ * Value: 600 seconds = 10 minutes.
+ * (credit-flow-review WS5.2 — replaced the old 3600s RTC_LIVE_DURATION_HINT_SEC.)
+ */
+export const RTC_LIVE_DURATION_HINT_CAP_SEC = 600;
 export const CAPTION_POLL_MS = 350;
 export const HISTORY_MAX = 16;
 export const VOICE_GAIN_MAX = 2.0;

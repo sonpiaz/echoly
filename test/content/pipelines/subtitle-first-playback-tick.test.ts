@@ -31,6 +31,10 @@ vi.mock("@/lib/echoly-api", () => ({
   // the playback-tick tests drive the buffered path via renderSubtitleDubBatch,
   // so stream is never called here — provide a no-op async generator stub.
   renderSubtitleDubStream: vi.fn(async function* () {}),
+  // newRequestId is used by #renderBatch to generate stable per-batch ids.
+  newRequestId: (prefix: string) => `${prefix}_mock-uuid`,
+  // ALREADY_PROCESSED sentinel used by #renderBatch for idempotency replays.
+  ALREADY_PROCESSED: Symbol("already_processed"),
 }));
 
 import { renderSubtitleDubBatch, renderSubtitleDubStream } from "@/lib/echoly-api";
