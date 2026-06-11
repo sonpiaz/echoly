@@ -127,6 +127,8 @@ function makeSubtitleFirstSession(): SubtitleFirstSession {
     _renderEpoch: 0,
     _pendingLines: new Set(),
     _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
   } as SubtitleFirstSession;
 }
 

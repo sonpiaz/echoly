@@ -228,8 +228,12 @@ export class Store {
       const canRt = canUseRealtime(this.state.signedInUser?.tier);
       this.state.tier = wantsRealtime && !canRt ? TIER_STANDARD : s.mode;
     }
-    if (s.targetLanguage !== undefined) this.state.targetLanguage = s.targetLanguage;
-    if (s.sourceLanguage !== undefined) this.state.sourceLanguage = s.sourceLanguage;
+    // Truthy guard (not `!== undefined`): a defined-but-empty "" language code from a
+    // legacy/corrupt server bundle must NOT overwrite the good in-memory default
+    // (would propagate blank to the overlay LANGUAGE dropdown). Voices keep the
+    // `!== undefined` guard — "" is a valid "no voice / Auto" value there.
+    if (s.targetLanguage) this.state.targetLanguage = s.targetLanguage;
+    if (s.sourceLanguage) this.state.sourceLanguage = s.sourceLanguage;
     if (s.standardVoice !== undefined) this.state.standardVoice = s.standardVoice;
     if (s.realtimeVoice !== undefined) this.state.realtimeVoice = s.realtimeVoice;
     if (s.showSource !== undefined) this.state.showSource = s.showSource;

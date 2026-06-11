@@ -172,7 +172,9 @@ export type YtCcUrlResult =
     }
   | { ok: false };
 
-export type LaunchStateResult = { ok: true; signedIn: boolean } | { ok: false };
+export type LaunchStateResult =
+  | { ok: true; signedIn: boolean; tier?: import("@/shared/constants").TranslationTier }
+  | { ok: false };
 
 export interface ContentToBgResponse {
   CONTENT_STATE: Ok;

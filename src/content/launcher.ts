@@ -10,8 +10,19 @@
 // Visibility is DERIVED state: signedIn && hasVideo && !sm.session && !starting.
 // The host (content/index.ts) calls refresh() on session start/stop; a periodic
 // tick re-evaluates for SPA navigation + sign-in changes.
+//
+// Pre-warm (R1): on mouseenter/focus of the launcher button, when the active tier
+// is REALTIME and no session is running, the launcher sends PREPARE_INTENT to the
+// background. The background resolves the bearer + language, then relays
+// CONTENT_PREPARE_INTENT to this content tab, where the content-script handler
+// calls app.webrtc.prepareIntent() — the same path the popup hover uses. A
+// fire-once-per-arming flag prevents repeated calls on rapid mousemoves; it resets
+// on mouseleave/blur so a second genuine hover may fire again (matching
+// popup/index.ts:990-1006 exactly). Standard mode: guard skips — /v1/rtc/prepare
+// only benefits realtime (pre-dialed provider WS + warm transport).
 
 import type { ContentApp } from "./index";
+import { TIER_REALTIME } from "@/shared/constants";
 
 const KEEPALIVE_MS = 20_000;
 const START_OPTIMISTIC_HIDE_MS = 3000;
@@ -88,6 +99,26 @@ export class QuickStartLauncher {
   #pos: LauncherPos = loadLauncherPos();
   #suppressClick = false;
   #destroyed = false;
+  /**
+   * Current translation tier from the last GET_LAUNCH_STATE reply.
+   * Used to gate the pre-warm hover: only send PREPARE_INTENT when realtime.
+   * Defaults to "standard" (conservative — won't send until the tier is confirmed).
+   */
+  #tier: string = "standard";
+  /**
+   * Fire-once-per-arming debounce for PREPARE_INTENT (mirrors popup/index.ts:990).
+   * Set to true after firing; reset on mouseleave/blur so a second genuine hover
+   * may fire again.
+   */
+  #prepareIntentSent = false;
+  /**
+   * Bound event handlers for hover pre-warm — stored so they can be removed when
+   * the button is unmounted (#remove).
+   */
+  #onMouseEnter: (() => void) | null = null;
+  #onFocus: (() => void) | null = null;
+  #onMouseLeave: (() => void) | null = null;
+  #onBlur: (() => void) | null = null;
 
   constructor(app: ContentApp) {
     this.#app = app;
@@ -152,8 +183,14 @@ export class QuickStartLauncher {
     try {
       const reply = (await chrome.runtime.sendMessage({
         type: "GET_LAUNCH_STATE",
-      })) as { ok: true; signedIn: boolean } | { ok: false } | undefined;
+      })) as { ok: true; signedIn: boolean; tier?: string } | { ok: false } | undefined;
       this.#signedIn = !!(reply && reply.ok && reply.signedIn);
+      if (reply && reply.ok && reply.tier) {
+        this.#tier = reply.tier;
+        // Tier changed — reset the pre-warm flag so the next hover may fire again
+        // (avoids stale debounce if the user switched tier between ticks).
+        this.#prepareIntentSent = false;
+      }
     } catch {
       /* keep last known sign-in state */
     }
@@ -208,6 +245,24 @@ export class QuickStartLauncher {
     this.#el.style.transform = "translateY(-50%)";
   }
 
+  /**
+   * Send PREPARE_INTENT to the background when:
+   *   • the resolved tier is realtime (only realtime benefits from a warm slot);
+   *   • no session is already live (a warm slot while running is useless);
+   *   • not already sent this hover session (fire-once-per-arming debounce).
+   * The background resolves bearer + language via decideApiMode (no network on
+   * hover) and relays CONTENT_PREPARE_INTENT → content handler →
+   * app.webrtc.prepareIntent().  Any bg/network failure is a silent no-op.
+   */
+  #maybeSendPrepareIntent(): void {
+    if (this.#tier !== TIER_REALTIME) return; // standard: no warm WS benefit
+    if (this.#app.sm.session) return;          // already live — slot would be wasted
+    if (this.#starting) return;                // start in flight — already on the hot path
+    if (this.#prepareIntentSent) return;       // fire-once-per-arming debounce
+    this.#prepareIntentSent = true;
+    void chrome.runtime.sendMessage({ type: "PREPARE_INTENT" })?.catch?.(() => {});
+  }
+
   #mount(): void {
     if (this.#el) return;
     const btn = document.createElement("button");
@@ -231,6 +286,19 @@ export class QuickStartLauncher {
 
     btn.addEventListener("click", this.#onClick);
     this.#bindDrag(btn);
+
+    // ── Pre-warm hover (R1) ──────────────────────────────────────────────────
+    // Mirror the popup's mouseenter/focus pattern (popup/index.ts:1001-1006).
+    // Bound handlers are stored so #remove() can clean them up.
+    this.#onMouseEnter = () => this.#maybeSendPrepareIntent();
+    this.#onFocus = () => this.#maybeSendPrepareIntent();
+    this.#onMouseLeave = () => { this.#prepareIntentSent = false; };
+    this.#onBlur = () => { this.#prepareIntentSent = false; };
+    btn.addEventListener("mouseenter", this.#onMouseEnter);
+    btn.addEventListener("focus", this.#onFocus);
+    btn.addEventListener("mouseleave", this.#onMouseLeave);
+    btn.addEventListener("blur", this.#onBlur);
+
     document.body.appendChild(btn);
     this.#el = btn;
     this.#applyPos();
@@ -305,9 +373,20 @@ export class QuickStartLauncher {
     this.#unbindDrag = null;
     if (this.#el) {
       this.#el.removeEventListener("click", this.#onClick);
+      // Remove pre-warm hover listeners.
+      if (this.#onMouseEnter) this.#el.removeEventListener("mouseenter", this.#onMouseEnter);
+      if (this.#onFocus) this.#el.removeEventListener("focus", this.#onFocus);
+      if (this.#onMouseLeave) this.#el.removeEventListener("mouseleave", this.#onMouseLeave);
+      if (this.#onBlur) this.#el.removeEventListener("blur", this.#onBlur);
+      this.#onMouseEnter = null;
+      this.#onFocus = null;
+      this.#onMouseLeave = null;
+      this.#onBlur = null;
       this.#el.remove();
       this.#el = null;
     }
+    // Reset the fire-once debounce so a re-mounted button starts fresh.
+    this.#prepareIntentSent = false;
   }
 
   #onClick = (e: MouseEvent): void => {

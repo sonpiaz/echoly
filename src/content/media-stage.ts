@@ -8,6 +8,7 @@
 
 import type { CaptionStripPlacement } from "@/shared/advanced";
 import type { PlatformAdapter } from "@/shared/platform-ports";
+import { CAPTION_BOTTOM_INSET } from "@/shared/platform-ports";
 
 // ── Active adapter (set by ContentApp at session init, cleared on stop) ────────
 
@@ -84,9 +85,9 @@ export function findPrimaryVideo(): HTMLVideoElement | null {
 export function stageInsets(platform: MediaPlatform): MediaStageInsets {
   switch (platform) {
     case "youtube":
-      return { bottom: 56, top: 10, side: 12 };
+      return { bottom: CAPTION_BOTTOM_INSET, top: 10, side: 12 };
     default:
-      return { bottom: 56, top: 44, side: 16 };
+      return { bottom: CAPTION_BOTTOM_INSET, top: 44, side: 16 };
   }
 }
 

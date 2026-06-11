@@ -595,7 +595,7 @@ describe("courseraAdapter — capabilities and other methods", () => {
     const video = document.createElement("video");
     const insets = courseraAdapter.stageInsets(video);
     expect(insets.top).toBe(12);
-    expect(insets.bottom).toBe(56);
+    expect(insets.bottom).toBe(72);
     expect(insets.side).toBe(16);
   });
 

@@ -22,6 +22,7 @@ import type {
   CaptionFetchResult,
   CaptionCue,
 } from "@/shared/platform-ports";
+import { CAPTION_BOTTOM_INSET } from "@/shared/platform-ports";
 import { parseVtt } from "@/lib/vtt-parse";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -191,8 +192,9 @@ export const courseraAdapter: PlatformAdapter = {
   stageInsets(
     _video: HTMLVideoElement,
   ): { top: number; bottom: number; side: number } {
-    // Clears Coursera's top toolbar (~48 px) and bottom player controls (~56 px).
-    return { top: 12, bottom: 56, side: 16 };
+    // Clears Coursera's top toolbar (~48 px) and bottom player controls; bottom
+    // uses the standardized clearance (shared const) for cross-platform parity.
+    return { top: 12, bottom: CAPTION_BOTTOM_INSET, side: 16 };
   },
 
   async fetchCaptions(opts: {

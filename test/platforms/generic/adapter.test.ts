@@ -122,7 +122,7 @@ describe("genericAdapter.stageInsets", () => {
   it("returns conservative default insets", () => {
     const video = document.createElement("video");
     const insets = genericAdapter.stageInsets(video);
-    expect(insets.bottom).toBe(56);
+    expect(insets.bottom).toBe(72);
     expect(insets.top).toBe(44);
     expect(insets.side).toBe(16);
   });

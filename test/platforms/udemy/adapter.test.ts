@@ -452,7 +452,7 @@ describe("stageInsets", () => {
   it("returns the expected Udemy player chrome insets", () => {
     const video = document.createElement("video");
     const insets = udemyAdapter.stageInsets(video);
-    expect(insets).toEqual({ top: 12, bottom: 56, side: 16 });
+    expect(insets).toEqual({ top: 12, bottom: 72, side: 16 });
   });
 });
 

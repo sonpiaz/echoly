@@ -143,4 +143,25 @@ describe("Store.applyServerBundle — 3/7 split (C7)", () => {
     expect(store.state.advanced.captionPosition).toBe("top");
     expect(store.state.targetLanguage).toBe("fr");
   });
+
+  it("does NOT overwrite a good language with an empty-string code from the bundle (lang-default-empty fix)", async () => {
+    const store = buildStore();
+    // First a healthy bundle sets concrete language codes.
+    await store.applyServerBundle(BASE_BUNDLE);
+    expect(store.state.targetLanguage).toBe("ja");
+    expect(store.state.sourceLanguage).toBe("en");
+
+    // A later (legacy/corrupt) bundle carries empty-string codes. The truthy guard
+    // must keep the existing good values rather than propagating "" to the overlay
+    // LANGUAGE dropdown (which would render blank). Voices keep `!== undefined`.
+    const emptyLangBundle = {
+      ...BASE_BUNDLE,
+      settings: { ...BASE_BUNDLE.settings, targetLanguage: "", sourceLanguage: "" },
+      version: 7,
+    };
+    await store.applyServerBundle(emptyLangBundle);
+
+    expect(store.state.targetLanguage).toBe("ja");
+    expect(store.state.sourceLanguage).toBe("en");
+  });
 });

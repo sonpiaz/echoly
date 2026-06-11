@@ -46,7 +46,11 @@ export interface SubtitleFirstSession extends BaseSession {
   /** Handle for the 250ms playback-tick interval — cleared on stop. */
   playbackTimer: ReturnType<typeof setInterval> | null;
   renderCursor: number;
-  /** Prevents overlapping rolling-tick work (duplicate renderBatch). */
+  /**
+   * @deprecated replaced by _inflightRanges — kept temporarily to ease the
+   * transition; the pipeline now uses _inflightRanges / _resolvedAhead.
+   * Remove once the old reference sites are cleaned up.
+   */
   rollingInFlight: boolean;
   stopFlag: boolean;
   _onSeeked?: () => void;
@@ -84,16 +88,15 @@ export interface SubtitleFirstSession extends BaseSession {
   // ── Coalescing state (batch-coalescing rolling renderer) ─────────────────
   /**
    * Set of sentence indices waiting to be flushed as a single coalesced batch.
-   * The rolling renderer accumulates cache-miss lines here instead of requesting
-   * each one immediately.  Flushed when ≥3 lines pending, the earliest pending
-   * line is within 8 s of the playhead, or 6 s have elapsed since the first
-   * pending line was queued.
+   * Only used for legacy compatibility — the new pipelined renderer uses
+   * _inflightRanges and _resolvedAhead instead.
+   * @deprecated use _inflightRanges / _resolvedAhead
    */
   _pendingLines: Set<number>;
   /**
    * wall-clock timestamp (Date.now()) when the FIRST line was added to
-   * `_pendingLines` in the current accumulation run.  Used to implement the
-   * 6-second elapsed-time flush guard.  Reset to 0 when the set is flushed.
+   * `_pendingLines` in the current accumulation run.
+   * @deprecated use _inflightRanges / _resolvedAhead
    */
   _pendingFirstQueuedAt: number;
   /**
@@ -103,6 +106,24 @@ export interface SubtitleFirstSession extends BaseSession {
    * seek-updated renderCursor from being clobbered by a stale in-flight response.
    */
   _renderEpoch: number;
+
+  // ── Pipelined prefetch state (C2 — bounded-concurrency rolling renderer) ──
+  /**
+   * Set of currently in-flight batch range keys `"${startIdx}-${endIdx}"`.
+   * The rolling renderer adds a key when a #renderBatch is issued and removes
+   * it when that batch completes (or the epoch changes on seek).  Never advanced
+   * speculatively — only real in-flight fetches are tracked here so renderCursor
+   * is never jumped past an un-resolved range.
+   */
+  _inflightRanges: Set<string>;
+  /**
+   * Set of batch range keys `"${startIdx}-${endIdx}"` that have completed but
+   * cannot yet advance renderCursor because a lower range is still in flight.
+   * Contiguous-folded into renderCursor on each completion: while the lowest
+   * _resolvedAhead key starts exactly at renderCursor, renderCursor is advanced
+   * to its end and the key is dropped.
+   */
+  _resolvedAhead: Set<string>;
   /**
    * The adapter-derived video id for this session (adapter.getVideoId result).
    * Used as the first component of render-cache keys so cache entries are

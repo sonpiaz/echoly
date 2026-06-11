@@ -64,13 +64,21 @@ describe("routeMessage — channel semantics (sender.tab pivot)", () => {
   it("GET_LAUNCH_STATE (content) reports signed-out and keeps SW warm (sync)", () => {
     const { ret, response } = route(deps, { type: "GET_LAUNCH_STATE" }, CONTENT_SENDER);
     expect(ret).toBe(false);
-    expect(response()).toEqual({ ok: true, signedIn: false });
+    // R1: response now includes `tier` so the launcher can gate the pre-warm hover.
+    const result = response() as { ok: boolean; signedIn: boolean; tier?: string };
+    expect(result.ok).toBe(true);
+    expect(result.signedIn).toBe(false);
+    expect(typeof result.tier).toBe("string"); // tier is always present
   });
 
   it("GET_LAUNCH_STATE (content) reports signed-in when a user is present", () => {
     deps.store.setSignedInUser({ email: "u@x.com" } as never);
     const { response } = route(deps, { type: "GET_LAUNCH_STATE" }, CONTENT_SENDER);
-    expect(response()).toEqual({ ok: true, signedIn: true });
+    // R1: includes tier alongside signedIn.
+    const result = response() as { ok: boolean; signedIn: boolean; tier?: string };
+    expect(result.ok).toBe(true);
+    expect(result.signedIn).toBe(true);
+    expect(typeof result.tier).toBe("string");
   });
 
   it("START_REQUEST (launcher) runs the same start path as the popup", () => {

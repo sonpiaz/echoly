@@ -721,7 +721,12 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
     }
 
     populateVoicePicker(activeTier, undefined, signedInProxy);
-    if (elements.langSelect) elements.langSelect.value = selectedLanguage;
+    // Guard the initial selection so an unknown code can't blank the dropdown at
+    // mount (selectedIndex -1); fall back to the first populated option.
+    if (elements.langSelect && elements.langSelect.options.length) {
+      setSelectValue(elements.langSelect, selectedLanguage, langOptions[0]?.[0] ?? selectedLanguage);
+      selectedLanguage = elements.langSelect.value;
+    }
     syncVoiceChrome();
 
     const bindMix = (input: HTMLInputElement | null, out: HTMLOutputElement | null) => {
@@ -1047,8 +1052,16 @@ export const createOverlay: CreateOverlay = (): OverlayView => {
   // mounted. Tracks selectedLanguage so subsequent setTargetText applies the
   // correct RTL/LTR direction.
   function setLanguageSelection(lang: string): void {
-    selectedLanguage = lang;
-    if (elements.langSelect) elements.langSelect.value = lang;
+    // Guard: setting langSelect.value to a code absent from the current options
+    // leaves selectedIndex = -1 → a BLANK dropdown (the reported bug). Route through
+    // setSelectValue (presence-checked, falls back to the first option) and track the
+    // actual resulting value — mirrors the popup's applySignedLanguageGate.
+    if (elements.langSelect && elements.langSelect.options.length) {
+      setSelectValue(elements.langSelect, lang, elements.langSelect.options[0]!.value);
+      selectedLanguage = elements.langSelect.value;
+    } else {
+      selectedLanguage = lang;
+    }
   }
 
   /** Apply a caption-position preset live (Advanced setting hot-swap) AND

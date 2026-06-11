@@ -322,10 +322,15 @@ export function routeMessage(
     return false;
   }
 
-  // On-page launcher: report sign-in (gates the launcher). Each call also wakes /
-  // keeps the MV3 service worker warm (P2) so the eventual Start is off the cold path.
+  // On-page launcher: report sign-in (gates the launcher) + current tier (gates
+  // the pre-warm hover). Each call also wakes / keeps the MV3 service worker
+  // warm (P2) so the eventual Start is off the cold path.
   if (isFromContent(sender) && message.type === "GET_LAUNCH_STATE") {
-    sendResponse({ ok: true, signedIn: !!deps.store.state.signedInUser });
+    sendResponse({
+      ok: true,
+      signedIn: !!deps.store.state.signedInUser,
+      tier: deps.store.state.tier,
+    });
     return false;
   }
 

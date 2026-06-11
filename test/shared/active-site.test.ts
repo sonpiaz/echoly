@@ -3,6 +3,7 @@ import {
   domainFromTabUrl,
   findSessionStartTab,
   findYouTubeWatchTab,
+  platformDisplayName,
   resolveSiteDomainFromTabs,
   siteDisplayLabel,
 } from "@/shared/active-site";
@@ -63,6 +64,20 @@ describe("active-site", () => {
       { url: "https://www.youtube.com/watch?v=abc", index: 1 },
     ];
     expect(findSessionStartTab(tabs)?.url).toContain("watch?v=abc");
+  });
+
+  it("platformDisplayName maps recognized platforms (incl. subdomains/www)", () => {
+    expect(platformDisplayName("youtube.com")).toBe("YouTube");
+    expect(platformDisplayName("www.youtube.com")).toBe("YouTube");
+    expect(platformDisplayName("m.youtube.com")).toBe("YouTube");
+    expect(platformDisplayName("coursera.org")).toBe("Coursera");
+    expect(platformDisplayName("www.udemy.com")).toBe("Udemy");
+  });
+
+  it("platformDisplayName returns null for generic/unknown/empty sites", () => {
+    expect(platformDisplayName("example.com")).toBeNull();
+    expect(platformDisplayName(null)).toBeNull();
+    expect(platformDisplayName("notyoutube.com")).toBeNull();
   });
 });
 

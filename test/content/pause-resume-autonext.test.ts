@@ -296,6 +296,8 @@ describe("pause-controller — pauseSession", () => {
       _renderEpoch: 0,
       _pendingLines: new Set(),
       _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
     } as SubtitleFirstSession;
     const app = makeFakeApp(sfSess);
     pauseSession(app);
@@ -822,6 +824,8 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
       _renderEpoch: 0,
       _pendingLines: new Set(),
       _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
     };
     app.sm.session = sfSess;
     app.sm.pageToken = 1;
@@ -900,6 +904,8 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
       _renderEpoch: 0,
       _pendingLines: new Set(),
       _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
     };
     app.sm.session = sfSess;
     app.sm.pageToken = 1;
@@ -968,6 +974,8 @@ describe("auto-next — GAP-1 regression: success block reachable after pageToke
       _renderEpoch: 0,
       _pendingLines: new Set(),
       _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
     };
     app.sm.session = sfSess;
     app.sm.pageToken = 1;
@@ -1082,6 +1090,8 @@ describe("SubtitleFirstPipeline.restart — old driver eviction", () => {
       _renderEpoch: 0,
       _pendingLines: new Set(),
       _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
     };
     sm.session = oldSess;
     sm.pageToken = 1;

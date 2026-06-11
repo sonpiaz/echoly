@@ -1,13 +1,40 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QuickStartLauncher, clampLauncherCenterY } from "@/content/launcher";
+import { TIER_REALTIME, TIER_STANDARD } from "@/shared/constants";
 
-function makeApp(hasVideo = true) {
+function makeApp(hasVideo = true, session: object | null = null) {
   return {
-    sm: { session: null },
+    sm: { session },
     adapter: { findVideo: () => (hasVideo ? document.createElement("video") : null) },
     capture: { findVideo: () => (hasVideo ? document.createElement("video") : null) },
   } as never;
+}
+
+/** Build a chrome.runtime.sendMessage mock that returns different values per
+ *  message type so the launcher's GET_LAUNCH_STATE + PREPARE_INTENT can be
+ *  tracked independently. */
+function makeSendMessage(opts: {
+  tier?: string;
+  signedIn?: boolean;
+}) {
+  return vi.fn().mockImplementation((msg: { type: string }) => {
+    if (msg.type === "GET_LAUNCH_STATE") {
+      return Promise.resolve({
+        ok: true,
+        signedIn: opts.signedIn ?? true,
+        tier: opts.tier ?? TIER_STANDARD,
+      });
+    }
+    return Promise.resolve({ ok: true });
+  });
+}
+
+/** Count PREPARE_INTENT calls in a mock sendMessage's call list. */
+function countPrepareIntentCalls(sendMessage: ReturnType<typeof vi.fn>): number {
+  return (sendMessage.mock.calls as Array<[{ type?: string }]>).filter(
+    (args) => args[0]?.type === "PREPARE_INTENT",
+  ).length;
 }
 
 beforeEach(() => {
@@ -25,7 +52,7 @@ beforeEach(() => {
   }
   vi.stubGlobal("chrome", {
     runtime: {
-      sendMessage: vi.fn().mockResolvedValue({ ok: true, signedIn: true }),
+      sendMessage: makeSendMessage({ tier: TIER_STANDARD, signedIn: true }),
     },
   });
 });
@@ -153,5 +180,143 @@ describe("QuickStartLauncher", () => {
 
     launcher.destroy();
     vi.useRealTimers();
+  });
+});
+
+// ── Realtime launcher pre-warm (R1) ─────────────────────────────────────────
+// When tier=realtime and no session is live, hovering or focusing the Start
+// button sends PREPARE_INTENT to the background, which relays
+// CONTENT_PREPARE_INTENT → app.webrtc.prepareIntent() (existing plumbing).
+// Standard tier: guard skips — no point warming a standard WebRTC slot.
+
+describe("QuickStartLauncher — realtime pre-warm hover (R1)", () => {
+  it("sends PREPARE_INTENT on mouseenter when tier is realtime", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_REALTIME, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const launcher = new QuickStartLauncher(makeApp());
+    await launcher.init(); // GET_LAUNCH_STATE fires here, caches tier=realtime
+
+    const btn = document.querySelector(".ec-launcher") as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+
+    btn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+
+    expect(countPrepareIntentCalls(sendMessage)).toBe(1);
+    launcher.destroy();
+  });
+
+  it("sends PREPARE_INTENT on focus when tier is realtime", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_REALTIME, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const launcher = new QuickStartLauncher(makeApp());
+    await launcher.init();
+
+    const btn = document.querySelector(".ec-launcher") as HTMLButtonElement;
+    btn.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+
+    expect(countPrepareIntentCalls(sendMessage)).toBe(1);
+    launcher.destroy();
+  });
+
+  it("does NOT send PREPARE_INTENT when tier is standard", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_STANDARD, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const launcher = new QuickStartLauncher(makeApp());
+    await launcher.init(); // tier=standard cached
+
+    const btn = document.querySelector(".ec-launcher") as HTMLButtonElement;
+    btn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    btn.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+
+    expect(countPrepareIntentCalls(sendMessage)).toBe(0);
+    launcher.destroy();
+  });
+
+  it("fires PREPARE_INTENT only once per hover session (fire-once-per-arming)", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_REALTIME, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const launcher = new QuickStartLauncher(makeApp());
+    await launcher.init();
+
+    const btn = document.querySelector(".ec-launcher") as HTMLButtonElement;
+
+    // Multiple events in the same hover session must not re-fire.
+    btn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    btn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    btn.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+
+    expect(countPrepareIntentCalls(sendMessage)).toBe(1);
+    launcher.destroy();
+  });
+
+  it("resets fire-once flag on mouseleave so a second hover may fire again", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_REALTIME, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const launcher = new QuickStartLauncher(makeApp());
+    await launcher.init();
+
+    const btn = document.querySelector(".ec-launcher") as HTMLButtonElement;
+
+    // First hover session.
+    btn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    // Leave — resets the flag.
+    btn.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+    // Second hover session — should fire again.
+    btn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+
+    expect(countPrepareIntentCalls(sendMessage)).toBe(2);
+    launcher.destroy();
+  });
+
+  it("resets fire-once flag on blur so a second focus may fire again", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_REALTIME, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const launcher = new QuickStartLauncher(makeApp());
+    await launcher.init();
+
+    const btn = document.querySelector(".ec-launcher") as HTMLButtonElement;
+
+    btn.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+    btn.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    btn.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+
+    expect(countPrepareIntentCalls(sendMessage)).toBe(2);
+    launcher.destroy();
+  });
+
+  it("does NOT send PREPARE_INTENT when a session is already live (button not mounted)", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_REALTIME, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    // A live session makes #shouldShow()=false → button not mounted → no hover possible.
+    const launcher = new QuickStartLauncher(makeApp(true, { id: "live" }));
+    await launcher.init();
+
+    const btn = document.querySelector(".ec-launcher");
+    expect(btn).toBeNull(); // not mounted
+
+    expect(countPrepareIntentCalls(sendMessage)).toBe(0);
+    launcher.destroy();
+  });
+
+  it("does NOT send PREPARE_INTENT at mount time — only on explicit hover/focus", async () => {
+    const sendMessage = makeSendMessage({ tier: TIER_REALTIME, signedIn: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const launcher = new QuickStartLauncher(makeApp());
+    await launcher.init(); // mounts, but must NOT fire prepare eagerly
+
+    // Button is present.
+    expect(document.querySelector(".ec-launcher")).not.toBeNull();
+
+    // No PREPARE_INTENT without a hover event (RISK-4 guard).
+    expect(countPrepareIntentCalls(sendMessage)).toBe(0);
+    launcher.destroy();
   });
 });

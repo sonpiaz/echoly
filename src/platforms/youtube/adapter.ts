@@ -4,6 +4,7 @@
 // logic (behavior-preserving) moved into this directory.
 
 import type { PlatformAdapter, PlatformCapabilities, CaptionFetchResult } from "@/shared/platform-ports";
+import { CAPTION_BOTTOM_INSET } from "@/shared/platform-ports";
 import { getYouTubeVideoId } from "./captions";
 import { fetchYouTubeCaptionsWithSettle, readPlayerResponseFromDom } from "./captions-fetch";
 import { installYoutubeCaptionCache } from "./caption-cache";
@@ -65,7 +66,8 @@ export const youtubeAdapter: PlatformAdapter = {
 
   stageInsets(_video: HTMLVideoElement): { top: number; bottom: number; side: number } {
     // Player container rect (not letterboxed <video>) — small top/side pads inside chrome.
-    return { bottom: 56, top: 10, side: 12 };
+    // bottom is the standardized clearance above the controls/scrubber (shared const).
+    return { bottom: CAPTION_BOTTOM_INSET, top: 10, side: 12 };
   },
 
   async fetchCaptions(opts: {

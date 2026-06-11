@@ -31,7 +31,7 @@ import {
   type PopupToBgResponse,
 } from "@/shared/protocol";
 import type { State } from "@/shared/types";
-import { siteDisplayLabel } from "@/shared/active-site";
+import { siteDisplayLabel, platformDisplayName } from "@/shared/active-site";
 import { canUseRealtime, canUseSubtitleStyling } from "@/shared/tier";
 import {
   DEFAULT_ADVANCED,
@@ -729,7 +729,12 @@ export function initPopup(): void {
       toggleBtn.classList.remove("is-live");
     } else {
       setStateClass("idle");
-      if (acct === "in") statusEl.textContent = "Ready.";
+      if (acct === "in") {
+        // Announce a recognized platform (YouTube/Udemy/Coursera) so the user sees
+        // the active site was detected; generic sites keep the plain ready state.
+        const platform = platformDisplayName(state.currentDomain ?? null);
+        statusEl.textContent = platform ? `Ready · ${platform} detected` : "Ready.";
+      }
       else if (acct === "locked") statusEl.textContent = "Signed out · settings read-only";
       else statusEl.textContent = "Sign in to start";
       setActionLabel("Start dubbing");

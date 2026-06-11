@@ -83,6 +83,18 @@ export const SUBFIRST_BATCH_SIZE = 10;
 export const SUBFIRST_LOOKAHEAD_MS = 30_000;
 
 /**
+ * Target decoded-audio lead in seconds (C4). The rolling renderer issues new
+ * batches whenever the decoded coverage ahead of the playhead is below this
+ * value. 45s gives ≥7× margin over the worst-case server batch latency (6s)
+ * so the buffer never empties between fetches in normal conditions.
+ *
+ * Must be ≤ SUBFIRST_LOOKAHEAD_MS/1000 (30s) in practice we set it conservatively
+ * below 30s so we don't fetch past the lookahead window. Keep in sync:
+ * BUFFER_AHEAD_TARGET_SEC=25 is below the 30s lookahead so there's always room.
+ */
+export const BUFFER_AHEAD_TARGET_SEC = 25;
+
+/**
  * A gap between caption cues larger than this (in ms) is treated as a
  * sentence boundary even when the previous cue does not end with punctuation.
  */

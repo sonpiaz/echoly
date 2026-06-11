@@ -15,6 +15,7 @@ import type {
   PlatformCapabilities,
   CaptionFetchResult,
 } from "@/shared/platform-ports";
+import { CAPTION_BOTTOM_INSET } from "@/shared/platform-ports";
 import { parseVtt } from "@/lib/vtt-parse";
 
 // ─── Capabilities ──────────────────────────────────────────────────────────────
@@ -166,11 +167,11 @@ export const udemyAdapter: PlatformAdapter = {
   /**
    * Insets clearing Udemy's Shaka player chrome:
    *   top: 12px  — thin progress bar / header gradient
-   *   bottom: 56px — control bar height
+   *   bottom: standardized clearance (shared const) above the control bar
    *   side: 16px — narrow side padding
    */
   stageInsets(_video: HTMLVideoElement): { top: number; bottom: number; side: number } {
-    return { top: 12, bottom: 56, side: 16 };
+    return { top: 12, bottom: CAPTION_BOTTOM_INSET, side: 16 };
   },
 
   // ─── Caption acquisition ────────────────────────────────────────────────

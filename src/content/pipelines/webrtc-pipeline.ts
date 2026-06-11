@@ -39,6 +39,10 @@ interface CtaError extends Error {
 export interface WebRtcBuildOpts {
   apiBearer: string;
   targetLanguage: string;
+  /** Source language code (e.g. "en"). "auto"/empty ⇒ omitted (server records
+   *  lang_source=null, ledger shows "auto→…"). Sent so the realtime leg records
+   *  the real source language instead of NULL (credit-account-audit follow-up). */
+  sourceLanguage?: string;
   pipeline: WebRtcSignalingPipeline;
   voice: string;
   durationHintSec?: number;
@@ -363,6 +367,11 @@ export class WebRtcPipeline {
       targetLanguage: lang,
       pipeline: opts.pipeline,
     });
+    // Send the real source language so the server records lang_source (server
+    // reads query.sourceLanguage). Omit "auto"/empty ⇒ server keeps null ⇒
+    // ledger shows "auto→…" rather than the literal "auto".
+    const srcLang = opts.sourceLanguage?.trim();
+    if (srcLang && srcLang.toLowerCase() !== "auto") qs.set("sourceLanguage", srcLang);
     if (opts.voice) qs.set("voice", opts.voice);
     if (
       opts.durationHintSec != null &&
@@ -594,6 +603,7 @@ export class WebRtcPipeline {
       newSession = await this.buildSession(newToken, stream!, {
         apiBearer: settings.apiBearer,
         targetLanguage: settings.targetLanguage,
+        sourceLanguage: settings.sourceLanguage,
         pipeline,
         voice: voice ?? "",
         durationHintSec,
@@ -713,6 +723,7 @@ export class WebRtcPipeline {
       newSession = await this.buildSession(newToken, session.stream, {
         apiBearer: newSettings.apiBearer,
         targetLanguage: newSettings.targetLanguage,
+        sourceLanguage: newSettings.sourceLanguage,
         pipeline,
         voice: nextVoice,
         durationHintSec,

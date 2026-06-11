@@ -99,6 +99,19 @@ export interface CaptionFetchResult {
 }
 
 /**
+ * Standardized clearance (px) between the bottom of the on-video caption stack
+ * and the bottom edge of the player stage — i.e. how far the subtitle sits ABOVE
+ * the player controls / seek bar. Single source of truth so every platform keeps
+ * the SAME bottom gap (the caption stack is bottom-anchored, so this value also
+ * governs the 2-line / realtime case — the card grows upward, its bottom stays).
+ *
+ * Raised from the old 56px: 56px left only a few px above YouTube's scrubber, so
+ * a 2-line realtime caption visually overlapped the seek bar. 72px clears the
+ * ~48–60px control region on YouTube/Udemy/Coursera with margin to spare.
+ */
+export const CAPTION_BOTTOM_INSET = 72;
+
+/**
  * Per-platform strategy object.
  *
  * The registry (`src/platforms/registry.ts`) returns one instance per tab

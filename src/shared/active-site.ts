@@ -65,6 +65,22 @@ export function siteDisplayLabel(domain: string | null): string {
 }
 
 /**
+ * Friendly name for a RECOGNIZED dubbing platform, or null for generic/unknown
+ * sites. Drives the idle status line so the popup confirms "we detected YouTube"
+ * on the platforms with first-class caption support (mirrors the PlatformAdapter
+ * registry's matchesHost — kept as a tiny standalone map so the popup needn't
+ * import the whole content-side registry).
+ */
+export function platformDisplayName(domain: string | null): string | null {
+  if (!domain) return null;
+  const d = domain.replace(/^www\./, "").toLowerCase();
+  if (d === "youtube.com" || d.endsWith(".youtube.com")) return "YouTube";
+  if (d === "coursera.org" || d.endsWith(".coursera.org")) return "Coursera";
+  if (d === "udemy.com" || d.endsWith(".udemy.com")) return "Udemy";
+  return null;
+}
+
+/**
  * YouTube watch tab to start translation on.
  *
  * When the popup is a normal tab (E2E / dev), the active tab is

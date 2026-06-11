@@ -16,6 +16,7 @@ import type {
   PlatformCapabilities,
   CaptionFetchResult,
 } from "@/shared/platform-ports";
+import { CAPTION_BOTTOM_INSET } from "@/shared/platform-ports";
 
 const GENERIC_CAPABILITIES: PlatformCapabilities = {
   audioCapture: true,
@@ -88,9 +89,9 @@ export const genericAdapter: PlatformAdapter = {
   },
 
   stageInsets(_video: HTMLVideoElement): { top: number; bottom: number; side: number } {
-    // Conservative defaults that match the "generic" branch of the legacy
-    // media-stage.ts stageInsets() function.
-    return { bottom: 56, top: 44, side: 16 };
+    // Conservative defaults; bottom uses the standardized clearance (shared const)
+    // so the caption clears the controls consistently with the other platforms.
+    return { bottom: CAPTION_BOTTOM_INSET, top: 44, side: 16 };
   },
 
   async fetchCaptions(_opts: {

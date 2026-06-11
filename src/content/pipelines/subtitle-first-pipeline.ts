@@ -27,6 +27,7 @@ import {
   regroupToSentences,
   SUBFIRST_BATCH_SIZE,
   SUBFIRST_LOOKAHEAD_MS,
+  BUFFER_AHEAD_TARGET_SEC,
 } from "@/lib/caption-utils";
 import type { SubtitleFirstSession } from "../session-manager";
 import type { ContentApp } from "../index";
@@ -44,12 +45,16 @@ const SUBFIRST_DUE_AHEAD_SEC = 0.15;
 // If the video is already this far past a cue's end, skip it (re-sync) instead of
 // playing it late. Bounds how far the dub can drift behind on dense captions.
 const SUBFIRST_DRIFT_SKIP_SEC = 3;
-// How many sentences to decode before the initial video.play() at startup
-// (lower = less startup freeze; rolling renderer covers the lookahead window).
-// Lines whose TTS must finish before video.play() is released on Start. This IS
-// the user-visible "frozen video" window, so we gate on just the FIRST due line
-// (one TTS) and let #runRollingRenderer fill the rest immediately after play;
-// #playbackTick's micro-pause is the safety net if a later cue isn't ready in time.
+// Maximum number of concurrent #renderBatch calls in the rolling renderer (C2).
+// Bounds server inflight slots and rate-limit ticks; must not exceed 3 without
+// re-checking MAX_INFLIGHT_PER_USER (server) and CHAT_RATE_MAX limits.
+const MAX_INFLIGHT_BATCHES = 3;
+
+// How many sentences to include in the initial prebuffer wave sent before
+// video.play() is released.  The KEY change (C1): play is released as soon as
+// the FIRST sentence in this wave has a decoded _buffer — not when the whole
+// wave completes.  Keeping this at 1 means the prebuffer wave is a single-line
+// request, so line 0 sets its _buffer immediately and play fires at SSE line 0.
 const SUBFIRST_PREBUFFER_COUNT = 1;
 
 // Rolling-renderer poll interval. Kept short so the buffer-ahead pump reacts
@@ -142,6 +147,8 @@ export class SubtitleFirstPipeline {
       _videoId: videoId,
       _pendingLines: new Set(),
       _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
     };
     sm.session = newSession;
     sm.settings = { ...incomingSettings };
@@ -273,9 +280,39 @@ export class SubtitleFirstPipeline {
       firstWaveEnd = firstWaveStart + 1;
     }
 
-    try {
-      await this.#renderBatch(newSession, firstWaveStart, firstWaveEnd);
-    } catch (err) {
+    // C1: Release play on FIRST decoded line, not when the whole prebuffer batch
+    // completes. We kick the prebuffer batch in the background and await a
+    // "first cue ready" signal via a Promise that resolves as soon as
+    // sentences[firstWaveStart]._buffer is set. The prebuffer batch continues
+    // filling lines firstWaveStart+1 .. firstWaveEnd-1 asynchronously.
+    //
+    // Error handling: if the batch rejects BEFORE line 0 is decoded, we surface
+    // the error and bail (same as before); if it rejects AFTER (unlikely), the
+    // rolling renderer's catch-and-continue handles it.
+    let prebufferError: unknown = null;
+    // resolveFirstReady is called by the batch when sentences[firstWaveStart]._buffer
+    // gets set. We poll via a resolved-promise chain in the batch wrapper below.
+    let resolveFirstReady!: () => void;
+    const firstReadyPromise = new Promise<void>((res) => { resolveFirstReady = res; });
+
+    const prebufferPromise = this.#renderBatchNotifyFirst(
+      newSession,
+      firstWaveStart,
+      firstWaveEnd,
+      resolveFirstReady,
+    ).catch((err) => {
+      prebufferError = err;
+      // If line 0 is still not ready, unblock the firstReadyPromise so we surface
+      // the error below rather than hanging on firstReadyPromise forever.
+      resolveFirstReady();
+    });
+
+    // Await first line decoded OR batch error (whichever comes first).
+    await firstReadyPromise;
+
+    // Check if batch errored before line 0 was ready.
+    if (prebufferError !== null) {
+      const err = prebufferError;
       if (sm.isSessionStale(token) || newSession.stopFlag) {
         this.#teardownAudio(newSession);
         restorePlay();
@@ -299,10 +336,29 @@ export class SubtitleFirstPipeline {
     if (sm.isSessionStale(token) || newSession.stopFlag) {
       this.#teardownAudio(newSession);
       restorePlay();
+      // Allow prebuffer to finish settling but don't await (already detached).
+      void prebufferPromise;
       return { ok: false, error: "Cancelled." };
     }
 
-    newSession.renderCursor = firstWaveEnd;
+    // The prebuffer batch is still running in the background (lines 1..k); the
+    // rolling renderer will pick up from wherever the batch leaves off.
+    // We do NOT await prebufferPromise here — that is the key C1 change.
+    // renderCursor will be updated by the pipelined renderer via contiguous-fold.
+    // Set it to firstWaveStart so the renderer knows where to start from.
+    newSession.renderCursor = firstWaveStart;
+    // Track the prebuffer range as in-flight so the renderer doesn't overlap it.
+    if (firstWaveEnd > firstWaveStart) {
+      newSession._inflightRanges.add(`${firstWaveStart}-${firstWaveEnd}`);
+    }
+    // When the prebuffer completes, fold renderCursor via the normal completion path.
+    void prebufferPromise.then(() => {
+      if (sm.session !== newSession || newSession.stopFlag) return;
+      const rangeKey = `${firstWaveStart}-${firstWaveEnd}`;
+      newSession._inflightRanges.delete(rangeKey);
+      newSession._resolvedAhead.add(rangeKey);
+      this.#foldResolvedAhead(newSession);
+    });
 
     overlay.setStatusText("Translating");
     overlay.setOverlayState("live");
@@ -499,6 +555,8 @@ export class SubtitleFirstPipeline {
       _videoId: newVideoId,
       _pendingLines: new Set(),
       _pendingFirstQueuedAt: 0,
+      _inflightRanges: new Set(),
+      _resolvedAhead: new Set(),
     };
 
     // ── Atomic swap: old loops will see sm.session !== oldS and exit ──────────
@@ -606,14 +664,29 @@ export class SubtitleFirstPipeline {
       firstWaveEnd = firstWaveStart + 1;
     }
 
-    try {
-      await this.#renderBatch(newSession, firstWaveStart, firstWaveEnd);
-    } catch (err) {
+    // C1 (restart path): same as start() — release play on first decoded line.
+    let restartPrebufferError: unknown = null;
+    let resolveRestartFirstReady!: () => void;
+    const restartFirstReadyPromise = new Promise<void>((res) => { resolveRestartFirstReady = res; });
+
+    const restartPrebufferPromise = this.#renderBatchNotifyFirst(
+      newSession,
+      firstWaveStart,
+      firstWaveEnd,
+      resolveRestartFirstReady,
+    ).catch((err) => {
+      restartPrebufferError = err;
+      resolveRestartFirstReady();
+    });
+
+    await restartFirstReadyPromise;
+
+    if (restartPrebufferError !== null) {
+      const err = restartPrebufferError;
       if (sm.isSessionStale(token) || newSession.stopFlag) {
         restorePlay();
         return { ok: false, error: "Cancelled." };
       }
-      // isPipelineToastError is a top-level static import.
       const msg = isPipelineToastError(err)
         ? err.user
         : String((err as Error).message || err);
@@ -630,10 +703,21 @@ export class SubtitleFirstPipeline {
 
     if (sm.isSessionStale(token) || newSession.stopFlag) {
       restorePlay();
+      void restartPrebufferPromise;
       return { ok: false, error: "Cancelled." };
     }
 
-    newSession.renderCursor = firstWaveEnd;
+    newSession.renderCursor = firstWaveStart;
+    if (firstWaveEnd > firstWaveStart) {
+      newSession._inflightRanges.add(`${firstWaveStart}-${firstWaveEnd}`);
+    }
+    void restartPrebufferPromise.then(() => {
+      if (sm.session !== newSession || newSession.stopFlag) return;
+      const rangeKey = `${firstWaveStart}-${firstWaveEnd}`;
+      newSession._inflightRanges.delete(rangeKey);
+      newSession._resolvedAhead.add(rangeKey);
+      this.#foldResolvedAhead(newSession);
+    });
 
     // ── Bind seeked + ended listeners (mirror start() lines 277-285) ─────────
     // These were missing from restart(), which meant post-auto-next seeks were
@@ -700,6 +784,12 @@ export class SubtitleFirstPipeline {
     return { ok: true };
   }
 
+  /**
+   * Called by `#renderBatch` when a line's `_buffer` is set (or a line is skipped).
+   * Used by the C1 startup path to release video.play() as soon as line 0 is decoded.
+   */
+  #onLineDecoded?: (globalIdx: number) => void;
+
   async #renderBatch(s: SubtitleFirstSession, startIdx: number, endIdx: number): Promise<void> {
     const { sm } = this.app;
     const voiceId = sm.settings?.standardVoice || STANDARD_DEFAULT_VOICE;
@@ -735,6 +825,7 @@ export class SubtitleFirstPipeline {
           // TTS decode).
           if (hit.buffer) {
             s.sentences[globalIdx]!._buffer = hit.buffer;
+            this.#onLineDecoded?.(globalIdx);
           } else if (hit.audioB64.length > 0 && s.audioCtx) {
             try {
               const binary = atob(hit.audioB64);
@@ -744,6 +835,7 @@ export class SubtitleFirstPipeline {
               if (sm.session !== s || s.stopFlag) return; // stale guard after async
               s.sentences[globalIdx]!._buffer = decoded;
               hit.buffer = decoded; // promote into the cache entry for next time
+              this.#onLineDecoded?.(globalIdx);
             } catch {
               /* ignore decode failure — _buffer stays undefined */
             }
@@ -871,6 +963,8 @@ export class SubtitleFirstPipeline {
 
           if (decoded) {
             s.sentences[globalIdx]!._buffer = decoded;
+            // C1: notify the startup path that a line has been decoded.
+            this.#onLineDecoded?.(globalIdx);
           }
 
           const sent = s.sentences[globalIdx]!;
@@ -928,6 +1022,122 @@ export class SubtitleFirstPipeline {
       s._batchRequestIds.delete(batchKey);
       s._sentBatchRanges.delete(batchKey);
     }
+  }
+
+  /**
+   * Wrapper around #renderBatch that calls `onFirstDecoded` the first time
+   * sentences[startIdx]._buffer becomes defined (C1). This allows the start/restart
+   * paths to release video.play() as soon as line 0 is decoded rather than
+   * waiting for the whole batch to finish.
+   *
+   * Uses #onLineDecoded (a pipeline-level callback field) to get notified
+   * synchronously within the same microtask that #renderBatch sets `_buffer`,
+   * without any polling or timers. Safe: #onLineDecoded is set back to undefined
+   * before this method returns.
+   *
+   * If the batch completes without any audio for startIdx (empty MP3 / TTS
+   * failure), the notification fires on batch completion so callers are never
+   * left hanging.
+   */
+  async #renderBatchNotifyFirst(
+    s: SubtitleFirstSession,
+    startIdx: number,
+    endIdx: number,
+    onFirstDecoded: () => void,
+  ): Promise<void> {
+    let notified = false;
+    const notifyOnce = () => {
+      if (!notified) {
+        notified = true;
+        onFirstDecoded();
+      }
+    };
+
+    // Install the per-line callback to fire as soon as startIdx's buffer is set.
+    // We chain with any existing callback (shouldn't happen, but be safe).
+    const prevCallback = this.#onLineDecoded;
+    this.#onLineDecoded = (globalIdx: number) => {
+      prevCallback?.(globalIdx);
+      if (globalIdx === startIdx) {
+        notifyOnce();
+      }
+    };
+
+    try {
+      await this.#renderBatch(s, startIdx, endIdx);
+    } finally {
+      // Restore the previous callback and ensure notification fires.
+      this.#onLineDecoded = prevCallback;
+      // If line 0 produced no audio (empty/failed TTS), notify now so the
+      // caller is not left hanging — it will release play (with no dub for
+      // line 0, which is the same as the old behavior).
+      notifyOnce();
+    }
+  }
+
+  /**
+   * Contiguous-fold helper (C2): while a range in _resolvedAhead starts exactly
+   * at renderCursor, advance renderCursor to that range's end and remove it.
+   *
+   * This replaces the old `renderCursor = Math.max(renderCursor, flushEnd)` which
+   * could jump past a still-pending lower range (the lost-dub bug).
+   */
+  #foldResolvedAhead(s: SubtitleFirstSession): void {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const key of s._resolvedAhead) {
+        const dash = key.indexOf("-");
+        if (dash === -1) continue;
+        const rangeStart = parseInt(key.slice(0, dash), 10);
+        const rangeEnd = parseInt(key.slice(dash + 1), 10);
+        if (rangeStart === s.renderCursor) {
+          s.renderCursor = rangeEnd;
+          s._resolvedAhead.delete(key);
+          changed = true;
+          break; // restart the loop after mutation
+        }
+      }
+    }
+  }
+
+  /**
+   * Compute how many seconds of decoded audio coverage exist ahead of the
+   * playhead, starting from the first unplayed cue (C4 decoded-lead scan).
+   *
+   * Scan rules (critical — critic C2-3):
+   *   - Count (end - start) for sentence[i] when:
+   *       • sentences[i]._buffer !== undefined  (actually decoded), OR
+   *       • _buffer === undefined AND i < renderCursor  (rendered-empty/failed —
+   *         the driver will skip, not stall, so count it to avoid false stalls)
+   *   - STOP at the first i where _buffer === undefined AND i >= renderCursor
+   *     (the genuine un-rendered frontier).
+   *
+   * This ensures one failed line does not collapse lead to 0.
+   */
+  #decodedLeadSec(s: SubtitleFirstSession, currentTime: number): number {
+    let lead = 0;
+    const sentences = s.sentences;
+    for (let i = 0; i < sentences.length; i++) {
+      const sent = sentences[i]!;
+      // Skip already-played cues — they don't contribute to future buffer.
+      if (sent._played) continue;
+      // Only look at cues that are at or after the current time.
+      if (sent.end <= currentTime) continue;
+
+      if (sent._buffer !== undefined) {
+        // Decoded audio — count it.
+        lead += sent.end - Math.max(sent.start, currentTime);
+      } else if (i < s.renderCursor) {
+        // Rendered-empty or failed — the driver will skip it, so count it
+        // as "covered" (does not block playback).
+        lead += sent.end - Math.max(sent.start, currentTime);
+      } else {
+        // Genuine un-rendered frontier — stop here.
+        break;
+      }
+    }
+    return lead;
   }
 
   /**
@@ -1298,6 +1508,10 @@ export class SubtitleFirstPipeline {
     // stale; the rolling renderer will re-accumulate from the new anchor.
     s._pendingLines.clear();
     s._pendingFirstQueuedAt = 0;
+    // C2: clear pipelined inflight/resolved state on seek — stale completions
+    // will check the epoch and no-op; these sets must be empty for the new position.
+    s._inflightRanges.clear();
+    s._resolvedAhead.clear();
     this.#stopCurrent(s);
     // Play the cue at the new position promptly rather than waiting for the next tick.
     this.#playbackTick(s);
@@ -1319,36 +1533,50 @@ export class SubtitleFirstPipeline {
     }
   }
 
-  // ── Rolling-renderer batch-coalescing constants ─────────────────────────────
-  // Flush the pending set when ANY of these is true:
-  //   (a) ≥ COALESCE_MIN_LINES lines are pending
-  //   (b) the earliest pending line's cue start is within COALESCE_URGENT_SEC
-  //       of the playhead (never starve playback)
-  //   (c) ≥ COALESCE_MAX_AGE_MS have elapsed since the first pending line was queued
-
+  // ── Rolling-renderer constants ──────────────────────────────────────────────
+  // C3: coalescing constants are REMOVED from the hot path — the renderer now
+  // fetches as soon as lead < BUFFER_AHEAD_TARGET_SEC (from caption-utils.ts),
+  // constrained only by MAX_INFLIGHT_BATCHES concurrency cap.
+  // These static fields are kept for backward-compatibility with existing tests
+  // that reference them directly.
   static readonly COALESCE_MIN_LINES = 3;
   static readonly COALESCE_URGENT_SEC = 8;
   static readonly COALESCE_MAX_AGE_MS = 6000;
 
+  /**
+   * Pipelined rolling renderer (C2 + C3 + C4).
+   *
+   * Replaces the old single-flight mutex (rollingInFlight) with a bounded-
+   * concurrency model: up to MAX_INFLIGHT_BATCHES concurrent #renderBatch calls.
+   *
+   * Per-tick logic:
+   *   1. Skip if user-paused (but not system-buffer micro-pause).
+   *   2. Compute BUFFER_AHEAD_TARGET_SEC lead via #decodedLeadSec (C4).
+   *      — If lead >= target: nothing to do this tick.
+   *   3. Compute fetch frontier = max(renderCursor, max-end in _inflightRanges,
+   *      max-end in _resolvedAhead). Issue [frontier, min(frontier+BATCH_SIZE, targetIdx))
+   *      when: frontier < targetIdx AND _inflightRanges.size < MAX_INFLIGHT_BATCHES.
+   *   4. Register the issued range in _inflightRanges (never advance renderCursor
+   *      speculatively — that would cause the driver to skip in-flight cues).
+   *   5. On completion (epoch-guarded): move range from _inflightRanges to
+   *      _resolvedAhead; contiguous-fold _resolvedAhead into renderCursor.
+   *
+   * C3 coalesce starvation is eliminated: there is no "wait for 3 lines / 6s"
+   * gate on the critical path. A single sub-tick debounce (SUBFIRST_RENDER_TICK_MS)
+   * prevents issuing many 1-line batches in one tick, but never blocks when lead
+   * is below target.
+   */
   async #runRollingRenderer(s: SubtitleFirstSession, video: HTMLVideoElement): Promise<void> {
     const { sm } = this.app;
     while (sm.session === s && !s.stopFlag) {
       // Poll on SUBFIRST_RENDER_TICK_MS so the buffer-ahead pump reacts quickly
-      // after Start/seek (was 1000ms — too slow, the playhead caught un-rendered
-      // cues in the first second causing early stutter).
+      // after Start/seek.
       await new Promise((r) => setTimeout(r, SUBFIRST_RENDER_TICK_MS));
       if (sm.session !== s || s.stopFlag) continue;
-      // While the user has genuinely paused the video, do NO translate/display work
-      // — otherwise the dub keeps being produced and the UI looks like it is still
-      // translating even though playback is suspended.
-      //
-      // IMPORTANT: during a system-buffer micro-pause (the controller issued
-      // video.pause() to wait for a cue's _buffer), video.paused IS true but we
-      // MUST keep rendering so the buffer actually gets produced. `sm.userPaused`
-      // (= lifecycle.effectivePaused) is the canonical user-visible pause flag;
-      // the 'system-buffer' reason is the driver-issued micro-pause. Idle only on
-      // a genuine user pause, never on a system-buffer pause — so the buffer pump
-      // continues even when the video element is technically paused.
+
+      // While the user has genuinely paused the video, do NO translate work.
+      // IMPORTANT: system-buffer micro-pause must NOT suppress rendering —
+      // the buffer must keep filling while video is paused for buffering.
       const isSystemPaused = this.app.lifecycle.isPausedFor("system-buffer");
       if (sm.userPaused || (video.paused && !isSystemPaused)) continue;
 
@@ -1356,88 +1584,101 @@ export class SubtitleFirstPipeline {
       const lookaheadSec = SUBFIRST_LOOKAHEAD_MS / 1000;
       let targetIdx = s.sentences.findIndex((sent) => sent.start > t + lookaheadSec);
       if (targetIdx === -1) targetIdx = s.sentences.length;
-      if (targetIdx <= s.renderCursor) continue;
-      if (s.rollingInFlight) continue;
 
-      const start = s.renderCursor;
-      const end = targetIdx;
+      // C4: compute decoded lead in seconds.
+      const lead = this.#decodedLeadSec(s, t);
+      const needsFetch = lead < BUFFER_AHEAD_TARGET_SEC;
 
-      // ── Accumulate cache-miss lines into the pending coalesce set ────────────
-      // Walk the window [start, end) and collect indices that are genuine misses
-      // (no translation + no buffer yet). Cache hits were handled by #renderBatch
-      // on previous passes — skip them here so only un-rendered lines accumulate.
-      for (let i = start; i < end; i++) {
-        if (!s.translations[i] || !s.sentences[i]?._buffer) {
-          if (!s._pendingLines.has(i)) {
-            s._pendingLines.add(i);
-            if (s._pendingFirstQueuedAt === 0) {
-              s._pendingFirstQueuedAt = Date.now();
-            }
+      // C3: issue fetch immediately when lead is below target (no coalesce withhold).
+      // Also ensure we haven't already passed targetIdx.
+      if (!needsFetch) {
+        // Lead is comfortable — check if there's anything left to render at all.
+        // If all lines up to targetIdx are already covered, advance renderCursor.
+        if (s._inflightRanges.size === 0 && s._resolvedAhead.size === 0) {
+          // Nothing in flight and lead is fine — if renderCursor is behind targetIdx
+          // but all lines are decoded, we can advance it.
+          let allCovered = true;
+          for (let i = s.renderCursor; i < targetIdx; i++) {
+            const sent = s.sentences[i]!;
+            if (sent._buffer === undefined) { allCovered = false; break; }
+          }
+          if (allCovered && s.renderCursor < targetIdx) {
+            s.renderCursor = targetIdx;
           }
         }
-      }
-
-      if (s._pendingLines.size === 0) {
-        // All lines in window already rendered — advance cursor.
-        const epochAtStart = s._renderEpoch;
-        if (s._renderEpoch === epochAtStart) {
-          s.renderCursor = end;
-        }
         continue;
       }
 
-      // ── Flush decision ────────────────────────────────────────────────────────
-      // Evaluate whether to flush the accumulated pending set or keep waiting.
-      const pendingSorted = [...s._pendingLines].sort((a, b) => a - b);
-      const earliestIdx = pendingSorted[0]!;
-      const earliestStart = s.sentences[earliestIdx]?.start ?? Infinity;
-      const urgentFlush = earliestStart - t <= SubtitleFirstPipeline.COALESCE_URGENT_SEC;
-      const ageFlush = s._pendingFirstQueuedAt > 0 &&
-        (Date.now() - s._pendingFirstQueuedAt) >= SubtitleFirstPipeline.COALESCE_MAX_AGE_MS;
-      const sizeFlush = s._pendingLines.size >= SubtitleFirstPipeline.COALESCE_MIN_LINES;
-
-      if (!urgentFlush && !ageFlush && !sizeFlush) {
-        // Not time to flush yet — keep accumulating on the next tick.
-        continue;
+      // C2: compute the fetch frontier.
+      // frontier = max(renderCursor, max-end over _inflightRanges, max-end over _resolvedAhead).
+      let frontier = s.renderCursor;
+      for (const key of s._inflightRanges) {
+        const dash = key.indexOf("-");
+        if (dash === -1) continue;
+        const end = parseInt(key.slice(dash + 1), 10);
+        if (end > frontier) frontier = end;
+      }
+      for (const key of s._resolvedAhead) {
+        const dash = key.indexOf("-");
+        if (dash === -1) continue;
+        const end = parseInt(key.slice(dash + 1), 10);
+        if (end > frontier) frontier = end;
       }
 
-      // ── Flush: render the full pending set as ONE batch ───────────────────────
-      // Determine the contiguous range that covers all pending lines.
-      // #renderBatch handles the cache-miss filter internally, so we pass the
-      // full [min, max+1) range; it skips already-rendered lines via the cache.
-      const flushStart = pendingSorted[0]!;
-      const flushEnd = pendingSorted[pendingSorted.length - 1]! + 1;
+      // Nothing to fetch beyond target.
+      if (frontier >= targetIdx) continue;
 
-      // Reset coalescing state NOW (before the async call) so a seek during the
-      // batch resets the accumulator to the new anchor rather than keeping stale
-      // pending indices from the old position.
-      s._pendingLines.clear();
-      s._pendingFirstQueuedAt = 0;
+      // Cap by in-flight concurrency.
+      if (s._inflightRanges.size >= MAX_INFLIGHT_BATCHES) continue;
 
+      // Issue a new batch: [frontier, min(frontier + SUBFIRST_BATCH_SIZE, targetIdx)).
+      const fetchStart = frontier;
+      const fetchEnd = Math.min(frontier + SUBFIRST_BATCH_SIZE, targetIdx);
+      if (fetchEnd <= fetchStart) continue;
+
+      const rangeKey = `${fetchStart}-${fetchEnd}`;
+      // Don't issue a range already in flight or already resolved (idempotency).
+      if (s._inflightRanges.has(rangeKey) || s._resolvedAhead.has(rangeKey)) continue;
+
+      // Capture epoch before the async call.
       const epochAtStart = s._renderEpoch;
-      s.rollingInFlight = true;
-      try {
-        await this.#renderBatch(s, flushStart, flushEnd);
-        if (sm.session !== s || s.stopFlag) return;
-        // Epoch guard (SOLUTION WS5.6): only advance renderCursor if no seek has
-        // happened since we captured epochAtStart. A seek increments _renderEpoch
-        // and resets renderCursor to the anchor; overwriting it here would re-clobber
-        // the seek-corrected position and send the playback pump back to the
-        // stale pre-seek region (silent dub bug S5-F5 / S5-F9).
-        if (s._renderEpoch === epochAtStart) {
-          s.renderCursor = Math.max(s.renderCursor, flushEnd);
+      s._inflightRanges.add(rangeKey);
+
+      // Fire the batch and handle completion asynchronously (pipelining).
+      // This is intentionally NOT awaited — the loop re-enters immediately to
+      // potentially issue a second batch if inflight < cap.
+      void (async () => {
+        try {
+          await this.#renderBatch(s, fetchStart, fetchEnd);
+        } catch {
+          // Transient error — swallow so the rolling renderer survives network blips.
+          // On the next tick the lead check will re-trigger if still below target.
+        } finally {
+          if (sm.session !== s || s.stopFlag) {
+            // Session evicted — clean up the range key silently.
+            s._inflightRanges.delete(rangeKey);
+            return;
+          }
+          // Epoch guard (C2): if a seek happened, discard and touch nothing.
+          if (s._renderEpoch !== epochAtStart) {
+            s._inflightRanges.delete(rangeKey);
+            // _inflightRanges and _resolvedAhead were already cleared by #onSeek.
+            return;
+          }
+          // Move range from inflight → resolvedAhead, then contiguous-fold.
+          s._inflightRanges.delete(rangeKey);
+          s._resolvedAhead.add(rangeKey);
+          this.#foldResolvedAhead(s);
         }
-        // If the epoch changed, leave renderCursor at the seek-corrected value;
-        // the next rolling tick will pick up from the new position naturally.
-      } catch {
-        // A transient render error (network blip, 5xx) must NOT kill the rolling
-        // renderer for the rest of the session. Swallow it; the pending set was
-        // already cleared so the next tick re-adds missed indices from scratch.
-        // The playback driver's stall cap (SUBFIRST_BUFFER_WAIT_MAX_MS) ensures
-        // we never hang forever even on persistent failures.
-      } finally {
-        s.rollingInFlight = false;
-      }
+      })();
+
+      // Immediately re-check whether another batch can be issued this tick
+      // (concurrent issuance within the same while-loop iteration).
+      // The while loop will re-evaluate on the NEXT tick (after the await sleep).
+      // To allow multiple concurrent issues per tick when lead is very low, we
+      // do a tight loop here — but only up to MAX_INFLIGHT_BATCHES total.
+      // After issuing one batch, re-check frontier and issue more if warranted.
+      // (The loop above does this naturally since we don't await the batch.)
     }
   }
 

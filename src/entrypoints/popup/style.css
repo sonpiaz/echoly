@@ -50,10 +50,13 @@
     radial-gradient(40% 36% at 105% 72%, var(--ec-lilac) 0%, transparent 70%);
 
   /* ── Radius ────────────────────────────────────────── */
+  /* Tightened, uniform scale — the cards/clusters were 24px (too round), the
+     button 18px; harmonized down so every surface shares a cohesive radius
+     (10 small · 12 menu · 14 card/button) instead of 10/14/18/24. */
   --ec-r-chip:   10px;
-  --ec-r-input:  14px;
-  --ec-r-btn:    18px;
-  --ec-r-card:   24px;
+  --ec-r-input:  12px;
+  --ec-r-btn:    14px;
+  --ec-r-card:   14px;
   --ec-r-pill:   100px;
   --ec-r-squircle: 32%;
 
@@ -266,8 +269,8 @@ body[data-account="locked"] .settings-group {
   position: relative;
   z-index: 1;
   flex-direction: column;
-  gap: 10px;
-  padding: 0 14px 14px;
+  gap: 8px;
+  padding: 0 14px 12px;
 }
 
 /* ── Header ────────────────────────────────────────────────────────────── */
@@ -275,7 +278,7 @@ body[data-account="locked"] .settings-group {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 16px 4px 4px;
+  padding: 12px 4px 4px;
 }
 .brand {
   display: flex;
@@ -494,7 +497,7 @@ body[data-state="paused"]     .brand-sub { display: none; }
 .settings-group {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 .session-card  { order: 1; }
 .live-summary  { order: 2; }
@@ -517,7 +520,7 @@ body[data-state="paused"]     .action { order: 9; }
   overflow: hidden;
 }
 .session-row {
-  padding: 11px 14px;
+  padding: 9px 14px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -536,13 +539,13 @@ body[data-state="paused"]     .action { order: 9; }
 .session-row--trans {
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
-  padding: 12px 14px;
+  gap: 5px;
+  padding: 10px 14px;
 }
 .trans-grid {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   font-size: 14.5px;
 }
 .lang-side {
@@ -554,16 +557,34 @@ body[data-state="paused"]     .action { order: 9; }
   min-width: 0;
   position: relative;
 }
+.lang-side--left,
 .lang-side--right {
   cursor: pointer;
-  padding: 3px 6px;
+  padding: 3px 5px;
   border-radius: var(--ec-r-chip);
   transition: background var(--ec-t-med);
+  min-width: 0;
 }
+.lang-side--left:hover,
 .lang-side--right:hover { background: rgba(255,255,255,.6); }
-.lang-side--right.is-open { background: rgba(255,255,255,.8); }
-.lang-side--right:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(242,91,23,.18); }
-.lang-name { font-size: 14.5px; font-weight: 600; }
+.lang-side--left:focus-visible,
+.lang-side--right:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(242,91,23,.38); }
+/* Open: the dropdown panel is the indicator — clean bg, NO focus halo. Declared
+   AFTER :focus-visible (equal specificity) so it wins for a focused-open trigger,
+   killing the ugly ring that showed while the menu was open. */
+.lang-side--left.is-open,
+.lang-side--right.is-open { background: rgba(255,255,255,.85); box-shadow: none; }
+.lang-name {
+  font-size: 14.5px;
+  font-weight: 600;
+  /* Keep the language name on ONE line (my interactive padding made "Auto-detect"
+     wrap); the trans-grid gap was tightened to reclaim the width so normal names
+     stay fully visible. Truncate only in the extreme case rather than wrapping. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 .lang-auto-badge {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -575,13 +596,14 @@ body[data-state="paused"]     .action { order: 9; }
 .swap-ico { width: 12px; height: 12px; color: var(--ec-cocoa-faint); flex-shrink: 0; }
 
 /* Tier / Voice select row */
-.session-row--select { padding: 11px 14px; cursor: pointer; }
+.session-row--select { padding: 9px 14px; cursor: pointer; }
 .session-row--select:hover { background: rgba(255,255,255,.45); }
-.session-row--select.is-open { background: rgba(255,255,255,.65); }
 .session-row--select:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px rgba(242,91,23,.18);
+  box-shadow: inset 0 0 0 2px rgba(242,91,23,.30);
 }
+/* Open state wins over the focus ring (declared after :focus-visible). */
+.session-row--select.is-open { background: rgba(255,255,255,.65); box-shadow: none; }
 .session-row--select .row-text {
   display: flex;
   flex-direction: column;
@@ -647,7 +669,7 @@ body[data-state="paused"]     .action { order: 9; }
 /* ── Action button (tangerine — one per screen) ─────────────────────────── */
 .action {
   width: 100%;
-  padding: 14px;
+  padding: 12px;
   border: 0;
   border-radius: var(--ec-r-btn);
   color: #fff;
@@ -661,15 +683,36 @@ body[data-state="paused"]     .action { order: 9; }
   align-items: center;
   justify-content: center;
   gap: 8px;
-  box-shadow: var(--ec-press-main);
+  /* Refined: a slim tactile edge softened by an ambient bloom + a top gloss
+     highlight — keeps the press-down feel but reads as premium, not chunky. */
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.30),
+    0 4px 0 var(--ec-tangerine-down),
+    0 10px 20px -8px rgba(242,91,23,.50);
   transition: transform var(--ec-t-fast), box-shadow var(--ec-t-fast);
 }
-.action:hover:not(:disabled)  { transform: translateY(3px); box-shadow: 0 3px 0 var(--ec-tangerine-down); }
-.action:active:not(:disabled) { transform: translateY(6px); box-shadow: 0 0 0 var(--ec-tangerine-down); }
+.action:hover:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.30),
+    0 2px 0 var(--ec-tangerine-down),
+    0 8px 16px -8px rgba(242,91,23,.45);
+}
+.action:active:not(:disabled) {
+  transform: translateY(4px);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.22),
+    0 0 0 var(--ec-tangerine-down),
+    0 4px 10px -8px rgba(242,91,23,.40);
+}
 .action:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
 .action:focus-visible {
   outline: none;
-  box-shadow: var(--ec-press-main), 0 0 0 3px rgba(242,91,23,.25);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.30),
+    0 4px 0 var(--ec-tangerine-down),
+    0 10px 20px -8px rgba(242,91,23,.50),
+    0 0 0 3px rgba(242,91,23,.25);
 }
 .action .ico { width: 11px; height: 11px; flex-shrink: 0; }
 .action .ico-stop { display: none; }
@@ -692,7 +735,7 @@ body[data-state="paused"]     .action { order: 9; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 4px 0;
+  padding: 3px 4px 0;
   font-size: 11px;
   color: var(--ec-cocoa-soft);
 }
@@ -711,10 +754,10 @@ body[data-state="paused"]     .action { order: 9; }
   border: 1.5px solid rgba(255,255,255,.80);
   border-radius: var(--ec-r-card);
   box-shadow: var(--ec-shadow-card);
-  padding: 12px 14px;
+  padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 .mix-row {
   display: grid;
@@ -789,8 +832,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   font-size: 12.5px;
   color: var(--ec-cocoa);
   font-weight: 500;
-  margin-top: 4px;
-  padding-top: 10px;
+  margin-top: 2px;
+  padding-top: 8px;
   border-top: 1px solid var(--hairline-faint);
   cursor: pointer;
 }
@@ -820,12 +863,30 @@ input[type="checkbox"]::before {
 }
 input[type="checkbox"]:checked {
   background: var(--ec-grad-brand);
+  /* Crisp ON state — OVERRIDE the base white inset ring (which veiled the orange
+     and made it look faded/low-quality). Subtle top sheen + inner bottom shade
+     for depth + a soft tangerine glow read as a vivid, high-quality switch. */
+  box-shadow:
+    inset 0 1px 1.5px rgba(255,255,255,.32),
+    inset 0 -1px 2px rgba(194,68,12,.32),
+    0 1px 3px rgba(242,91,23,.32);
 }
-input[type="checkbox"]:checked::before { transform: translateX(14px); }
+input[type="checkbox"]:checked::before {
+  transform: translateX(14px);
+  /* slightly tighter, cleaner knob shadow on the vivid track */
+  box-shadow: 0 1px 3px rgba(120,40,8,.32);
+}
 input[type="checkbox"]:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.5),
               0 0 0 3px rgba(242,91,23,.18);
+}
+/* Keep the crisp ON look (no white veil) when a checked toggle is keyboard-focused. */
+input[type="checkbox"]:checked:focus-visible {
+  box-shadow:
+    inset 0 1px 1.5px rgba(255,255,255,.32),
+    inset 0 -1px 2px rgba(194,68,12,.32),
+    0 0 0 3px rgba(242,91,23,.30);
 }
 
 /* ── Advanced section ────────────────────────────────────────────────────── */
@@ -834,17 +895,21 @@ input[type="checkbox"]:focus-visible {
   border: 1.5px solid rgba(255,255,255,.7);
   border-radius: var(--ec-r-chip);
   overflow: hidden;
-  transition: background var(--ec-t-med), border-color var(--ec-t-med);
+  /* Smooth the container morph (radius + shadow) so opening doesn't snap. */
+  transition: background var(--ec-t-med), border-color var(--ec-t-med),
+              border-radius var(--ec-t-med), box-shadow var(--ec-t-med);
 }
 .advanced[open] {
   background: var(--surface-card);
   border-color: rgba(255,255,255,.85);
+  /* Match the clusters above (session-card / mix-panel both use --ec-r-card,
+     now tightened to 14px) so the open panel is uniform and no longer balloons. */
   border-radius: var(--ec-r-card);
   box-shadow: var(--ec-shadow-card);
 }
 .advanced summary {
   cursor: pointer;
-  padding: 11px 14px;
+  padding: 9px 14px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -871,6 +936,26 @@ input[type="checkbox"]:focus-visible {
 }
 .advanced[open] .adv-chev { transform: rotate(0deg); }
 .advanced[open] summary { border-bottom: 1px solid var(--hairline-faint); }
+
+/* Smooth expand/collapse. The body content always eases in (safe everywhere);
+   on Chrome with interpolate-size the panel HEIGHT animates too, so there is no
+   jump when Advanced / Subtitle style opens. Older engines fall back to the
+   previous instant reveal (no regression). */
+.advanced[open] .advanced-body { animation: adv-body-in 0.2s var(--ec-ease-out) both; }
+@keyframes adv-body-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@supports (interpolate-size: allow-keywords) {
+  :root { interpolate-size: allow-keywords; }
+  .advanced::details-content {
+    block-size: 0;
+    overflow: hidden;
+    transition: block-size 0.22s var(--ec-ease-out),
+                content-visibility 0.22s allow-discrete;
+  }
+  .advanced[open]::details-content { block-size: auto; }
+}
 
 .advanced-body {
   display: flex;
@@ -1442,7 +1527,7 @@ body[data-state="paused"]     .usage-hint-row { display: none; }
 .dropdown-panel {
   background: var(--ec-cream);
   border: 1.5px solid rgba(255,255,255,.90);
-  border-radius: var(--ec-r-card);
+  border-radius: var(--ec-r-input);
   box-shadow: var(--ec-shadow-float);
   padding: 6px;
   z-index: 1000;
@@ -1450,7 +1535,24 @@ body[data-state="paused"]     .usage-hint-row { display: none; }
   overflow-x: hidden;
   font-family: var(--font-sans);
   animation: dropdown-in 120ms var(--ec-ease-out);
+  /* Thin themed scrollbar that stays inset from the rounded corners so the
+     panel still reads clean when the list overflows. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(242,91,23,.32) transparent;
 }
+.dropdown-panel::-webkit-scrollbar { width: 10px; }
+.dropdown-panel::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 8px 0; /* keep the thumb clear of the top/bottom rounded corners */
+}
+.dropdown-panel::-webkit-scrollbar-thumb {
+  background: rgba(242,91,23,.30);
+  border-radius: 100px;
+  /* transparent border + padding-box clip = a slim thumb floated off the edge */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.dropdown-panel::-webkit-scrollbar-thumb:hover { background: rgba(242,91,23,.50); background-clip: padding-box; }
 .dropdown-panel[hidden] { display: none; }
 @keyframes dropdown-in {
   from { opacity: 0; transform: translateY(-4px) scale(0.98); }
@@ -1521,6 +1623,8 @@ body[data-state="paused"]     .usage-hint-row { display: none; }
 .dropdown-option-secondary { font-size: 11px; color: var(--ec-cocoa-soft); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dropdown-option-check { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex-shrink: 0; color: var(--ec-tangerine-deep); }
 .dropdown-option-check svg { width: 14px; height: 14px; }
+/* Language options are text-only (no left badge); real flag icons depend on the
+   server language catalog, so the leading code chip is hidden. */
 .dropdown-panel--lang  .dropdown-option-icon { display: none; }
 .dropdown-panel--voice .dropdown-option-icon { background: transparent; box-shadow: none; padding: 0; }
 
