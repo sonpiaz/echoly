@@ -25,59 +25,56 @@ footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid rgba(127,127
 <body>
 
 <h1>Echoly — Privacy Policy</h1>
-<p class="sub">Last updated: 2026-05-08</p>
+<p class="sub">Last updated: 2026-06-11</p>
 
 <div class="tldr">
-<strong>TL;DR.</strong> Echoly does not collect, store, or sell any personal data. Your Kyma API key stays on your own device. Audio you choose to translate is sent directly to AI providers (Kyma and, for Realtime tier, OpenAI) for the sole purpose of producing the translation, then discarded. We have no servers, no analytics, no tracking.
+<strong>TL;DR.</strong> Audio is processed only while you are actively translating, solely to produce your dub, and no recordings are stored. We keep the minimum account data needed to run the service (email, plan, credit usage) and we never sell personal data or show ads.
 </div>
 
 <h2>What Echoly is</h2>
-<p>Echoly is a Chrome extension that captures audio from a YouTube video you are watching and produces a live translated voice-over in your chosen language. It runs entirely in your browser. There is no Echoly-operated backend.</p>
+<p>Echoly is a Chrome extension and companion website (<code>echolyhq.com</code>) that dubs the video you are watching into your chosen language with an AI voice, on sites such as YouTube, Coursera, and Udemy. The extension talks exclusively to Echoly's own service at <code>api.echolyhq.com</code>.</p>
 
-<h2>What data is processed</h2>
+<h2>Data we process</h2>
 <ul>
-  <li><strong>Your Kyma API key.</strong> Stored locally in <code>chrome.storage.local</code> with <code>TRUSTED_CONTEXTS</code> access level so that page scripts on youtube.com cannot read it. The key never leaves your device except as the <code>Authorization: Bearer</code> header on requests you initiate to <code>api.kymaapi.com</code> (and, for Realtime tier, a short-lived ephemeral token to <code>api.openai.com</code>).</li>
-  <li><strong>YouTube audio.</strong> When you press Start, Echoly captures the audio of the video element on the active tab via the standard <code>HTMLMediaElement.captureStream()</code> API. Audio is streamed to your selected provider (see "Third-party processors" below) for transcription, translation, and synthesis. Echoly itself stores no audio at any time.</li>
-  <li><strong>Overlay layout.</strong> Position and size of the in-page panel are stored in your browser's <code>localStorage</code> for the youtube.com origin. Cosmetic only. No personal information.</li>
-  <li><strong>Settings.</strong> Tier, language, voice, and volume preferences are stored in <code>chrome.storage.local</code>. They never leave your device.</li>
+  <li><strong>Account data.</strong> When you sign in at <code>echolyhq.com</code> we store your email address, plan tier, and sign-in session. The extension reads your session on <code>echolyhq.com</code> only to authenticate your requests — it never sees your password (sign-in is by emailed code/link).</li>
+  <li><strong>Video audio and captions.</strong> When you press Start, the audio of the video on the active tab (captured with the standard <code>HTMLMediaElement.captureStream()</code> API), or the video's public caption track where available, is streamed to <code>api.echolyhq.com</code> to be transcribed, translated, and synthesized into your dub. Processing is transient and in-memory; <strong>no recordings are stored</strong>. Nothing is captured while a session is not running.</li>
+  <li><strong>Usage metering.</strong> We record how many credits each session consumes (duration, tier, language pair) so we can enforce plan limits and show your remaining balance. We do not keep a log of which videos you watch tied to their content.</li>
+  <li><strong>Payment data.</strong> Subscriptions are processed by Stripe. Card details go directly to Stripe and never touch Echoly's servers; we store only your subscription status. See <a href="https://stripe.com/privacy" target="_blank" rel="noopener">Stripe's privacy policy</a>.</li>
+  <li><strong>Settings.</strong> Language, voice, volume, subtitle style, and per-site preferences are stored in <code>chrome.storage</code> and synced to your account so they follow you across devices.</li>
 </ul>
 
-<h2>What data is NOT collected</h2>
+<h2>What we do NOT do</h2>
 <ul>
-  <li>No telemetry, analytics, crash reports, or usage statistics.</li>
-  <li>No browsing history, video titles, URLs, or YouTube account information.</li>
-  <li>No personal identifiers, IP logging, cookies, or fingerprints.</li>
-  <li>No advertising, ad targeting, or third-party trackers.</li>
+  <li>No storing or reselling of audio, transcripts, or translations after your session.</li>
+  <li>No reading of your browsing history; the extension activates only on supported video sites.</li>
+  <li>No advertising, ad targeting, or sale of personal data to third parties.</li>
+  <li>No collection of data unrelated to providing and improving the dubbing service.</li>
 </ul>
 
-<h2>Third-party processors</h2>
-<p>When you press Start, audio you select to translate is sent to one of the following providers under your own Kyma account:</p>
-<ul>
-  <li><strong>Kyma API</strong> (<code>api.kymaapi.com</code>) — gateway. Forwards your audio to the underlying providers below and bills your Kyma balance. See <a href="https://kymaapi.com/privacy" target="_blank" rel="noopener">Kyma's privacy policy</a>.</li>
-  <li><strong>Standard tier</strong> uses, via Kyma: Groq (Whisper transcription), Google (Gemini translation), and MiniMax (text-to-speech).</li>
-  <li><strong>Realtime tier</strong> uses, via Kyma: OpenAI Realtime (one combined translate-and-speak model). After Kyma mints an ephemeral token, your browser opens a peer-to-peer WebRTC connection directly with <code>api.openai.com</code> for the duration of the session.</li>
-</ul>
-<p>Each provider processes your audio per its own privacy terms. Echoly is not a party to those terms — your Kyma account and your direct relationship with each provider are.</p>
+<h2>Subprocessors</h2>
+<p>Echoly uses vetted cloud infrastructure and AI model subprocessors to perform transcription, translation, and speech synthesis on our behalf. Audio sent to subprocessors is used solely to produce your translation in the moment and is not used to train models or retained as recordings.</p>
 
 <h2>Data retention</h2>
-<p>Echoly retains nothing on its side. Provider-side retention follows each provider's policy; for transcription and TTS the audio is processed in-memory and not retained. Sessions automatically end after 60 minutes; closing the tab also ends the session.</p>
+<p>Session audio: not retained. Usage records and account data: kept while your account is active. Delete your account (or email us) and we remove your personal data within 30 days, except records we must keep for tax or accounting law.</p>
 
-<h2>Permissions</h2>
+<h2>Extension permissions</h2>
 <ul>
-  <li><code>activeTab</code>, <code>scripting</code> — to inject the overlay panel into the YouTube tab when you press Start.</li>
-  <li><code>storage</code> — to remember your Kyma key and preferences across sessions.</li>
-  <li>Host permissions for <code>youtube.com</code>, <code>api.kymaapi.com</code>, <code>api.openai.com</code> — to capture YouTube audio and reach the AI providers listed above.</li>
+  <li><code>activeTab</code>, <code>scripting</code>, <code>tabs</code> — to detect the video page you invoked Echoly on and show the in-page control panel.</li>
+  <li><code>storage</code> — to keep your preferences and session state on your device.</li>
+  <li><code>webRequest</code> — to detect the video's caption track on supported sites so captions can be translated.</li>
+  <li><code>cookies</code> — to read your <code>echolyhq.com</code> sign-in session so the extension can act as your account.</li>
+  <li>Host permissions for <code>youtube.com</code>, <code>coursera.org</code>, <code>udemy.com</code>, <code>echolyhq.com</code>, and <code>api.echolyhq.com</code> — the supported video sites plus Echoly's own service.</li>
 </ul>
 
 <h2>Your rights and choices</h2>
 <ul>
-  <li>Stop a session at any time with the Stop button or by closing the tab.</li>
-  <li>Remove your Kyma key from the popup at any time, or uninstall the extension to wipe all locally stored data.</li>
-  <li>Use Echoly without an account; it has none.</li>
+  <li>Stop a session at any time; capture ends immediately when you stop or close the tab.</li>
+  <li>Sign out or uninstall the extension to remove all locally stored data.</li>
+  <li>Request a copy or deletion of your account data at any time via the contact below.</li>
 </ul>
 
 <h2>Children</h2>
-<p>Echoly is not directed at children under 13. The extension processes no personal information that would identify a user of any age.</p>
+<p>Echoly is not directed at children under 13 and does not knowingly collect personal information from them.</p>
 
 <h2>Changes to this policy</h2>
 <p>If we materially change how Echoly handles data we will update this page and bump the date at the top. Continued use after a change constitutes acceptance.</p>
@@ -86,7 +83,7 @@ footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid rgba(127,127
 <p>Questions or requests: <a href="mailto:sonxpiaz@gmail.com">sonxpiaz@gmail.com</a></p>
 
 <footer>
-Echoly is open-source. Source: <a href="https://github.com/sonpiaz/echoly" target="_blank" rel="noopener">github.com/sonpiaz/echoly</a> (link will be active after release).
+Echoly · <a href="https://echolyhq.com" target="_blank" rel="noopener">echolyhq.com</a>
 </footer>
 
 </body>
