@@ -221,11 +221,14 @@ export function initPopup(): void {
 
   // ── Subtitle style controls (W6 / Pro/Max only) ───────────────────────
 
-  // Footer version chip
-  const versionEl = document.querySelector<HTMLElement>(".status-footer .version");
+  // Version chips (welcome header + footer)
   try {
     const v = chrome.runtime?.getManifest?.()?.version;
-    if (versionEl && v) versionEl.textContent = `v${v}`;
+    if (v) {
+      for (const el of document.querySelectorAll<HTMLElement>(".version")) {
+        el.textContent = `v${v}`;
+      }
+    }
   } catch { /* unit-test JSDOM */ }
 
   let state: Partial<State> = {
