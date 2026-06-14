@@ -441,6 +441,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 // Init
+chrome.runtime.sendMessage({ type: "TRACK", event: "popup_opened" }).catch(() => {});
 populateLanguages();
 repopulateVoices(state.tier, state.tier === "standard" ? state.standardVoice : state.realtimeVoice);
 (async () => {

@@ -6,6 +6,8 @@
 // state.* is the canonical snapshot, BACKGROUND_STATE_UPDATE pushes to popup,
 // CONTENT_UPDATE pushes to the active YT tab.
 
+import { track } from "./analytics.js";
+
 const DEFAULT_SETTINGS = {
   tier: "realtime",
   targetLanguage: "vi",
@@ -179,6 +181,7 @@ const state = {
   apiMode: null,          // "byok" | "proxy" | null
   signedInUser: null,     // { email, tier } or null
   usage: null,            // { standard: minutes, realtime: minutes } — v0.6.2
+  sessionStartedAt: null, // epoch ms when the current dub started; null when idle
   ...DEFAULT_SETTINGS,
 };
 
@@ -193,6 +196,32 @@ const BROADCAST_DEBOUNCE_MS = 50;
 
 function snapshot() {
   return { ...state };
+}
+
+// Common analytics props describing the current dub configuration. Voice is the
+// active tier's pick. No PII, no Kyma key, no provider/routing detail.
+function sessionProps() {
+  return {
+    tier: state.tier,
+    target_language: state.targetLanguage,
+    voice: state.tier === "standard" ? state.standardVoice : state.realtimeVoice,
+    api_mode: state.apiMode || null,
+    source: "youtube",
+  };
+}
+
+// Fire dub_stopped once per session (guarded by sessionStartedAt) with duration.
+// Safe to call from every teardown path — only the first call after a start
+// emits; subsequent calls no-op until the next dub_started.
+function trackSessionEnd(reason) {
+  const startedAt = state.sessionStartedAt;
+  if (!startedAt) return;
+  state.sessionStartedAt = null;
+  void track("dub_stopped", {
+    ...sessionProps(),
+    reason,
+    duration_seconds: Math.round((Date.now() - startedAt) / 1000),
+  });
 }
 
 function broadcastToPopup() {
@@ -316,7 +345,9 @@ async function handleStart(settings) {
     state.connecting = false;
     state.running = true;
     state.status = "Translating";
+    state.sessionStartedAt = Date.now();
     broadcastToPopup();
+    void track("dub_started", sessionProps());
     return { ok: true, state: snapshot() };
   } catch (err) {
     state.connecting = false;
@@ -324,12 +355,17 @@ async function handleStart(settings) {
     state.errorMessage = err.message || String(err);
     state.status = state.errorMessage;
     broadcastToPopup();
+    void track("dub_failed", {
+      ...sessionProps(),
+      error: (err?.message || String(err)).slice(0, 200),
+    });
     return { ok: false, error: state.errorMessage };
   }
 }
 
 async function handleStop() {
   const tabId = state.tabId;
+  trackSessionEnd("user_stop");
   state.running = false;
   state.connecting = false;
   state.paused = false;
@@ -413,6 +449,7 @@ function handleContentEvent(message) {
     broadcastToPopup();
   }
   if (message.type === "CONTENT_ENDED") {
+    trackSessionEnd(message.reason || "content_ended");
     state.running = false;
     state.connecting = false;
     state.paused = false;
@@ -421,6 +458,14 @@ function handleContentEvent(message) {
     broadcastToPopup();
   }
 }
+
+// First install / version bump — one event so we can see install→activation.
+chrome.runtime.onInstalled.addListener((details) => {
+  void track(details.reason === "update" ? "extension_updated" : "extension_installed", {
+    reason: details.reason,
+    previous_version: details.previousVersion || null,
+  });
+});
 
 // Popup → background → content router.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -480,6 +525,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         case "STOP":
           sendResponse(await handleStop());
+          break;
+        case "TRACK":
+          void track(message.event, message.properties || {});
+          sendResponse({ ok: true });
           break;
         case "UPDATE_SETTINGS":
           sendResponse(await handleUpdateSettings(message.settings));
