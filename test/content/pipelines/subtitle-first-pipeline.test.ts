@@ -729,6 +729,32 @@ describe("SubtitleFirstPipeline — restart() auto-next robustness (Udemy CC no-
     // so the auto-next fallback is not blocked by a poisoned sm.session.
     expect(app.sm.session).toBeNull();
   });
+
+  it("RC4: keeps polling past one retry — dubs when captions appear on the 3rd attempt", async () => {
+    const adapter = makeAdapter(true, "udemy-poll");
+    // Empty on attempts 1 AND 2 (lecture still loading), captions on the 3rd. The OLD
+    // single-retry path (initial + 1) would give up after 2 calls; the readiness poll
+    // keeps going up to CAPTION_READINESS_MAX_ATTEMPTS and succeeds.
+    (adapter.fetchCaptions as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ captions: [{ start: 1, end: 4, text: "hi" }], sourceLang: "en" });
+    const app = makeApp(adapter);
+    const echolyApi = await import("@/lib/echoly-api");
+    vi.spyOn(echolyApi, "renderSubtitleDubStream").mockImplementation(async function* () {});
+    const pipeline = new SubtitleFirstPipeline(app as never);
+    seedPriorSession(app);
+
+    const known = document.querySelector("video") as HTMLVideoElement;
+    const result = await pipeline.restart(makeSettings(), "udemy-poll", known);
+
+    // Made a 3rd fetch (the poll continued past one retry) and did NOT give up — the
+    // old single-retry code stopped at 2 calls.
+    expect(
+      (adapter.fetchCaptions as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(result.error).not.toBe("No captions available for this video.");
+  });
 });
 
 // ─── start() fresh-start caption retry (Udemy next-lecture fix) ───────────────

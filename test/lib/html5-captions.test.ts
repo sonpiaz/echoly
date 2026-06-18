@@ -182,6 +182,49 @@ describe("fetchHtml5TextTrackCaptions — loaded cues", () => {
     expect(result).not.toBeNull();
     expect(result!.captions[0]!.text).toBe("Hello world.");
   });
+
+  it("RC4: activates a disabled track (mode → hidden) and reads cues once they populate", async () => {
+    const video = document.createElement("video");
+    document.body.appendChild(video);
+
+    // Real browsers expose cues === null on a "disabled" track and only parse them
+    // once it is activated. Model that: cues appear after mode is set to hidden.
+    const realCues = makeCueList([{ startTime: 1.0, endTime: 4.0, text: "Lazy-parsed cue." }]);
+    let mode: TextTrackMode = "disabled";
+    let parsed = false;
+    let everActivated = false;
+    const track = {
+      kind: "subtitles",
+      language: "en",
+      label: "English",
+      get mode() {
+        return mode;
+      },
+      set mode(m: TextTrackMode) {
+        mode = m;
+        if (m === "hidden" || m === "showing") {
+          parsed = true;
+          everActivated = true;
+        }
+      },
+      get cues() {
+        return parsed ? realCues : null;
+      },
+    } as unknown as TextTrack;
+    const trackList = makeTrackList([track]);
+
+    Object.defineProperty(video, "textTracks", { get: () => trackList, configurable: true });
+
+    const result = await fetchHtml5TextTrackCaptions(video, { preferLang: "en" });
+
+    expect(result).not.toBeNull();
+    expect(result!.captions).toHaveLength(1);
+    expect(result!.captions[0]!.text).toBe("Lazy-parsed cue.");
+    // It activated the disabled track to read cues (old code saw cues===null → null)…
+    expect(everActivated).toBe(true);
+    // …and restored the original disabled mode afterward (leave-no-trace).
+    expect(mode).toBe("disabled");
+  });
 });
 
 // ─── 2. No cues but <track src> present → fetch VTT ─────────────────────────

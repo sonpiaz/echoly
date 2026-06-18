@@ -67,13 +67,17 @@ const SUBFIRST_RENDER_TICK_MS = 350;
 // over so we never freeze forever.
 const SUBFIRST_BUFFER_WAIT_MAX_MS = 8000;
 
-// Auto-next (restart) caption-acquisition retry settle. restart() fires DURING the
-// platform's lecture-load churn (Udemy/Shaka destroys+recreates the <video> and the
-// taking-page DOM remounts), so the lecture/caption asset can be momentarily
-// unavailable on the first attempt — unlike a manual Start, which runs after the
-// lecture has settled (that is why stop+start works where auto-next does not). One
-// short, bounded retry lets the CC path succeed instead of falling to a dead-end.
-const AUTONEXT_CAPTION_RETRY_MS = 800;
+// Caption-acquisition readiness poll (RC4 — replaces the old blind single 800ms
+// retry). A (re)start can fire DURING the platform's lecture-load churn (Udemy/Shaka
+// destroys+recreates the <video>, the api-2.0 caption asset is still loading), so the
+// asset can be momentarily unavailable on the first attempt — that is why stop+start
+// works where auto-next did not. Instead of a fixed wait-then-try-once, poll the
+// WHOLE acquisition at a short cadence and exit the moment captions appear: this is
+// BOTH faster when the asset is ready early (no fixed 800ms penalty) AND more robust
+// when it is ready late. Bounded so a genuinely caption-less video still falls
+// through promptly (≈ INTERVAL × ATTEMPTS worst case).
+const CAPTION_READINESS_INTERVAL_MS = 350;
+const CAPTION_READINESS_MAX_ATTEMPTS = 4;
 
 export class SubtitleFirstPipeline {
   constructor(private readonly app: ContentApp) {}
@@ -147,14 +151,26 @@ export class SubtitleFirstPipeline {
       if (html5?.captions.length) captionResult = html5;
     }
 
-    // Settle-retry: the first attempt can land mid lecture-load churn (Shaka
-    // recreating the element, the api-2.0 caption asset not yet ready) and come back
-    // empty even though the lecture HAS captions. Retry the WHOLE acquisition ONCE
-    // after a short settle, re-querying the element and re-checking supersession.
+    // Readiness poll (RC4): the caption asset can become available at ANY point
+    // during the platform's post-nav load churn. Poll the WHOLE acquisition (adapter
+    // API + HTML5 <track> fallback) at a short cadence, exiting the moment captions
+    // appear — faster than the old fixed wait when the asset is ready early, more
+    // robust when it is ready late. Re-query the element + re-check supersession each
+    // round. Bounded by CAPTION_READINESS_MAX_ATTEMPTS so a caption-less video still
+    // falls through.
     if (!captionResult?.captions.length && !(sm.isSessionStale(token) || session.stopFlag)) {
-      console.info(`${logTag} captions empty on first attempt, retrying after settle`, { videoId });
-      await new Promise((r) => setTimeout(r, AUTONEXT_CAPTION_RETRY_MS));
-      if (!(sm.isSessionStale(token) || session.stopFlag)) {
+      console.info(`${logTag} captions not ready, polling`, {
+        videoId,
+        intervalMs: CAPTION_READINESS_INTERVAL_MS,
+        maxAttempts: CAPTION_READINESS_MAX_ATTEMPTS,
+      });
+      for (
+        let attempt = 0;
+        attempt < CAPTION_READINESS_MAX_ATTEMPTS && !captionResult?.captions.length;
+        attempt++
+      ) {
+        await new Promise((r) => setTimeout(r, CAPTION_READINESS_INTERVAL_MS));
+        if (sm.isSessionStale(token) || session.stopFlag) break;
         const retryVideo = reAcquireVideo?.() ?? video;
         try {
           captionResult = await adapter.fetchCaptions({
@@ -167,6 +183,7 @@ export class SubtitleFirstPipeline {
           captionResult = null;
         }
         if (!captionResult?.captions.length) {
+          if (sm.isSessionStale(token) || session.stopFlag) break;
           const html5Retry = await fetchHtml5TextTrackCaptions(retryVideo, {
             preferLang: srcPref,
             signal,

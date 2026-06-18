@@ -107,6 +107,30 @@ function findTrackElement(
   return null;
 }
 
+// Cue-readiness poll (RC4): after activating a previously "disabled" track the
+// browser parses its cues lazily — poll briefly for them to populate.
+const HTML5_CUE_READY_INTERVAL_MS = 100;
+const HTML5_CUE_READY_MAX_ATTEMPTS = 5;
+
+/**
+ * Wait (bounded) for a just-activated track's cues to populate. The browser parses
+ * cues asynchronously after a track is switched out of "disabled" mode, so a single
+ * synchronous read right after activation sees `cues === null`. Returns the cue list
+ * once non-empty, or whatever is present at the deadline (possibly null/empty).
+ */
+async function waitForCues(
+  track: TextTrack,
+  signal?: AbortSignal,
+): Promise<TextTrackCueList | null> {
+  for (let i = 0; i < HTML5_CUE_READY_MAX_ATTEMPTS; i++) {
+    if (signal?.aborted) return null;
+    const cues = track.cues;
+    if (cues && cues.length > 0) return cues;
+    await new Promise((r) => setTimeout(r, HTML5_CUE_READY_INTERVAL_MS));
+  }
+  return track.cues ?? null;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -138,15 +162,48 @@ export async function fetchHtml5TextTrackCaptions(
     const track = pickTextTrack(tracks, preferLang);
     if (track) {
       // ── Strategy (a): already-loaded cues ──────────────────────────────────
-      const cues = track.cues;
+      // A track left in its default "disabled" mode exposes cues === null — the
+      // browser only parses cues for an ACTIVE track. Activate it to "hidden" (parses
+      // cues WITHOUT rendering native captions over the video) and wait briefly for
+      // the lazy parse. Only when WE find it disabled: an already-active track with no
+      // cues genuinely has none → fall straight through to the <track src> fetch (b).
+      let cues = track.cues;
+      let activated = false;
+      if ((!cues || cues.length === 0) && track.mode === "disabled") {
+        try {
+          track.mode = "hidden";
+          activated = true;
+        } catch {
+          // mode is read-only in some embeddings — fall through to strategy (b).
+        }
+        cues = await waitForCues(track, signal);
+      }
       if (cues && cues.length > 0) {
+        // Copy the cue data BEFORE any mode reset — resetting to "disabled" can empty
+        // the live track.cues list, and our result must survive that.
         const captions = textTrackCuesToCaptionCues(cues);
+        // Restore the track's original disabled state — we activated it only to read
+        // cues; leave no lingering cuechange side-effect on the platform's track.
+        if (activated) {
+          try {
+            track.mode = "disabled";
+          } catch {
+            /* read-only — nothing to restore */
+          }
+        }
         if (captions.length > 0) {
           return {
             captions,
             sourceLang: track.language ?? null,
             trackName: track.label || undefined,
           };
+        }
+      } else if (activated) {
+        // No cues even after activation — restore the disabled mode before strategy (b).
+        try {
+          track.mode = "disabled";
+        } catch {
+          /* read-only */
         }
       }
 

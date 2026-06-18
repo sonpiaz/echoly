@@ -1162,11 +1162,12 @@ describe("SubtitleFirstPipeline.restart — old driver eviction", () => {
     const settings = { apiBearer: "b", targetLanguage: "vi" } as unknown as import("@/shared/types").StartSettings;
 
     // Call restart — eviction runs synchronously at the top of restart() before
-    // the async caption fetch. fetchCaptions returns null, so restart() now retries
-    // ONCE after AUTONEXT_CAPTION_RETRY_MS (auto-next timing rescue) before giving
-    // up — advance the fake clock so that retry settle resolves, then await.
+    // the async caption fetch. fetchCaptions returns null, so restart() now POLLS the
+    // acquisition (RC4: CAPTION_READINESS_MAX_ATTEMPTS × CAPTION_READINESS_INTERVAL_MS,
+    // 4 × 350ms) before giving up — advance the fake clock past the full poll, then
+    // await.
     const restartPromise = pipeline.restart(settings, "next-v");
-    await vi.advanceTimersByTimeAsync(900);
+    await vi.advanceTimersByTimeAsync(4 * 350 + 200);
     const result = await restartPromise;
 
     // ── Eviction assertions ────────────────────────────────────────────────
