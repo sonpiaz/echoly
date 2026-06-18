@@ -139,6 +139,31 @@ describe("QuickStartLauncher", () => {
     launcher.destroy();
   });
 
+  it("mounts as soon as the <video> appears via the DOM watch (no 20s tick wait)", async () => {
+    // Start with NO video on the page (Udemy/Shaka loads it after init()).
+    let videoEl: HTMLVideoElement | null = null;
+    const app = {
+      sm: { session: null },
+      adapter: { findVideo: () => videoEl, isWatchUrl: () => true },
+      capture: { findVideo: () => null },
+    } as never;
+
+    const launcher = new QuickStartLauncher(app);
+    await launcher.init();
+    // No video yet → not mounted; the DOM watch is now armed.
+    expect(document.querySelector(".ec-launcher")).toBeNull();
+
+    // Simulate the SPA/Shaka adding the <video> later — fires the MutationObserver.
+    videoEl = document.createElement("video");
+    document.body.appendChild(videoEl);
+
+    // Within the debounce (150 ms) the launcher mounts — NOT 20 s later.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(document.querySelector(".ec-launcher")).not.toBeNull();
+
+    launcher.destroy();
+  });
+
   it("clampLauncherCenterY clamps to the viewport with the 62px fallback height", () => {
     // When BCR returns 0×0, #measuredHeight() falls back to LAUNCHER_H=62
     // (46px mark + 8px halo top/bottom): far down → centerY = vh - 62/2 - 8.

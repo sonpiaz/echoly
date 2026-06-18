@@ -62,6 +62,15 @@ export interface SubtitleFirstSession extends BaseSession {
    */
   _bufferWaitStartedAt?: number;
   /**
+   * Source `video.currentTime` (seconds) captured when the user paused. On resume
+   * the controller compares it to the live currentTime: a difference means the user
+   * SEEKED while paused — and seeking while paused does NOT fire a 'seeked' event in
+   * the browser (documented behavior), so #onSeek never re-anchored. The controller
+   * then re-anchors the dub to the new playhead so it resumes on the RIGHT line
+   * instead of the stale pre-seek one. `undefined` when not paused.
+   */
+  _pausedAtTime?: number;
+  /**
    * URL-encoded video title (`encodeURIComponent(title)`) captured at session
    * start. Sent as `x-echoly-video-title` on every subtitle-dub batch request.
    * `undefined` when the adapter returned no title.

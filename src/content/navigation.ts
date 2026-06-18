@@ -216,6 +216,22 @@ export class NavigationWatcher {
       return;
     }
 
+    // Watch→watch SPA nav while WE (the surviving content script) are alive with a
+    // session (or awaiting the next video after an 'ended'). CLAIM this nav so the
+    // background nav-stop does NOT tear the session down on its (often spurious
+    // status:"loading") tabs.onUpdated — we own this transition in-place
+    // (continueOnNewVideo). Sent EARLY here (pre-debounce) so it beats the bg's
+    // claim window despite the poll latency. Only a surviving content script can
+    // send this → it is also proof the document was not reloaded.
+    if (this.#app.sm.session != null || this.#awaitingNext) {
+      try {
+        void chrome.runtime.sendMessage({ type: "CONTENT_NAV_CLAIM" });
+      } catch {
+        // SW asleep / no receiver — harmless; the bg simply falls back to its
+        // claim-aware deferred stop (and a fresh re-dub if the doc really reloaded).
+      }
+    }
+
     // Watch URL — debounce to let the URL settle.
     // poll-path: 700ms to coalesce rapid playlist skips.
     // yt-event path: 100ms — single-fire per SPA nav, no coalescing needed.
@@ -345,8 +361,21 @@ export class NavigationWatcher {
     // to the same video should get fresh captions.
     clearPrefetchedCaptions(videoId);
 
+    // Thread the source/target language hints so the prefetched track matches what
+    // start()/restart() would pick. Without these the prefetch fetched with NO
+    // preferLang, and restart() consumes that cached result FIRST — so auto-next
+    // could silently dub from a WRONG source-language track. settings is present
+    // on the active-session (auto-next) path; on an idle prefetch it may be null
+    // (then these are undefined — same as before, harmless).
+    const settings = this.#app.sm.settings;
+    const preferLang =
+      settings?.sourceLanguage && settings.sourceLanguage !== "auto"
+        ? settings.sourceLanguage
+        : undefined;
+    const avoidLang = settings?.targetLanguage;
+
     void this.#app.adapter
-      .fetchCaptions({ videoId, signal: ac.signal })
+      .fetchCaptions({ videoId, preferLang, avoidLang, signal: ac.signal })
       .then((result) => {
         // Bail out if cancelled or videoId changed.
         if (ac.signal.aborted) return;

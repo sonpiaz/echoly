@@ -12,7 +12,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resetChrome, type FakeChrome } from "../setup";
-import { registerNavStop, resetNavStopState } from "@/background/nav-stop";
+import {
+  registerNavStop,
+  resetNavStopState,
+  navStopOnClaim,
+  CLAIM_WINDOW_MS,
+} from "@/background/nav-stop";
 import { Store } from "@/background/store";
 import { EcholyAuth } from "@/background/auth";
 import { SessionCoordinator } from "@/background/session-coordinator";
@@ -79,12 +84,20 @@ describe("nav-stop — bg tabs.onUpdated session-stop gating (FIX 1, Bug A auto-
     expect(stopSpy).not.toHaveBeenCalled();
   });
 
-  // ── (b) status:"loading" (hard nav) → STOP, even on a watch url ───────────────
-  it("(b) running + status:loading on a watch url (hard nav) → session.stop IS called", () => {
+  // ── (b) status:"loading" on a watch url → DEFERRED claim-aware stop ────────────
+  // Chrome emits a SPURIOUS status:"loading" on history.pushState (Chromium bug),
+  // so a watch→watch SPA nav looks like a hard nav here. The stop is now DEFERRED:
+  // the surviving content script gets a window to CLAIM the nav. With NO claim
+  // (genuine hard nav), the stop fires after CLAIM_WINDOW_MS.
+  it("(b) running + status:loading on a watch url → DEFERRED stop; fires after window when no claim", async () => {
     const { store, stopSpy, listener } = build();
     store.setRunning(true);
+    vi.useFakeTimers();
     listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
-    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(stopSpy).not.toHaveBeenCalled(); // no longer immediate
+    await vi.advanceTimersByTimeAsync(CLAIM_WINDOW_MS + 50);
+    expect(stopSpy).toHaveBeenCalledTimes(1); // no claim → genuine hard nav → stop
+    vi.useRealTimers();
   });
 
   // ── (c) leaving the watch context while running → STOP ────────────────────────
@@ -219,22 +232,49 @@ describe("nav-stop — bg tabs.onUpdated session-stop gating (FIX 1, Bug A auto-
       expect(store.getContinuationIntent()).toBeNull();
     });
 
-    it("pre-clears running synchronously so Gate-5 won't block the continuation (Gap-3)", () => {
+    it("keeps running INTACT during the claim window; clears it only when the deferred hard-nav stop fires", async () => {
       const { store, listener } = build();
       store.setRunning(true);
       store.setConnecting(true);
+      vi.useFakeTimers();
       listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
-      // session.stop is a spy here (never flips running), so a false here would
-      // ONLY come from nav-stop's own synchronous pre-clear — i.e. the fix.
+      // During the claim window the session is left intact (content may still claim
+      // and continue in-place). The old code pre-cleared running synchronously; the
+      // claim-aware defer must NOT, or it would tear down a session that survives.
+      expect(store.state.running).toBe(true);
+      await vi.advanceTimersByTimeAsync(CLAIM_WINDOW_MS + 50);
+      // No claim → deferred hard-nav stop fired → running/connecting cleared.
       expect(store.state.running).toBe(false);
       expect(store.state.connecting).toBe(false);
+      vi.useRealTimers();
     });
 
-    it("still calls session.stop() on the hard nav (cleanup is not skipped)", () => {
+    it("still calls session.stop() on a GENUINE hard nav (no claim) — after the claim window", async () => {
       const { store, stopSpy, listener } = build();
       store.setRunning(true);
+      vi.useFakeTimers();
       listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
+      expect(stopSpy).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(CLAIM_WINDOW_MS + 50);
       expect(stopSpy).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it("CLAIM cancels it: content claims the nav within the window → session.stop is NOT called (the RC1 fix)", async () => {
+      const { store, stopSpy, listener } = build();
+      store.setRunning(true);
+      vi.useFakeTimers();
+      // Spurious status:"loading" on a watch page (Udemy/Coursera SPA pushState).
+      listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
+      expect(stopSpy).not.toHaveBeenCalled();
+      // The SURVIVING content NavigationWatcher claims the nav (handling it in-place).
+      navStopOnClaim(SESSION_TAB, store);
+      await vi.advanceTimersByTimeAsync(CLAIM_WINDOW_MS + 100);
+      // The claim cancelled the deferred stop → the session is NEVER torn down.
+      expect(stopSpy).not.toHaveBeenCalled();
+      // And the continuation-intent is cleared (content owns it; no fresh start).
+      expect(store.getContinuationIntent()).toBeNull();
+      vi.useRealTimers();
     });
   });
 });
@@ -332,20 +372,23 @@ describe("nav-stop — Fix B deferred-stop re-check (B1/B1b/B3/B4/B2)", () => {
     expect(stopSpy).not.toHaveBeenCalled();
   });
 
-  // B2 — regression: hard nav (status:"loading") to a watch URL still stops
-  // immediately and sets continuation intent (hard-nav branch is UNCHANGED).
-  it("B2: hard nav status:loading to watch url → immediate stop + continuation intent (unchanged)", () => {
+  // B2 — hard nav (status:"loading") to a watch URL now DEFERS a claim-aware stop
+  // (the surviving content may claim it) but sets the continuation-intent immediately.
+  it("B2: hard nav status:loading to watch url → DEFERRED claim-aware stop + intent set immediately", async () => {
     const { store, stopSpy, listener } = build();
     store.setRunning(true);
     store.setTabId(SESSION_TAB);
 
     listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
 
-    // Hard nav: stop is immediate (no deferred timer involved).
-    expect(stopSpy).toHaveBeenCalledTimes(1);
+    // Intent is set immediately (used iff this turns out to be a real hard nav).
     const intent = store.getContinuationIntent();
     expect(intent).not.toBeNull();
     expect(intent?.tabId).toBe(SESSION_TAB);
+    // Stop is now DEFERRED (claim-aware), not immediate.
+    expect(stopSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(CLAIM_WINDOW_MS + 50);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
   });
 
   // Additional: tab gone at expiry (chrome.tabs.get throws) → stop IS called.
@@ -383,25 +426,27 @@ describe("nav-stop — Fix B deferred-stop re-check (B1/B1b/B3/B4/B2)", () => {
     expect(stopSpy).not.toHaveBeenCalled();
   });
 
-  // Additional: hard nav clears a pending deferred stop (real nav supersedes transient check).
-  it("hard nav after deferred-stop scheduled → clears the pending timer (no double-stop)", async () => {
+  // A watch hard-nav after a non-watch deferred-stop supersedes the pending timer
+  // and schedules the claim-aware defer instead → exactly one stop, no double-stop.
+  it("watch hard nav after a non-watch deferred-stop → supersedes it; exactly one stop after the claim window", async () => {
     const { store, stopSpy, listener } = build();
     store.setRunning(true);
     store.setTabId(SESSION_TAB);
 
     chromeMock.tabs.get.mockResolvedValue({ id: SESSION_TAB, url: YT_HOME });
 
-    // First: schedule a deferred stop.
+    // First: schedule a non-watch deferred stop.
     listener(SESSION_TAB, { url: YT_HOME });
     expect(stopSpy).not.toHaveBeenCalled();
 
-    // Before expiry: hard nav arrives → immediate stop + clears the pending timer.
+    // Before expiry: a WATCH hard-nav arrives → clears the pending non-watch timer +
+    // schedules the claim-aware defer (no immediate stop now).
     store.setRunning(true); // re-arm running for the hard-nav check
     listener(SESSION_TAB, { url: WATCH_B, status: "loading" });
-    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(stopSpy).not.toHaveBeenCalled();
 
-    // Advance past the original deferred window — it was cleared, so no second stop.
-    await vi.advanceTimersByTimeAsync(NAV_STOP_RECHECK_MS + 100);
-    expect(stopSpy).toHaveBeenCalledTimes(1); // still only 1
+    // After the claim window (no claim) → exactly one stop (old timer was cleared).
+    await vi.advanceTimersByTimeAsync(CLAIM_WINDOW_MS + 100);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
   });
 });

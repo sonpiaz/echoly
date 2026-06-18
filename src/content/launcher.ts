@@ -25,6 +25,9 @@ import type { ContentApp } from "./index";
 import { TIER_REALTIME } from "@/shared/constants";
 
 const KEEPALIVE_MS = 20_000;
+// Debounce for the eligible-but-no-video DOM watch (below). Coalesces the burst of
+// mutations a SPA/Shaka fires while building its player, then re-evaluates once.
+const VIDEO_WATCH_DEBOUNCE_MS = 150;
 const START_OPTIMISTIC_HIDE_MS = 3000;
 const LAUNCHER_POS_KEY = "echolyLauncherPos";
 const DRAG_THRESHOLD_PX = 5;
@@ -119,6 +122,17 @@ export class QuickStartLauncher {
   #onFocus: (() => void) | null = null;
   #onMouseLeave: (() => void) | null = null;
   #onBlur: (() => void) | null = null;
+  /**
+   * DOM watch that mounts the launcher the INSTANT the page <video> appears,
+   * instead of waiting up to KEEPALIVE_MS (20s) for the next keepalive tick — the
+   * "launcher hiện chậm" fix. SPAs like Udemy/Shaka create the <video> well after
+   * the content script's init() runs, so #hasVideo() is false at init and the only
+   * re-checks were the 20s tick / visibilitychange / session events. Active ONLY
+   * while eligible-but-waiting on a watch page; torn down on mount / session /
+   * sign-out / navigation away / destroy.
+   */
+  #videoWatchObserver: MutationObserver | null = null;
+  #videoWatchDebounce: ReturnType<typeof setTimeout> | null = null;
 
   constructor(app: ContentApp) {
     this.#app = app;
@@ -139,6 +153,7 @@ export class QuickStartLauncher {
 
   destroy(): void {
     this.#destroyed = true;
+    this.#stopVideoWatch();
     if (this.#tickTimer) clearInterval(this.#tickTimer);
     if (this.#startResetTimer) clearTimeout(this.#startResetTimer);
     if (this.#resaveTimer) {
@@ -213,10 +228,73 @@ export class QuickStartLauncher {
     );
   }
 
+  /** True when the current URL is a page where a <video> is expected (so it is
+   *  worth watching the DOM for it). Tolerant of adapters/test fakes without the
+   *  method → false (no watch). */
+  #isWatchPage(): boolean {
+    try {
+      return this.#app.adapter.isWatchUrl(location.href);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Begin watching the DOM for the page <video> appearing. Idempotent. */
+  #startVideoWatch(): void {
+    if (this.#videoWatchObserver || this.#destroyed) return;
+    try {
+      const observer = new MutationObserver(() => {
+        // Coalesce the SPA's mutation burst, then re-evaluate ONCE. #update() is
+        // cheap (a few checks + a querySelector) and idempotent.
+        if (this.#videoWatchDebounce) clearTimeout(this.#videoWatchDebounce);
+        this.#videoWatchDebounce = setTimeout(() => {
+          this.#videoWatchDebounce = null;
+          this.#update();
+        }, VIDEO_WATCH_DEBOUNCE_MS);
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+      this.#videoWatchObserver = observer;
+    } catch {
+      this.#videoWatchObserver = null;
+    }
+  }
+
+  /** Stop the DOM watch + clear its debounce. Idempotent. */
+  #stopVideoWatch(): void {
+    if (this.#videoWatchDebounce) {
+      clearTimeout(this.#videoWatchDebounce);
+      this.#videoWatchDebounce = null;
+    }
+    if (this.#videoWatchObserver) {
+      this.#videoWatchObserver.disconnect();
+      this.#videoWatchObserver = null;
+    }
+  }
+
   #update(): void {
     if (this.#destroyed) return;
-    if (this.#shouldShow()) this.#mount();
-    else this.#remove();
+    if (this.#shouldShow()) {
+      this.#mount();
+      // Mounted — no need to keep watching the DOM for the video.
+      this.#stopVideoWatch();
+    } else {
+      this.#remove();
+      // Eligible in every way EXCEPT the <video> hasn't appeared yet → watch the
+      // DOM so we mount the moment it does (instead of up to 20s later). Any other
+      // not-shown reason (signed out / live session / starting / non-watch page)
+      // tears the watch down.
+      if (
+        this.#signedIn &&
+        !this.#starting &&
+        !this.#app.sm.session &&
+        this.#isWatchPage() &&
+        !this.#hasVideo()
+      ) {
+        this.#startVideoWatch();
+      } else {
+        this.#stopVideoWatch();
+      }
+    }
   }
 
   /** Returns the button's rendered height; falls back to LAUNCHER_H when 0

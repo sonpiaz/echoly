@@ -7,10 +7,16 @@
 // Does NOT tear down the session.
 
 import { STATUS_PAUSED_VIDEO } from "@/shared/product-copy";
-import { isWebRtcSession } from "./session-manager";
+import { isWebRtcSession, isSubtitleFirstSession } from "./session-manager";
 import { STOP_REASON } from "./stop-reasons";
 import { syncSourcePauseState } from "@/lib/rtc-media-sync";
 import type { ContentApp } from "./index";
+
+/** A source-time delta (seconds) above this between pause and resume means the
+ *  user SEEKED while paused (browsers do not fire 'seeked' for a paused seek), so
+ *  the subtitle-first dub must re-anchor to the new playhead. 0.5s is comfortably
+ *  above normal frame/rounding jitter and below any deliberate scrub. */
+const SEEK_WHILE_PAUSED_EPSILON_SEC = 0.5;
 
 /**
  * The source <video> was paused by the user.
@@ -42,7 +48,12 @@ export function pauseSession(app: ContentApp): void {
     }
   }
   // subtitle-first: the 250ms #playbackTick + #runRollingRenderer already idle
-  // when effectivePaused (sm.userPaused) is true — no extra action needed.
+  // when effectivePaused (sm.userPaused) is true. Record the playhead so resume can
+  // detect a seek-while-paused (which fires no 'seeked' event → #onSeek never runs).
+  if (isSubtitleFirstSession(sess)) {
+    const video = app.capture.videoEl;
+    sess._pausedAtTime = video ? video.currentTime : undefined;
+  }
 
   app.overlay.setOverlayState("paused");
   app.overlay.setStatusText(STATUS_PAUSED_VIDEO);
@@ -117,10 +128,27 @@ export function resumeSession(app: ContentApp): Promise<void> {
       app.standardDubSync?.snapPlaybackStart();
       app.standardDubSync?.start();
     }
+  } else if (isSubtitleFirstSession(sess)) {
+    // If the user SEEKED while paused, the browser fired no 'seeked' event (see
+    // pauseSession), so #onSeek never re-anchored and the dub would resume on the
+    // STALE pre-seek line (the "lồng tiếng sai sau khi tua lúc pause" bug). Detect
+    // the moved playhead and re-anchor to the new position. resume('user') above
+    // already cleared the pause, so reAnchor's #playbackTick plays the right line
+    // immediately. A plain pause/resume (no seek) skips this → no needless replay.
+    const video = app.capture.videoEl;
+    const pausedAt = sess._pausedAtTime;
+    sess._pausedAtTime = undefined;
+    if (
+      video &&
+      pausedAt != null &&
+      Math.abs(video.currentTime - pausedAt) > SEEK_WHILE_PAUSED_EPSILON_SEC
+    ) {
+      app.subtitleFirst.reAnchor(sess, video);
+    }
   }
-  // subtitle-first: the 250ms #playbackTick + #runRollingRenderer resume naturally
-  // once effectivePaused is false; #playbackTick micro-pauses ONLY if the due
-  // cue is genuinely un-buffered (same fallback as before). No proactive re-pause.
+  // subtitle-first (no seek): the 250ms #playbackTick + #runRollingRenderer resume
+  // naturally once effectivePaused is false; #playbackTick micro-pauses ONLY if the
+  // due cue is genuinely un-buffered (same fallback as before). No proactive re-pause.
 
   app.overlay.setOverlayState("live");
   app.overlay.setStatusText("Translating");

@@ -6,7 +6,14 @@
 //
 // Capabilities:
 //   audioCapture: true   — standard HTML5 video, no DRM assumed
-//   subtitleFirst: false — no caption API; fall back to WebRTC-Standard audio
+//   subtitleFirst: true  — the adapter has no caption API (fetchCaptions → null),
+//                          BUT subtitle-first is still tried so the pipeline's
+//                          HTML5 <track>-element fallback (fetchHtml5TextTrackCaptions)
+//                          can CC-dub a generic page that ships standard <track>
+//                          captions; only when there are no <track> cues does it
+//                          fall through to the WebRTC-Standard audio path.
+//                          (Was documented `false` here while the live object below
+//                          set `true` — the live `true` is correct; comment fixed.)
 //   isSpa: false         — full-page reload between navigations assumed
 //   hasNativeCaptions: false
 //   hasAdOverlays: false

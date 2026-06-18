@@ -145,7 +145,14 @@ export type ContentToBgMessage =
   | { type: "GET_YT_PLAYER_RESPONSE" }
   /** Marker content script relays this after the web page dispatches
    *  `echoly:settings-updated` — triggers a settings refetch/hydrate (C4). */
-  | { type: "REFRESH_SETTINGS" };
+  | { type: "REFRESH_SETTINGS" }
+  /** Content NavigationWatcher CLAIMS a watch→watch SPA navigation it is handling
+   *  in-place (continueOnNewVideo). The background nav-stop honours the claim and
+   *  does NOT tear the session down on its (often spurious `status:"loading"`)
+   *  tabs.onUpdated — fixing the two-authority race where the bg killed the session
+   *  the content side was about to continue. Only the SURVIVING content script can
+   *  send this, so it is also proof the document was not reloaded. */
+  | { type: "CONTENT_NAV_CLAIM" };
 
 /** A single caption track as exposed by YouTube's player response (MAIN-world
  *  `movie_player.getPlayerResponse().captions.playerCaptionsTracklistRenderer
@@ -187,6 +194,7 @@ export interface ContentToBgResponse {
   START_REQUEST: Ok;
   GET_LAUNCH_STATE: LaunchStateResult;
   REFRESH_SETTINGS: Ok;
+  CONTENT_NAV_CLAIM: Ok;
 }
 
 // ───── Convenience: everything the background onMessage listener can receive ─

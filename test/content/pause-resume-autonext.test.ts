@@ -183,8 +183,8 @@ function makeFakeApp(sess: WebRtcSession | SubtitleFirstSession | null) {
   };
   // capture.videoEl = null means no video available → gates will skip hold
   const capture = { videoEl: null as HTMLVideoElement | null };
-  // subtitleFirst stub with onResumeCheck
-  const subtitleFirst = { onResumeCheck: vi.fn() };
+  // subtitleFirst stub with onResumeCheck + reAnchor (seek-while-paused re-sync).
+  const subtitleFirst = { onResumeCheck: vi.fn(), reAnchor: vi.fn() };
   const stopSession = vi.fn();
   // Use `unknown` intermediary so the partial fake satisfies the ContentApp parameter type.
   const asApp = {
@@ -458,6 +458,64 @@ describe("pause-controller — resumeSession", () => {
     expect(app.sm.userPaused).toBe(false);
     expect(app.overlay.setOverlayState).toHaveBeenCalledWith("live");
     expect(app.overlay.setOverlayState).not.toHaveBeenCalledWith("buffering");
+  });
+
+  // ── Seek-while-paused re-anchor (subtitle-first) ──────────────────────────
+  // Root cause (browser behavior, confirmed): seeking while PAUSED fires no
+  // 'seeked' event, so #onSeek never re-anchors → the dub would resume on the
+  // STALE pre-seek line. pauseSession records the playhead; resumeSession detects
+  // the move and re-anchors to the NEW position.
+
+  function makeVideoAt(currentTime: number): HTMLVideoElement {
+    const video = document.createElement("video");
+    Object.defineProperty(video, "currentTime", {
+      value: currentTime,
+      writable: true,
+      configurable: true,
+    });
+    return video;
+  }
+
+  it("subtitle-first pauseSession records the playhead at pause time", () => {
+    const sess = { kind: "subtitle-first" } as unknown as ReturnType<typeof makeWebRtcSession>;
+    const app = makeFakeApp(sess);
+    app.capture.videoEl = makeVideoAt(42);
+    pauseSession(app);
+    expect((sess as unknown as { _pausedAtTime?: number })._pausedAtTime).toBe(42);
+  });
+
+  it("subtitle-first resume after a seek-while-paused re-anchors to the new playhead", () => {
+    const video = makeVideoAt(95);
+    const sess = {
+      kind: "subtitle-first",
+      _pausedAtTime: 20,
+    } as unknown as ReturnType<typeof makeWebRtcSession>;
+    const app = makeFakeApp(sess);
+    app.capture.videoEl = video;
+    app.lifecycle.pause("user");
+
+    resumeSession(app);
+
+    // Playhead moved 20→95 while paused (a seek the browser never reported) → re-anchor.
+    expect(app.subtitleFirst.reAnchor).toHaveBeenCalledTimes(1);
+    expect(app.subtitleFirst.reAnchor).toHaveBeenCalledWith(sess, video);
+    // The one-shot marker is cleared so a later plain resume doesn't re-fire.
+    expect((sess as unknown as { _pausedAtTime?: number })._pausedAtTime).toBeUndefined();
+  });
+
+  it("subtitle-first resume WITHOUT a seek does NOT re-anchor (no needless replay)", () => {
+    const video = makeVideoAt(20.1); // within the 0.5s epsilon of the paused-at time
+    const sess = {
+      kind: "subtitle-first",
+      _pausedAtTime: 20,
+    } as unknown as ReturnType<typeof makeWebRtcSession>;
+    const app = makeFakeApp(sess);
+    app.capture.videoEl = video;
+    app.lifecycle.pause("user");
+
+    resumeSession(app);
+
+    expect(app.subtitleFirst.reAnchor).not.toHaveBeenCalled();
   });
 });
 
@@ -1058,7 +1116,12 @@ describe("SubtitleFirstPipeline.restart — old driver eviction", () => {
       fetchCaptions: fetchCaptionsMock,
       getVideoTitle: () => null,
     };
-    const capture = { findVideo: vi.fn().mockReturnValue(null), videoEl: null };
+    const capture = {
+      findVideo: vi.fn().mockReturnValue(null),
+      videoEl: null,
+      bindVolumeDriftGuard: vi.fn(),
+      applyVolumes: vi.fn(),
+    };
     const fakeApp = { sm, lifecycle, overlay, adapter, capture } as unknown as ContentApp;
 
     const pipeline = new RealSFP(fakeApp);
@@ -1099,17 +1162,24 @@ describe("SubtitleFirstPipeline.restart — old driver eviction", () => {
     const settings = { apiBearer: "b", targetLanguage: "vi" } as unknown as import("@/shared/types").StartSettings;
 
     // Call restart — eviction runs synchronously at the top of restart() before
-    // the async caption fetch. We await the full promise; fetchCaptions returns
-    // null so restart returns {ok:false} without starting the rolling renderer.
-    const result = await pipeline.restart(settings, "next-v");
+    // the async caption fetch. fetchCaptions returns null, so restart() now retries
+    // ONCE after AUTONEXT_CAPTION_RETRY_MS (auto-next timing rescue) before giving
+    // up — advance the fake clock so that retry settle resolves, then await.
+    const restartPromise = pipeline.restart(settings, "next-v");
+    await vi.advanceTimersByTimeAsync(900);
+    const result = await restartPromise;
 
     // ── Eviction assertions ────────────────────────────────────────────────
     expect(oldSess.stopFlag).toBe(true);
     expect(oldSess.playbackTimer).toBeNull();
 
-    // sm.session must be a DIFFERENT object (the fresh session built by restart)
+    // After a no-captions failure, restart() now CLEARS the placeholder session it
+    // installed (sm.session=null) instead of leaving an uninitialized
+    // kind="subtitle-first" session behind — that placeholder ("poison") used to
+    // block the auto-next WebRTC fallback (isWebRtcSession→false). The old session
+    // is still evicted (stopFlag/timer asserted above) and is not left as sm.session.
     expect(sm.session).not.toBe(oldSess);
-    expect(sm.session?.kind).toBe("subtitle-first");
+    expect(sm.session).toBeNull();
 
     // restart returned ok:false because fetchCaptions returned null (no captions)
     expect(result.ok).toBe(false);

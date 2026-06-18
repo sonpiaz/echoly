@@ -20,6 +20,7 @@ import { decideApiMode } from "@/lib/api-mode";
 import { getYtCaptionCache } from "@/platforms/youtube/caption-cache";
 import { hydrateSignedIn, scheduleHydrateSignedIn } from "./hydrate-signed-in";
 import type { SettingsClient } from "./settings-client";
+import { navStopOnClaim } from "./nav-stop";
 
 export interface RouterDeps {
   store: Store;
@@ -331,6 +332,18 @@ export function routeMessage(
       signedIn: !!deps.store.state.signedInUser,
       tier: deps.store.state.tier,
     });
+    return false;
+  }
+
+  // Content NavigationWatcher CLAIMS a watch→watch SPA nav it is handling in-place
+  // (continueOnNewVideo) → tell nav-stop to NOT tear the session down on its
+  // (often spurious status:"loading") tabs.onUpdated. The two-authority handshake:
+  // only the SURVIVING content script can send this, so it is also proof the
+  // document was not reloaded.
+  if (isFromContent(sender) && message.type === "CONTENT_NAV_CLAIM") {
+    const tabId = sender.tab?.id;
+    if (tabId != null) navStopOnClaim(tabId, deps.store);
+    sendResponse({ ok: true });
     return false;
   }
 

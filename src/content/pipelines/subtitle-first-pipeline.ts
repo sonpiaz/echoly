@@ -66,6 +66,14 @@ const SUBFIRST_RENDER_TICK_MS = 350;
 // over so we never freeze forever.
 const SUBFIRST_BUFFER_WAIT_MAX_MS = 8000;
 
+// Auto-next (restart) caption-acquisition retry settle. restart() fires DURING the
+// platform's lecture-load churn (Udemy/Shaka destroys+recreates the <video> and the
+// taking-page DOM remounts), so the lecture/caption asset can be momentarily
+// unavailable on the first attempt — unlike a manual Start, which runs after the
+// lecture has settled (that is why stop+start works where auto-next does not). One
+// short, bounded retry lets the CC path succeed instead of falling to a dead-end.
+const AUTONEXT_CAPTION_RETRY_MS = 800;
+
 export class SubtitleFirstPipeline {
   constructor(private readonly app: ContentApp) {}
 
@@ -214,6 +222,53 @@ export class SubtitleFirstPipeline {
       }
     }
 
+    // Fresh-start timing rescue (mirrors restart()'s retry). A fresh start() right
+    // after Udemy auto-advances to the next lecture (autoGoToNext → background
+    // hard-nav stop → continuation-intent re-start) lands mid Shaka/lecture-load:
+    // the api-2.0 caption asset / taking-page DOM isn't ready, so the FIRST attempt
+    // comes back empty even though the lecture HAS captions. Without a retry, start()
+    // falls to the WebRTC/DRM dead-end (a silent rt_ session — exactly the
+    // next-lecture-no-dub bug). Retry the WHOLE acquisition ONCE after a short
+    // settle, re-checking supersession, so CC succeeds instead.
+    if (
+      !captionResult?.captions.length &&
+      !(sm.isSessionStale(token) || newSession.stopFlag)
+    ) {
+      console.info("[start] captions empty on first attempt, retrying after settle", { videoId });
+      await new Promise((r) => setTimeout(r, AUTONEXT_CAPTION_RETRY_MS));
+      if (!(sm.isSessionStale(token) || newSession.stopFlag)) {
+        const retryPreferLang =
+          sm.settings.sourceLanguage && sm.settings.sourceLanguage !== "auto"
+            ? sm.settings.sourceLanguage
+            : undefined;
+        try {
+          captionResult = await adapter.fetchCaptions({
+            videoId,
+            preferLang: retryPreferLang,
+            avoidLang: sm.settings.targetLanguage,
+            signal: abortController.signal,
+          });
+        } catch {
+          captionResult = null;
+        }
+        if (!captionResult?.captions.length) {
+          const html5Retry = await fetchHtml5TextTrackCaptions(video, {
+            preferLang: retryPreferLang,
+            signal: abortController.signal,
+          });
+          if (html5Retry?.captions.length) {
+            captionResult = html5Retry;
+          }
+        }
+      }
+    }
+
+    if (sm.isSessionStale(token) || newSession.stopFlag) {
+      this.#teardownAudio(newSession);
+      restorePlay();
+      return { ok: false, error: "Cancelled." };
+    }
+
     if (!captionResult?.captions.length) {
       this.#teardownAudio(newSession);
       sm.session = null;
@@ -222,16 +277,35 @@ export class SubtitleFirstPipeline {
       // would double-increment and stale out the session token from nextToken().
       overlay.removeOverlay();
 
-      // Branch on audioCapture capability:
-      // - true  (YouTube, Coursera): fall back to WebRTC Standard audio capture.
-      // - false (Udemy DRM): cannot capture audio — show explicit "unsupported" toast.
-      if (adapter.capabilities.audioCapture) {
+      // Branch on whether audio can be captured for THIS video:
+      // - YouTube/Coursera/Generic: static capabilities.audioCapture (true).
+      // - Udemy: canCaptureAudioNow(video) probes per-lecture (DRM vs non-DRM)
+      //   so a non-DRM lecture with no captions still gets the audio→STT→TTS
+      //   fallback instead of an immediate "unsupported" toast.
+      const canCaptureAudio =
+        adapter.canCaptureAudioNow?.(video) ?? adapter.capabilities.audioCapture;
+      if (canCaptureAudio) {
+        // Release the start-time `system-buffer` pause BEFORE handing off to the
+        // live audio→STT→TTS path. Unconditional (NOT the wasPlaying-gated
+        // restorePlay()): if Start was pressed while the video was paused,
+        // restorePlay() no-ops and `system-buffer` stays stuck on the lifecycle
+        // reason stack forever — and startWebRtcStandard's forceWebRtcStandard path
+        // skips its own SF6 pause/resume, so nothing else releases it. The stuck
+        // reason keeps the source <video> paused (effectivePaused excludes
+        // system-buffer, so it's invisible), so captureStream() yields a silent
+        // track and the server's PCM window never fills — the 55s no-PCM stall.
+        // resume() is idempotent; the no-CC dub is live-style so the controller must
+        // hold no residual pause (captureWithRetry's nudgePlay drives the brief play
+        // needed to acquire the track).
+        void this.app.lifecycle.resume("system-buffer");
         const result = await this.app.startWebRtcStandard(incomingSettings);
         if (result.ok) {
           overlay.showToast(TOAST_NO_CC_FALLBACK, 5000);
         } else {
           overlay.showToast(result.error ?? "Couldn't start live dubbing", 6000);
-          restorePlay();
+          // No restorePlay() here: system-buffer is already released above, and on
+          // failure the source video should keep playing — a frozen video would be
+          // wrong for a live-dub attempt that simply couldn't reach the server.
         }
         return result;
       } else {
@@ -446,6 +520,11 @@ export class SubtitleFirstPipeline {
   async restart(
     settings: StartSettings,
     newVideoId: string,
+    // The <video> element the auto-next ready-poll already validated
+    // (readyState>=3 && currentTime>0 && !ad). Threaded in so restart() does NOT
+    // re-query findVideo() mid-Shaka-recreate (which can return null/a stale,
+    // detached element with a bogus currentTime). Used iff still `isConnected`.
+    knownVideo?: HTMLVideoElement,
   ): Promise<{ ok: boolean; error?: string }> {
     const { sm } = this.app;
     const adapter = this.app.adapter;
@@ -566,23 +645,53 @@ export class SubtitleFirstPipeline {
     if (sm.isSessionStale(token)) return { ok: false, error: "Cancelled." };
 
     // ── Fetch captions for the new video ─────────────────────────────────────
-    const video = adapter.findVideo() ?? this.app.capture.findVideo();
+    // Prefer the auto-next-validated element (knownVideo) while it is still in the
+    // DOM; only re-query if it has been detached (Shaka recreated it again) — this
+    // closes the transient null/stale-element window that made restart() return
+    // "No playable video" or anchor #firstPlayableCueAt at a bogus currentTime.
+    const video =
+      (knownVideo?.isConnected ? knownVideo : null) ??
+      adapter.findVideo() ??
+      this.app.capture.findVideo();
     if (!video) {
-      sm.session = null;
+      console.info("[auto-next] restart failed", { step: "no-video", newVideoId });
+      // Identity-guarded (consistent with the other failure exits): never null a
+      // successor generation's session if a rapid second restart() already swapped
+      // sm.session between the line-595 install and here.
+      if (sm.session === newSession) sm.session = null;
       return { ok: false, error: "No playable video on this page." };
     }
     // The controller owns video.pause()/play() — point it at the new video so
     // the restart system-buffer pause/release below routes through it.
     this.app.lifecycle.setVideo(video);
 
+    // Re-apply the user's volume config to the NEW element. On auto-next the
+    // platform (Udemy/Shaka) recreates the <video>, which starts at DEFAULT full
+    // volume — so the user's reduced original-audio level (and the dub-voice gain)
+    // were lost across a lecture change. Mirrors webrtc.continueOnNewVideo
+    // (webrtc-pipeline.ts) — restart() was the only auto-next path missing it.
+    // bindVolumeDriftGuard snaps the original volume back if the player re-applies
+    // its own. sm.session === newSession here, so applyVolumes finds the dub
+    // outputGain; capture.videoEl is pointed at the new element first.
+    this.app.capture.videoEl = video;
+    this.app.capture.bindVolumeDriftGuard(video);
+    this.app.capture.applyVolumes(settings.originalVolume, settings.voiceVolume);
+
     // ── Pause/render/resume: mirror start() to stabilise currentTime ─────────
     // The controller's system-buffer pause sets its synchronous #selfIssued flag
     // BEFORE video.pause() so the DOM "pause" event no-ops the onPause handler
     // (replaces the old _systemPaused-set-before-pause invariant).
     const wasPlaying = !video.paused;
-    // Helper used by all early-exit paths that happen after the pause.
+    // Helper used by all early-exit paths that happen after the pause. It must
+    // ALWAYS release the `system-buffer` reason — if the source video was already
+    // paused (wasPlaying=false; e.g. paused-then-SPA-navigated), a plain resume()
+    // would no-op and leave `system-buffer` STUCK on the lifecycle reason stack,
+    // re-freezing the video on every controller tick (effectivePaused excludes
+    // system-buffer, so it stays invisible). So: resume (play) when it was playing,
+    // else dropReason (release without forcing play — preserve the user's pause).
     const restorePlay = () => {
       if (wasPlaying) void this.app.lifecycle.resume("system-buffer");
+      else this.app.lifecycle.dropReason("system-buffer");
     };
     this.app.lifecycle.pause("system-buffer");
 
@@ -628,7 +737,63 @@ export class SubtitleFirstPipeline {
       }
     }
 
+    // Auto-next timing rescue: the first attempt can land mid lecture-load churn
+    // (Shaka recreating the element, the api-2.0 lecture/caption asset not yet
+    // ready) and come back empty even though the lecture HAS captions — which is
+    // exactly why a manual stop+start (run after the lecture settles) works. Retry
+    // the WHOLE acquisition (adapter API + HTML5 <track> fallback) ONCE after a
+    // short settle, re-querying the element and re-checking supersession.
+    if (
+      !captionResult?.captions.length &&
+      !(sm.isSessionStale(token) || newSession.stopFlag)
+    ) {
+      console.info("[auto-next] restart: captions empty on first attempt, retrying after settle", {
+        newVideoId,
+      });
+      await new Promise((r) => setTimeout(r, AUTONEXT_CAPTION_RETRY_MS));
+      if (!(sm.isSessionStale(token) || newSession.stopFlag)) {
+        const retryVideo =
+          (knownVideo?.isConnected ? knownVideo : null) ??
+          adapter.findVideo() ??
+          video;
+        const retryPreferLang =
+          settings.sourceLanguage && settings.sourceLanguage !== "auto"
+            ? settings.sourceLanguage
+            : undefined;
+        try {
+          captionResult = await adapter.fetchCaptions({
+            videoId: newVideoId,
+            preferLang: retryPreferLang,
+            avoidLang: settings.targetLanguage,
+            signal: abortController.signal,
+          });
+        } catch {
+          captionResult = null;
+        }
+        if (!captionResult?.captions.length) {
+          const html5Retry = await fetchHtml5TextTrackCaptions(retryVideo, {
+            preferLang: retryPreferLang,
+            signal: abortController.signal,
+          });
+          if (html5Retry?.captions.length) {
+            captionResult = html5Retry;
+          }
+        }
+      }
+    }
+
+    if (sm.isSessionStale(token) || newSession.stopFlag) {
+      restorePlay();
+      return { ok: false, error: "Cancelled." };
+    }
+
     if (!captionResult?.captions.length) {
+      console.info("[auto-next] restart failed", { step: "no-captions", newVideoId });
+      // Clear the pre-swapped placeholder session (line ~589 set sm.session =
+      // newSession before the fetch) so a genuine no-caption failure does not
+      // leave an uninitialized kind="subtitle-first" session in sm.session.
+      // Identity-guarded so a superseding generation's session is never clobbered.
+      if (sm.session === newSession) sm.session = null;
       restorePlay();
       return { ok: false, error: "No captions available for this video." };
     }
@@ -652,8 +817,13 @@ export class SubtitleFirstPipeline {
     // (auto-next continuation: no toast, just don't leave a silent session).
     const firstPlayable = this.#firstPlayableCueAt(newSession, currentTime);
     if (!firstPlayable) {
+      console.info("[auto-next] restart failed", {
+        step: "no-playable-cue",
+        newVideoId,
+        currentTime,
+      });
       restorePlay();
-      sm.session = null;
+      if (sm.session === newSession) sm.session = null;
       return { ok: false, error: "No captions remaining at this position." };
     }
     const firstWaveStart = firstPlayable.index;
@@ -1232,7 +1402,17 @@ export class SubtitleFirstPipeline {
    */
   #playbackTick(s: SubtitleFirstSession): void {
     const { sm } = this.app;
-    if (sm.session !== s || s.stopFlag) return;
+    if (sm.session !== s || s.stopFlag) {
+      // Superseded/stopped session — SELF-TERMINATE this driver's interval so a
+      // timer leaked by a stop->start churn (set on a session that was then
+      // superseded mid-restart) can't keep firing every 250ms forever (RC5,
+      // single-driver invariant). Covers every leaked-timer path in one place.
+      if (s.playbackTimer) {
+        clearInterval(s.playbackTimer);
+        s.playbackTimer = null;
+      }
+      return;
+    }
     const video = this.app.capture.videoEl;
     if (!video) return;
     if (!s.audioCtx || s.audioCtx.state === "closed") return;
@@ -1521,6 +1701,11 @@ export class SubtitleFirstPipeline {
    *  on-screen subtitle matches the voice exactly (driven by playback, not a timer). */
   #showCue(s: SubtitleFirstSession, idx: number): void {
     const { sm, overlay } = this.app;
+    // Liveness guard (RC5): never let a superseded/stopped session's driver write
+    // the overlay — across a stop->start churn a stale driver could otherwise leave
+    // the subtitle frozen on a previous line while the live session moved on
+    // ("sub k thay đổi nữa"). The live session is the only one allowed to paint.
+    if (sm.session !== s || s.stopFlag) return;
     const translated = s.translations[idx];
     const source = s.sentences[idx]?.text;
     if (translated) {

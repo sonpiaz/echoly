@@ -86,6 +86,9 @@ function makeSettings(overrides: Partial<StartSettings> = {}): StartSettings {
 function makeAdapter(
   audioCapture: boolean,
   videoId: string | null = "test-video-id",
+  // Optional per-lecture probe (Udemy). When provided, the pipeline must prefer
+  // it over the static `audioCapture` flag at the no-caption fallback branch.
+  canCaptureAudioNow?: (video: HTMLVideoElement) => boolean,
 ): PlatformAdapter {
   const capabilities: PlatformCapabilities = {
     audioCapture,
@@ -108,6 +111,7 @@ function makeAdapter(
     // No captions available → triggers the no-caption branch
     fetchCaptions: vi.fn().mockResolvedValue(null),
     readLiveCaptionText: () => null,
+    ...(canCaptureAudioNow ? { canCaptureAudioNow } : {}),
   } as PlatformAdapter;
 }
 
@@ -295,6 +299,53 @@ describe("SubtitleFirstPipeline — no-caption routing", () => {
     });
   });
 
+  // ─── Case C: canCaptureAudioNow() probe overrides the static audioCapture ──────
+  //
+  // Udemy declares capabilities.audioCapture === false (generally DRM) but
+  // refines it per-lecture via canCaptureAudioNow(video). The pipeline must use
+  // the probe at the no-caption branch:
+  //   probe → true  (non-DRM lecture): fall back to startWebRtcStandard.
+  //   probe → false (DRM lecture):     stopSession(NO_CC_UNSUPPORTED).
+
+  describe("Case C: canCaptureAudioNow probe (Udemy per-lecture)", () => {
+    it("probe===true overrides audioCapture:false → calls startWebRtcStandard", async () => {
+      // capabilities.audioCapture is false, but the probe says THIS lecture is
+      // non-DRM → the audio→STT→TTS fallback must be attempted.
+      const adapter = makeAdapter(false, "udemy-nondrm-1", () => true);
+      const app = makeApp(adapter);
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      await pipeline.start(makeSettings());
+
+      expect(app.startWebRtcStandard).toHaveBeenCalledOnce();
+      expect(app.stopSession).not.toHaveBeenCalledWith(STOP_REASON.NO_CC_UNSUPPORTED);
+    });
+
+    it("probe===false (DRM) → NO_CC_UNSUPPORTED, never startWebRtcStandard", async () => {
+      const adapter = makeAdapter(false, "udemy-drm-1", () => false);
+      const app = makeApp(adapter);
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      const result = await pipeline.start(makeSettings());
+
+      expect(app.startWebRtcStandard).not.toHaveBeenCalled();
+      expect(app.stopSession).toHaveBeenCalledWith(STOP_REASON.NO_CC_UNSUPPORTED);
+      expect(result.ok).toBe(false);
+    });
+
+    it("probe receives the page <video> element", async () => {
+      const probe = vi.fn().mockReturnValue(true);
+      const adapter = makeAdapter(false, "udemy-probe-arg", probe);
+      const app = makeApp(adapter);
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      await pipeline.start(makeSettings());
+
+      expect(probe).toHaveBeenCalled();
+      expect(probe.mock.calls[0]![0]).toBeInstanceOf(HTMLVideoElement);
+    });
+  });
+
   // ─── Defect-fix tests (Agent-3: redundant-token-bump + silent-capture-failure) ─
 
   describe("no-CC fallback defect fixes", () => {
@@ -362,6 +413,67 @@ describe("SubtitleFirstPipeline — no-caption routing", () => {
         "@/shared/product-copy"
       );
       expect(app.overlay.showToast).toHaveBeenCalledWith(FALLBACK_MSG, 5000);
+    });
+  });
+
+  // ─── Case D: no-CC audio fallback releases the system-buffer pause ────────────
+  //
+  // Regression for the 55s no-PCM deadlock. start() pauses the source video with
+  // lifecycle.pause("system-buffer"); the no-CC audio fallback handed off to
+  // startWebRtcStandard WITHOUT releasing it, and the old restorePlay() was gated
+  // on wasPlaying so it no-op'd when Start was pressed while the video was paused.
+  // A stuck system-buffer keeps the video paused → captureStream() is silent → the
+  // server PCM window never fills (first_pcm_fill_ms ≈ 55s). The fix releases the
+  // reason UNCONDITIONALLY before the handoff. jsdom's <video> defaults to paused,
+  // so these tests exercise exactly the started-paused (wasPlaying=false) case the
+  // old code left deadlocked.
+  describe("Case D: no-CC audio fallback releases system-buffer (deadlock fix)", () => {
+    it("does not leave system-buffer on the lifecycle stack (started paused)", async () => {
+      const adapter = makeAdapter(true, "vid-deadlock");
+      const app = makeApp(adapter);
+      // Precondition: the source video is paused → wasPlaying=false (deadlock-prone).
+      expect((document.querySelector("video") as HTMLVideoElement).paused).toBe(true);
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      const result = await pipeline.start(makeSettings());
+
+      expect(app.startWebRtcStandard).toHaveBeenCalledOnce();
+      expect(result.ok).toBe(true);
+      // Load-bearing: the start-time system-buffer pause must be gone, so the source
+      // video is free to play and feed the live audio capture. (Old code: stuck true.)
+      expect(app.lifecycle.isPausedFor("system-buffer")).toBe(false);
+    });
+
+    it("releases system-buffer BEFORE calling startWebRtcStandard", async () => {
+      const adapter = makeAdapter(true, "vid-deadlock-order");
+      const app = makeApp(adapter);
+      const resumeSpy = vi.spyOn(app.lifecycle, "resume");
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      await pipeline.start(makeSettings());
+
+      // resume("system-buffer") must have been called …
+      const idx = resumeSpy.mock.calls.findIndex((c) => c[0] === "system-buffer");
+      expect(idx).toBeGreaterThanOrEqual(0);
+      // … and strictly before the startWebRtcStandard handoff.
+      const resumeOrder = resumeSpy.mock.invocationCallOrder[idx]!;
+      const handoffOrder = (app.startWebRtcStandard as ReturnType<typeof vi.fn>).mock
+        .invocationCallOrder[0]!;
+      expect(resumeOrder).toBeLessThan(handoffOrder);
+    });
+
+    it("DRM lecture (probe=false) keeps system-buffer behavior unchanged (no handoff)", async () => {
+      // The unconditional resume lives only on the canCaptureAudio branch, so the
+      // DRM/unsupported path is untouched — it still releases via restorePlay()
+      // semantics and never calls startWebRtcStandard.
+      const adapter = makeAdapter(false, "vid-drm", () => false);
+      const app = makeApp(adapter);
+      const pipeline = new SubtitleFirstPipeline(app as never);
+
+      await pipeline.start(makeSettings());
+
+      expect(app.startWebRtcStandard).not.toHaveBeenCalled();
+      expect(app.stopSession).toHaveBeenCalledWith(STOP_REASON.NO_CC_UNSUPPORTED);
     });
   });
 });
@@ -504,5 +616,161 @@ describe("SubtitleFirstPipeline — B3 HTML5 textTrack fallback", () => {
     // Should NOT return "No captions available for this video."
     // (It may fail for other jsdom reasons like audio graph, but NOT that specific error)
     expect(result.error).not.toBe("No captions available for this video.");
+  });
+});
+
+// ─── Udemy auto-next CC no-dub fix ────────────────────────────────────────────
+//
+// Bug: on Udemy, CC dub works via start() but the auto-next restart() path
+// produced no dub — restart() runs DURING Udemy/Shaka's lecture-load churn (the
+// <video> is destroyed+recreated, the API/DOM not yet ready), where a manual
+// start() (run after the lecture settles) succeeds. These tests exercise the three
+// robustness fixes: (A) thread the auto-next-validated element so a transient null
+// findVideo() doesn't fail; (B) retry the caption fetch once so a not-ready lecture
+// still dubs via CC; (C) clear the placeholder sm.session on a genuine failure.
+describe("SubtitleFirstPipeline — restart() auto-next robustness (Udemy CC no-dub fix)", () => {
+  let ctxShim: ReturnType<typeof makeAudioContextShim>;
+
+  beforeEach(() => {
+    // Plain <video> with EMPTY textTracks → the HTML5 <track> fallback returns
+    // null, so the adapter caption path (and its retry) is what is under test.
+    document.body.innerHTML = '<video style="width:640px;height:360px"></video>';
+    const v = document.querySelector("video")!;
+    Object.defineProperty(v, "getBoundingClientRect", {
+      value: () => ({ width: 640, height: 360, left: 0, top: 0, right: 640, bottom: 360 }),
+      configurable: true,
+    });
+    ctxShim = makeAudioContextShim();
+    (window as { AudioContext: unknown }).AudioContext = vi.fn().mockReturnValue(ctxShim);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  function seedPriorSession(app: ReturnType<typeof makeApp>): void {
+    app.sm.session = {
+      kind: "subtitle-first",
+      token: 0,
+      stopFlag: false,
+      playbackTimer: null,
+      currentSource: null,
+      abortController: new AbortController(),
+      audioCtx: ctxShim,
+      outputGain: ctxShim.createGain(),
+    } as never;
+  }
+
+  it("FIX A: uses the passed knownVideo when findVideo() returns null mid Shaka-recreate", async () => {
+    const adapter = makeAdapter(true, "udemy-recreate");
+    // Simulate Shaka mid-recreate: the adapter's own findVideo() returns null.
+    (adapter as { findVideo: () => HTMLVideoElement | null }).findVideo = () => null;
+    (adapter.fetchCaptions as ReturnType<typeof vi.fn>).mockResolvedValue({
+      captions: [{ start: 1, end: 4, text: "hello" }],
+      sourceLang: "en",
+    });
+    const app = makeApp(adapter);
+    const echolyApi = await import("@/lib/echoly-api");
+    vi.spyOn(echolyApi, "renderSubtitleDubStream").mockImplementation(async function* () {});
+    const pipeline = new SubtitleFirstPipeline(app as never);
+    seedPriorSession(app);
+
+    const known = document.querySelector("video") as HTMLVideoElement;
+    const result = await pipeline.restart(
+      makeSettings({ originalVolume: 7, voiceVolume: 80 }),
+      "udemy-recreate",
+      known,
+    );
+
+    // The connected knownVideo rescued it — restart did NOT fail on a null findVideo().
+    expect(result.error).not.toBe("No playable video on this page.");
+    // And the user's volume config is RE-APPLIED to the new (Shaka-recreated) video
+    // on auto-next — restart() was the only auto-next path that used to skip this.
+    expect(app.capture.applyVolumes).toHaveBeenCalledWith(7, 80);
+    expect(app.capture.bindVolumeDriftGuard).toHaveBeenCalledWith(known);
+  });
+
+  it("FIX B: retries the caption fetch once and dubs when the 2nd attempt returns captions", async () => {
+    const adapter = makeAdapter(true, "udemy-retry");
+    // First attempt empty (lecture not ready yet), second attempt has captions.
+    (adapter.fetchCaptions as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ captions: [{ start: 1, end: 4, text: "hi" }], sourceLang: "en" });
+    const app = makeApp(adapter);
+    const echolyApi = await import("@/lib/echoly-api");
+    vi.spyOn(echolyApi, "renderSubtitleDubStream").mockImplementation(async function* () {});
+    const pipeline = new SubtitleFirstPipeline(app as never);
+    seedPriorSession(app);
+
+    const known = document.querySelector("video") as HTMLVideoElement;
+    const result = await pipeline.restart(makeSettings(), "udemy-retry", known);
+
+    // Retried (>=2 fetchCaptions calls) and did NOT give up with "No captions available".
+    expect(
+      (adapter.fetchCaptions as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(result.error).not.toBe("No captions available for this video.");
+  });
+
+  it("FIX C: clears sm.session (no poison) when captions are genuinely absent after retry", async () => {
+    const adapter = makeAdapter(true, "udemy-nocc");
+    (adapter.fetchCaptions as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    const app = makeApp(adapter);
+    const pipeline = new SubtitleFirstPipeline(app as never);
+    seedPriorSession(app);
+
+    const known = document.querySelector("video") as HTMLVideoElement;
+    const result = await pipeline.restart(makeSettings(), "udemy-nocc", known);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("No captions available for this video.");
+    // The placeholder kind="subtitle-first" session restart() installed is cleared,
+    // so the auto-next fallback is not blocked by a poisoned sm.session.
+    expect(app.sm.session).toBeNull();
+  });
+});
+
+// ─── start() fresh-start caption retry (Udemy next-lecture fix) ───────────────
+//
+// Bug: on Udemy, when a lecture auto-advances, the background hard-nav stop tears
+// the session down and a FRESH start() re-dubs the next lecture. start() runs mid
+// Shaka/lecture-load (caption API not ready) → first fetch empty → it fell to the
+// WebRTC/DRM dead-end (silent rt_). start() now retries the caption fetch ONCE
+// (the same rescue restart() already had) so CC succeeds instead of going WebRTC.
+describe("SubtitleFirstPipeline — start() fresh-start caption retry (Udemy next-lecture fix)", () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<video style="width:640px;height:360px"></video>';
+    const v = document.querySelector("video")!;
+    Object.defineProperty(v, "getBoundingClientRect", {
+      value: () => ({ width: 640, height: 360, left: 0, top: 0, right: 640, bottom: 360 }),
+      configurable: true,
+    });
+    (window as { AudioContext: unknown }).AudioContext = vi
+      .fn()
+      .mockReturnValue(makeAudioContextShim());
+  });
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  it("retries caption fetch once and dubs via CC when the 2nd attempt returns captions (no WebRTC fallback)", async () => {
+    const adapter = makeAdapter(true, "udemy-start-retry");
+    (adapter.fetchCaptions as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ captions: [{ start: 1, end: 4, text: "hi" }], sourceLang: "en" });
+    const app = makeApp(adapter);
+    const echolyApi = await import("@/lib/echoly-api");
+    vi.spyOn(echolyApi, "renderSubtitleDubStream").mockImplementation(async function* () {});
+    const pipeline = new SubtitleFirstPipeline(app as never);
+
+    await pipeline.start(makeSettings());
+
+    // Retried (>=2 fetchCaptions calls) and did NOT fall to the WebRTC dead-end.
+    expect(
+      (adapter.fetchCaptions as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(app.startWebRtcStandard).not.toHaveBeenCalled();
   });
 });

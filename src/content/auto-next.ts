@@ -181,14 +181,23 @@ export async function continueOnNewVideo(
       overlay.setStatusText(STATUS_LOADING_NEXT);
       sm.emitState({ running: true, paused: false, status: STATUS_LOADING_NEXT });
 
-      const r = await app.subtitleFirst.restart(settings, newVideoId);
+      // Thread the ready-poll-validated element so restart() does not re-query
+      // findVideo() during Shaka's lecture-recreate window (which returned null /
+      // a stale element → the no-dub-on-next-lecture bug).
+      const r = await app.subtitleFirst.restart(settings, newVideoId, video);
       console.info("[auto-next] subtitleFirst.restart result", r);
 
       if (myGen !== activeGen) return;
 
       if (!r.ok) {
         // No captions for the new video — try to fall back to Standard-WebRTC.
-        if (app.adapter.capabilities.audioCapture) {
+        // Probe per-lecture (Udemy: non-DRM next video can still capture audio).
+        const probeVideo = video ?? app.capture.videoEl ?? app.adapter.findVideo();
+        const canCaptureAudio = probeVideo
+          ? (app.adapter.canCaptureAudioNow?.(probeVideo) ??
+             app.adapter.capabilities.audioCapture)
+          : app.adapter.capabilities.audioCapture;
+        if (canCaptureAudio) {
           const r2 = await app.webrtc.continueOnNewVideo({ ...settings });
           if (myGen !== activeGen) return;
           if (!r2.ok) {

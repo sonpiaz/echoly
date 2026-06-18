@@ -220,6 +220,23 @@ export interface PlatformAdapter {
   suppressNativeCaptions?(): () => void;
 
   /**
+   * Per-session refinement of `capabilities.audioCapture` for platforms where
+   * tab-audio capture viability depends on the SPECIFIC media being played, not
+   * the platform as a whole (e.g. Udemy: paid Widevine-DRM lectures block
+   * `captureStream` while free previews / non-DRM lectures do not).
+   *
+   * Returns `true` when audio capture should be ATTEMPTED for the given `<video>`
+   * right now, `false` to refuse it. Adapters that omit this fall back to the
+   * static `capabilities.audioCapture` flag — i.e. callers use
+   * `adapter.canCaptureAudioNow?.(video) ?? adapter.capabilities.audioCapture`.
+   *
+   * This is a refinement hook, NOT a capabilities mutation: `capabilities` stays
+   * immutable (read-once). The runtime decision lives only at the no-caption
+   * fallback branch, so it never affects pipeline selection.
+   */
+  canCaptureAudioNow?(video: HTMLVideoElement): boolean;
+
+  /**
    * Returns `true` when `ev` should be ignored by the playback-event handler.
    * Used to filter spurious `pause` events fired during ad overlays (YouTube)
    * so the dub session is not torn down mid-ad.
