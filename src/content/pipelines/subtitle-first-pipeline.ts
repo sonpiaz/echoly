@@ -19,6 +19,7 @@ import {
   clearVideoCache,
 } from "@/content/render-cache";
 import type { StartSettings } from "@/shared/types";
+import type { CaptionFetchResult } from "@/shared/platform-ports";
 import {
   getPrefetchedCaptions,
   clearPrefetchedCaptions,
@@ -76,6 +77,106 @@ const AUTONEXT_CAPTION_RETRY_MS = 800;
 
 export class SubtitleFirstPipeline {
   constructor(private readonly app: ContentApp) {}
+
+  /**
+   * The SINGLE shared caption-acquisition path for both start() and restart() — was
+   * ~50 lines duplicated in each (RC3). That divergence is exactly how per-path fixes
+   * went missing on one side (e.g. the auto-next volume re-apply); centralising it
+   * means a caption/readiness fix lands once.
+   *
+   * Order: consume the YouTube eager prefetch → adapter.fetchCaptions → HTML5 <track>
+   * fallback → ONE settle-retry of the whole acquisition (the platform can be mid
+   * lecture-load churn so the first attempt returns empty even though the lecture HAS
+   * captions; a manual Start works because it runs after the lecture settles).
+   *
+   * Supersession is checked between steps and short-circuits the remaining work, but
+   * the CANCEL action stays with the CALLER (teardown differs: start tears down its
+   * fresh AudioContext, restart reuses it) — this returns whatever it has and the
+   * caller re-checks isSessionStale/stopFlag and cancels appropriately.
+   *
+   * reAcquireVideo: restart re-queries the <video> on the retry (Shaka recreates the
+   * element mid lecture-load); start reuses the same element (pass undefined).
+   */
+  async #acquireCaptions(opts: {
+    video: HTMLVideoElement;
+    videoId: string;
+    session: SubtitleFirstSession;
+    token: number;
+    settings: StartSettings;
+    signal: AbortSignal;
+    logTag: string;
+    reAcquireVideo?: () => HTMLVideoElement;
+  }): Promise<CaptionFetchResult | null> {
+    const { video, videoId, session, token, settings, signal, logTag, reAcquireVideo } = opts;
+    const sm = this.app.sm;
+    const adapter = this.app.adapter;
+    // Source-language preference (NOT the target/output language — Fix D). "auto" ⇒
+    // let the fetch/HTML5 fallback pick the first available track.
+    const srcPref =
+      settings.sourceLanguage && settings.sourceLanguage !== "auto"
+        ? settings.sourceLanguage
+        : undefined;
+
+    let captionResult: CaptionFetchResult | null;
+    // YouTube eager prefetch (populated by NavigationWatcher when the video was
+    // detected without an active session). One-shot: clear after reading so stale
+    // data is never re-used on a subsequent (re)start.
+    const prefetched = adapter.id === "youtube" ? getPrefetchedCaptions(videoId) : null;
+    if (prefetched) {
+      clearPrefetchedCaptions(videoId);
+      captionResult = prefetched;
+    } else {
+      try {
+        captionResult = await adapter.fetchCaptions({
+          videoId,
+          preferLang: srcPref,
+          avoidLang: settings.targetLanguage,
+          signal,
+        });
+      } catch {
+        captionResult = null;
+      }
+    }
+    if (sm.isSessionStale(token) || session.stopFlag) return captionResult;
+
+    // Pipeline-level HTML5 <track> fallback BEFORE concluding "no captions" — covers
+    // generic sites + any platform shipping standard <track> cues even when the
+    // adapter's fetchCaptions returns null/empty (Udemy, generic).
+    if (!captionResult?.captions.length) {
+      const html5 = await fetchHtml5TextTrackCaptions(video, { preferLang: srcPref, signal });
+      if (html5?.captions.length) captionResult = html5;
+    }
+
+    // Settle-retry: the first attempt can land mid lecture-load churn (Shaka
+    // recreating the element, the api-2.0 caption asset not yet ready) and come back
+    // empty even though the lecture HAS captions. Retry the WHOLE acquisition ONCE
+    // after a short settle, re-querying the element and re-checking supersession.
+    if (!captionResult?.captions.length && !(sm.isSessionStale(token) || session.stopFlag)) {
+      console.info(`${logTag} captions empty on first attempt, retrying after settle`, { videoId });
+      await new Promise((r) => setTimeout(r, AUTONEXT_CAPTION_RETRY_MS));
+      if (!(sm.isSessionStale(token) || session.stopFlag)) {
+        const retryVideo = reAcquireVideo?.() ?? video;
+        try {
+          captionResult = await adapter.fetchCaptions({
+            videoId,
+            preferLang: srcPref,
+            avoidLang: settings.targetLanguage,
+            signal,
+          });
+        } catch {
+          captionResult = null;
+        }
+        if (!captionResult?.captions.length) {
+          const html5Retry = await fetchHtml5TextTrackCaptions(retryVideo, {
+            preferLang: srcPref,
+            signal,
+          });
+          if (html5Retry?.captions.length) captionResult = html5Retry;
+        }
+      }
+    }
+    return captionResult;
+  }
 
   async start(incomingSettings: StartSettings): Promise<{ ok: boolean; error?: string }> {
     const { sm, capture, overlay } = this.app;
@@ -173,95 +274,19 @@ export class SubtitleFirstPipeline {
     // after the first cue renders (the user-visible "frozen video" start window).
     this.app.lifecycle.pause("system-buffer");
 
-    let captionResult;
-    // B4: Consume the eager prefetch result if available (YouTube-only).
-    // The NavigationWatcher populated this cache when the video was detected
-    // without an active session. One-shot: clear after reading so stale data
-    // is never re-used on a subsequent Start.
-    const prefetched = adapter.id === "youtube" ? getPrefetchedCaptions(videoId) : null;
-    if (prefetched) {
-      clearPrefetchedCaptions(videoId);
-      captionResult = prefetched;
-    } else {
-      try {
-        captionResult = await adapter.fetchCaptions({
-          videoId,
-          preferLang: (sm.settings.sourceLanguage && sm.settings.sourceLanguage !== "auto")
-            ? sm.settings.sourceLanguage
-            : undefined,
-          avoidLang: sm.settings.targetLanguage,
-          signal: abortController.signal,
-        });
-      } catch {
-        captionResult = null;
-      }
-    }
-
-    if (sm.isSessionStale(token) || newSession.stopFlag) {
-      this.#teardownAudio(newSession);
-      restorePlay();
-      return { ok: false, error: "Cancelled." };
-    }
-
-    if (!captionResult?.captions.length) {
-      // B3: pipeline-level HTML5 text-track fallback — try the standard mechanism
-      // BEFORE concluding "no captions". Covers generic sites and any platform that
-      // ships standard <track> elements even when the adapter's fetchCaptions returns
-      // null/empty (Udemy, generic). Uses the same abort signal already in scope.
-      const html5 = await fetchHtml5TextTrackCaptions(video, {
-        // Source preference, NOT the target/output language (Fix D). "auto" → let
-        // the fallback pick the first available <track>.
-        preferLang:
-          sm.settings.sourceLanguage && sm.settings.sourceLanguage !== "auto"
-            ? sm.settings.sourceLanguage
-            : undefined,
-        signal: abortController.signal,
-      });
-      if (html5?.captions.length) {
-        captionResult = html5;
-      }
-    }
-
-    // Fresh-start timing rescue (mirrors restart()'s retry). A fresh start() right
-    // after Udemy auto-advances to the next lecture (autoGoToNext → background
-    // hard-nav stop → continuation-intent re-start) lands mid Shaka/lecture-load:
-    // the api-2.0 caption asset / taking-page DOM isn't ready, so the FIRST attempt
-    // comes back empty even though the lecture HAS captions. Without a retry, start()
-    // falls to the WebRTC/DRM dead-end (a silent rt_ session — exactly the
-    // next-lecture-no-dub bug). Retry the WHOLE acquisition ONCE after a short
-    // settle, re-checking supersession, so CC succeeds instead.
-    if (
-      !captionResult?.captions.length &&
-      !(sm.isSessionStale(token) || newSession.stopFlag)
-    ) {
-      console.info("[start] captions empty on first attempt, retrying after settle", { videoId });
-      await new Promise((r) => setTimeout(r, AUTONEXT_CAPTION_RETRY_MS));
-      if (!(sm.isSessionStale(token) || newSession.stopFlag)) {
-        const retryPreferLang =
-          sm.settings.sourceLanguage && sm.settings.sourceLanguage !== "auto"
-            ? sm.settings.sourceLanguage
-            : undefined;
-        try {
-          captionResult = await adapter.fetchCaptions({
-            videoId,
-            preferLang: retryPreferLang,
-            avoidLang: sm.settings.targetLanguage,
-            signal: abortController.signal,
-          });
-        } catch {
-          captionResult = null;
-        }
-        if (!captionResult?.captions.length) {
-          const html5Retry = await fetchHtml5TextTrackCaptions(video, {
-            preferLang: retryPreferLang,
-            signal: abortController.signal,
-          });
-          if (html5Retry?.captions.length) {
-            captionResult = html5Retry;
-          }
-        }
-      }
-    }
+    // Captions via the shared acquisition path (prefetch → fetch → HTML5 → settle
+    // retry). start() reuses the same <video> on the retry (a manual Start runs
+    // after the lecture settles — no Shaka recreation mid-flight, unlike auto-next).
+    // The cancel/teardown stays HERE (start owns a fresh AudioContext to tear down).
+    let captionResult = await this.#acquireCaptions({
+      video,
+      videoId,
+      session: newSession,
+      token,
+      settings: sm.settings,
+      signal: abortController.signal,
+      logTag: "[start]",
+    });
 
     if (sm.isSessionStale(token) || newSession.stopFlag) {
       this.#teardownAudio(newSession);
@@ -695,92 +720,22 @@ export class SubtitleFirstPipeline {
     };
     this.app.lifecycle.pause("system-buffer");
 
-    let captionResult;
-    // B4: Consume the eager prefetch result if available (YouTube-only).
-    const prefetchedRestart = adapter.id === "youtube" ? getPrefetchedCaptions(newVideoId) : null;
-    if (prefetchedRestart) {
-      clearPrefetchedCaptions(newVideoId);
-      captionResult = prefetchedRestart;
-    } else {
-      try {
-        captionResult = await adapter.fetchCaptions({
-          videoId: newVideoId,
-          preferLang: (settings.sourceLanguage && settings.sourceLanguage !== "auto")
-            ? settings.sourceLanguage
-            : undefined,
-          avoidLang: settings.targetLanguage,
-          signal: abortController.signal,
-        });
-      } catch {
-        captionResult = null;
-      }
-    }
-
-    if (sm.isSessionStale(token) || newSession.stopFlag) {
-      restorePlay();
-      return { ok: false, error: "Cancelled." };
-    }
-
-    if (!captionResult?.captions.length) {
-      // B3: pipeline-level HTML5 text-track fallback in restart() — same rescue
-      // as in start() so auto-next videos with <track> elements are not abandoned.
-      const html5 = await fetchHtml5TextTrackCaptions(video, {
-        // Source preference, NOT the target/output language (Fix D).
-        preferLang:
-          settings.sourceLanguage && settings.sourceLanguage !== "auto"
-            ? settings.sourceLanguage
-            : undefined,
-        signal: abortController.signal,
-      });
-      if (html5?.captions.length) {
-        captionResult = html5;
-      }
-    }
-
-    // Auto-next timing rescue: the first attempt can land mid lecture-load churn
-    // (Shaka recreating the element, the api-2.0 lecture/caption asset not yet
-    // ready) and come back empty even though the lecture HAS captions — which is
-    // exactly why a manual stop+start (run after the lecture settles) works. Retry
-    // the WHOLE acquisition (adapter API + HTML5 <track> fallback) ONCE after a
-    // short settle, re-querying the element and re-checking supersession.
-    if (
-      !captionResult?.captions.length &&
-      !(sm.isSessionStale(token) || newSession.stopFlag)
-    ) {
-      console.info("[auto-next] restart: captions empty on first attempt, retrying after settle", {
-        newVideoId,
-      });
-      await new Promise((r) => setTimeout(r, AUTONEXT_CAPTION_RETRY_MS));
-      if (!(sm.isSessionStale(token) || newSession.stopFlag)) {
-        const retryVideo =
-          (knownVideo?.isConnected ? knownVideo : null) ??
-          adapter.findVideo() ??
-          video;
-        const retryPreferLang =
-          settings.sourceLanguage && settings.sourceLanguage !== "auto"
-            ? settings.sourceLanguage
-            : undefined;
-        try {
-          captionResult = await adapter.fetchCaptions({
-            videoId: newVideoId,
-            preferLang: retryPreferLang,
-            avoidLang: settings.targetLanguage,
-            signal: abortController.signal,
-          });
-        } catch {
-          captionResult = null;
-        }
-        if (!captionResult?.captions.length) {
-          const html5Retry = await fetchHtml5TextTrackCaptions(retryVideo, {
-            preferLang: retryPreferLang,
-            signal: abortController.signal,
-          });
-          if (html5Retry?.captions.length) {
-            captionResult = html5Retry;
-          }
-        }
-      }
-    }
+    // Captions via the shared acquisition path (prefetch → fetch → HTML5 → settle
+    // retry). On the retry, re-query the <video> — Shaka recreates the element mid
+    // lecture-load on auto-next, so the first element can be detached. Cancel here is
+    // restorePlay only (restart REUSES the AudioContext, so — unlike start() — it does
+    // NOT tear it down on a supersession cancel).
+    let captionResult = await this.#acquireCaptions({
+      video,
+      videoId: newVideoId,
+      session: newSession,
+      token,
+      settings,
+      signal: abortController.signal,
+      logTag: "[auto-next] restart:",
+      reAcquireVideo: () =>
+        (knownVideo?.isConnected ? knownVideo : null) ?? adapter.findVideo() ?? video,
+    });
 
     if (sm.isSessionStale(token) || newSession.stopFlag) {
       restorePlay();
