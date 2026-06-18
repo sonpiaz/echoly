@@ -1,6 +1,6 @@
 {
   "name": "echoly-extension",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Echoly — AI voice dubbing & translation for video",
   "type": "module",
