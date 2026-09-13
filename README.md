@@ -52,7 +52,16 @@ popup ◄──BACKGROUND_STATE_UPDATE──── background ◄──CONTENT_S
 - **background.js** — single source of truth for `state`. Injects content script via `chrome.scripting.executeScript` if not yet present.
 - **content.js** — captures the YT video element audio, builds the in-page overlay panel, and runs the active pipeline:
   - **Realtime tier**: mints a Kyma ephemeral token, opens P2P WebRTC with OpenAI Realtime.
-  - **Standard tier**: chunks the audio into 5s windows via `MediaRecorder`, re-encodes to WAV client-side, then runs Whisper transcription → Gemini translation → text to speech per chunk through the Kyma gateway. Web Audio scheduling queues the resulting mp3 chunks back-to-back.
+  - **Standard tier**: uses YouTube's caption track when available (batch translate, then text to speech). Without captions, it chunks the audio into 5s windows via `MediaRecorder`, re-encodes to WAV client-side, then runs a combined transcribe-and-translate call plus text to speech per chunk through the Kyma gateway. Web Audio scheduling queues the resulting mp3 chunks back-to-back.
+
+**Runs on [Kyma API](https://kymaapi.com?utm_source=echoly).** One gateway for the Realtime session mint, translation, and text to speech below.
+
+| Task | Model | Kyma API endpoint |
+|------|-------|--------------------|
+| Realtime session mint (bridges to OpenAI Realtime) | `gpt-realtime-translate` | `POST https://api.kymaapi.com/v1/realtime/translations/client_secrets` |
+| Standard: caption translation | [`gemini-2.5-flash`](https://kymaapi.com/models/gemini-2.5-flash?utm_source=echoly) | `POST https://api.kymaapi.com/v1/chat/completions` |
+| Standard: chunked transcribe + translate (no captions) | [`gemini-3-flash-audio`](https://kymaapi.com/models/gemini-3-flash-audio?utm_source=echoly) | `POST https://api.kymaapi.com/v1/audio/understand` |
+| Standard: text to speech (both paths) | [`minimax-speech-turbo`](https://kymaapi.com/models/minimax-speech-turbo?utm_source=echoly) | `POST https://api.kymaapi.com/v1/audio/speech` |
 
 Token-guarded async pattern (`pageToken` captured in closure, checked before any state mutation) keeps stale callbacks from corrupting newer sessions when the user changes settings or stops mid-pipeline. An `AbortController` per Standard session cancels in-flight fetches the moment Stop is clicked, so credits aren't burned on orphaned chunks.
 
