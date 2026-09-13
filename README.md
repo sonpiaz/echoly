@@ -9,7 +9,7 @@
 Chrome MV3 extension that overlays a live AI voice-over onto any YouTube video. Two tiers:
 
 - **Realtime** — WebRTC P2P, sub-second lag, 9 OpenAI voices or auto-clone of the speaker. ~$0.46 / 10 min.
-- **Standard** — chunked pipeline (Whisper → Gemini → MiniMax), ~5s lag, 5 curated multilingual voices. ~$0.25 / 10 min.
+- **Standard** — chunked pipeline (Whisper → Gemini → text to speech), ~5s lag, 5 curated multilingual voices. ~$0.25 / 10 min.
 
 13 target languages. No account, no telemetry, no Echoly-operated server.
 
@@ -52,7 +52,7 @@ popup ◄──BACKGROUND_STATE_UPDATE──── background ◄──CONTENT_S
 - **background.js** — single source of truth for `state`. Injects content script via `chrome.scripting.executeScript` if not yet present.
 - **content.js** — captures the YT video element audio, builds the in-page overlay panel, and runs the active pipeline:
   - **Realtime tier**: mints a Kyma ephemeral token, opens P2P WebRTC with OpenAI Realtime.
-  - **Standard tier**: chunks the audio into 5s windows via `MediaRecorder`, re-encodes to WAV client-side, then runs Whisper transcription → Gemini translation → MiniMax TTS per chunk through the Kyma gateway. Web Audio scheduling queues the resulting mp3 chunks back-to-back.
+  - **Standard tier**: chunks the audio into 5s windows via `MediaRecorder`, re-encodes to WAV client-side, then runs Whisper transcription → Gemini translation → text to speech per chunk through the Kyma gateway. Web Audio scheduling queues the resulting mp3 chunks back-to-back.
 
 Token-guarded async pattern (`pageToken` captured in closure, checked before any state mutation) keeps stale callbacks from corrupting newer sessions when the user changes settings or stops mid-pipeline. An `AbortController` per Standard session cancels in-flight fetches the moment Stop is clicked, so credits aren't burned on orphaned chunks.
 
@@ -71,7 +71,7 @@ Token-guarded async pattern (`pageToken` captured in closure, checked before any
 
 ## Standard tier voices
 
-Curated from MiniMax's 333-voice catalog. All multilingual — each voice speaks any of the 13 target languages.
+Curated from a 333-voice catalog. All multilingual — each voice speaks any of the 13 target languages.
 
 - **Magnetic Man** — US, male
 - **Captivating Female** — US, female

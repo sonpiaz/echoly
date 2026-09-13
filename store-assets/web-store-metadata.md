@@ -35,7 +35,7 @@ Why Echoly is different
 • No account, no signup. You bring a Kyma API key (kymaapi.com) and the extension runs on your own balance.
 • Two tiers — pick what fits the moment.
    - Realtime · sub-second lag · clones the speaker's voice or picks from 9 OpenAI voices · ~$0.46 per 10 minutes.
-   - Standard · ~5s lag · 5 curated MiniMax voices, all multilingual · ~$0.25 per 10 minutes.
+   - Standard · ~5s lag · 5 curated voices, all multilingual · ~$0.25 per 10 minutes.
 • 13 target languages: English, Vietnamese, Japanese, Korean, Chinese, French, Spanish, German, Portuguese, Hindi, Indonesian, Italian, Russian.
 • Live source captions side-by-side with the dub if you want to follow along.
 • Translation history — last 16 turns, scrollable.
@@ -51,7 +51,7 @@ What it's good for
 • Practicing a language by listening to native English content with a parallel dub.
 
 How it works
-Standard tier sends short audio chunks to Kyma, which routes through Whisper for transcription, Gemini for translation, and MiniMax for the voice. Realtime tier opens a peer-to-peer WebRTC connection to OpenAI Realtime via a Kyma-minted ephemeral token — your audio never round-trips through any other server.
+Standard tier sends short audio chunks to Kyma, which routes through Whisper for transcription, Gemini for translation, and a text-to-speech model for the voice. Realtime tier opens a peer-to-peer WebRTC connection to OpenAI Realtime via a Kyma-minted ephemeral token — your audio never round-trips through any other server.
 
 What it doesn't do
 • No account creation. No telemetry. No analytics. No data stored on Echoly's side — see our privacy policy.

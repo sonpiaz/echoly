@@ -50,7 +50,7 @@ New user installs the extension, opens the popup, sees "paste Kyma key" → has 
 | **Standard mode** | 30 min/mo | Unlimited (FUP 4h/mo) | Unlimited (FUP 12h/mo) |
 | **Realtime mode** | BYOK only | BYOK only | 1h/mo included + BYOK |
 | **Target languages** | Vi + En only | All 13 | All 13 |
-| **MiniMax voices** | 2 (default) | All 5 | All 5 + experimental |
+| **voices** | 2 (default) | All 5 | All 5 + experimental |
 | **Voice cloning (future)** | No | No | Yes (beta) |
 | **BYOK Kyma key** | Yes (unlimited) | Yes (overrides server) | Yes (overrides server) |
 | **Web dashboard** | Read-only usage | Full | Full |

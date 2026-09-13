@@ -11,7 +11,7 @@ Cách dùng: mỗi case có workflow chi tiết, delay đo được/dự kiến,
 
 **Convention số liệu:**
 - *Measured* = Son test thực tế hoặc em đo qua DEBUG_TIMINGS
-- *Inferred* = em đọc code + dùng known latencies của upstream APIs (Kyma p50, OpenAI Realtime cold-start, MiniMax TTS p50). Cần measure để confirm.
+- *Inferred* = em đọc code + dùng known latencies của upstream APIs (Kyma p50, OpenAI Realtime cold-start, TTS p50). Cần measure để confirm.
 
 ---
 
@@ -105,7 +105,7 @@ Live + speed up = double untested.
 |  | · Layer 3: plain URL fallback (often 0 bytes today) | content.js:1408 | 200-600ms |
 | T+2200ms | `regroupToSentences` | content.js:1467 | <50ms |
 | T+2300ms | `translateBatch(0, firstWaveEnd=5)` Gemini chat/completions | content.js:1491 | 1000-2000ms |
-| T+3800ms | `renderWaveTTS(0, 5)` — 5 parallel MiniMax `audio/speech` | content.js:1757 | slowest ~1500-2500ms |
+| T+3800ms | `renderWaveTTS(0, 5)` — 5 parallel `audio/speech` | content.js:1757 | slowest ~1500-2500ms |
 | T+6300ms | `scheduleWindow` + `audioOffset` calc | content.js:1785 | <10ms |
 | T+6400ms | **`video.play()`** | content.js:1739 | 0ms |
 | T+6500-8000ms | First scheduled AudioBufferSource starts (cue.start aligned) | content.js:1796 | depends on first sentence.start |
@@ -113,7 +113,7 @@ Live + speed up = double untested.
 **Known issues:**
 - **SF6** 🔴 Video không tự resume sau wave 1 (Chrome autoplay gesture expired). User phải click play tay → audioOffset stale → dub lệch.
 - **SF7** Dub drift cumulative theo time vì TTS VI dài hơn EN source ~1.6x → queue dồn → delay xa dần
-- **SF4** Tổng 8-10s lag (chủ yếu Gemini + MiniMax round trips)
+- **SF4** Tổng 8-10s lag (chủ yếu Gemini + TTS round trips)
 - **SF3** Volume slider không tác động
 - **H1** Toggle "Show source" → YT caption poll + subtitle-first source ghi đè nhau (flicker)
 - **C1** Đổi ngôn ngữ/giọng mid-session từ popup → fail âm thầm (handover gọi sai code path)
@@ -159,7 +159,7 @@ Live + speed up = double untested.
 | T+2400ms | `MediaRecorder` start | content.js:1067 | — |
 | T+7400ms | MediaRecorder stop (5s chunk) → blob → `webmToWav` | content.js:1071, 965 | ~30ms transcode |
 | T+7500ms | POST `audio/understand` (Vertex Gemini) | content.js:1120 | 1000-2000ms |
-| T+9000ms | POST `audio/speech` (MiniMax) | content.js:1151 | 1500-2500ms |
+| T+9000ms | POST `audio/speech` (TTS) | content.js:1151 | 1500-2500ms |
 | T+10500ms | First AudioBufferSource starts | content.js:1196 | <50ms |
 
 **Critical observation:** subtitle-first **always runs first** trên youtube.com, ngốn 1.8-3s timeout trước khi fallback. Đối với non-CC video, đó là lag waste. Cần early-detect (check `ytInitialPlayerResponse.captions === undefined` → skip Layer 1 polling).
