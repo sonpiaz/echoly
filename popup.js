@@ -50,7 +50,7 @@ const REALTIME_VOICES = [
   { id: "shimmer", name: "Shimmer" },
   { id: "verse", name: "Verse" },
 ];
-// Standard tier — Minimax `speech-02-turbo` voice IDs. Cross-language: each
+// Standard tier — `speech-02-turbo` voice IDs. Cross-language: each
 // voice speaks any of the 13 target languages. Curated from the 333-voice
 // catalog after a Vietnamese listening test (Son, 2026-05-08).
 const STANDARD_VOICES = [
