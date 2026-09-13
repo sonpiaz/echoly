@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS = {
   tier: "realtime",
   targetLanguage: "vi",
   realtimeVoice: "marin",
-  // Standard tier (Minimax chunked pipeline). Default voice is Magnetic Man,
+  // Standard tier (chunked pipeline). Default voice is Magnetic Man,
   // the male voice Son ranked highest in the 2026-05-08 listening test.
   standardVoice: "English_magnetic_voiced_man",
   originalVolume: 18,
