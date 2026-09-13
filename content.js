@@ -43,7 +43,7 @@
     "marin", "alloy", "ash", "ballad", "coral",
     "echo", "sage", "shimmer", "verse",
   ];
-  // Standard tier voices — Minimax `speech-02-turbo` IDs. Cross-language: each
+  // Standard tier voices — `speech-02-turbo` IDs. Cross-language: each
   // voice handles all 13 target languages. Curated 2026-05-08.
   const STANDARD_VOICES = [
     ["English_magnetic_voiced_man",   "Magnetic Man"],
@@ -290,7 +290,7 @@
   }
 
   // Tier-aware voice list rebuild. Realtime exposes 9 OpenAI voices + Auto;
-  // Standard exposes 5 curated Minimax voices. Called from buildOverlay and
+  // Standard exposes 5 curated voices. Called from buildOverlay and
   // on tier change so the dropdown matches the active pipeline.
   function populateVoicePicker(tier) {
     if (!elements.voiceSelect) return;
@@ -1003,7 +1003,7 @@
     applyVolumes(settings.originalVolume, settings.voiceVolume);
   }
 
-  // ───── Standard tier (chunked: whisper → gpt-4o-mini → minimax) ───────────
+  // ───── Standard tier (chunked: whisper → gpt-4o-mini → tts) ───────────
   // Pipeline lives entirely client-side. Each chunk independently calls three
   // Kyma endpoints; chunks process in parallel so chunk N+1 starts recording
   // while chunk N is still in TTS. Playback queue uses Web Audio scheduling
@@ -1303,7 +1303,7 @@
     setTargetText(targetText);
     setOverlayState("live");
 
-    // 3. TTS via Minimax. mp3 returned directly as audio bytes.
+    // 3. TTS. mp3 returned directly as audio bytes.
     //
     // SF7 — adaptive speed to prevent cumulative drift. TTS in verbose
     // target languages (VI ~1.6x English, JA ~1.4x, KO ~1.5x) takes
@@ -1386,7 +1386,7 @@
 
   // ───── Subtitle-first tier (CC fetch → batch translate → batch TTS) ───────
   // Pre-fetches the platform caption track (YouTube only in v0.3), batches the
-  // whole transcript through Gemini in one shot, then renders MiniMax TTS in
+  // whole transcript through Gemini in one shot, then renders TTS in
   // rolling waves and schedules playback at exact caption timestamps. Zero
   // chase delay (cf. Standard chunked pipeline ~5s lag) when CC is available.
   //
@@ -2097,7 +2097,7 @@
     if (settings.tier === "standard") {
       // Subtitle-first path is YouTube-only in v0.3 and quietly falls back to
       // the chunked Standard pipeline when no caption track is available, so
-      // existing users keep the Standard contract (lag tier, MiniMax voice)
+      // existing users keep the Standard contract (lag tier, voice)
       // without needing to flip any setting.
       //
       // Skip subtitle-first for live streams: it pauses the video to render
