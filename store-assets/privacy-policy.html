@@ -53,8 +53,8 @@ footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid rgba(127,127
 <h2>Third-party processors</h2>
 <p>When you press Start, audio you select to translate is sent to one of the following providers under your own Kyma account:</p>
 <ul>
-  <li><strong>Kyma API</strong> (<code>api.kymaapi.com</code>) — gateway. Forwards your audio to the underlying providers below and bills your Kyma balance. See <a href="https://kymaapi.com/privacy" target="_blank" rel="noopener">Kyma's privacy policy</a>.</li>
-  <li><strong>Standard tier</strong> uses, via Kyma: Groq (Whisper transcription), Google (Gemini translation), and MiniMax (text-to-speech).</li>
+  <li><strong>Kyma API</strong> (<code>api.kymaapi.com</code>) — gateway. Forwards your audio to the models below and bills your Kyma balance. See <a href="https://kymaapi.com/privacy" target="_blank" rel="noopener">Kyma's privacy policy</a>.</li>
+  <li><strong>Standard tier</strong> uses, via Kyma: Whisper for transcription, Gemini for translation, and a text-to-speech model. Kyma routes these requests through its own sub-processors, described in <a href="https://kymaapi.com/privacy" target="_blank" rel="noopener">Kyma's privacy policy</a>.</li>
   <li><strong>Realtime tier</strong> uses, via Kyma: OpenAI Realtime (one combined translate-and-speak model). After Kyma mints an ephemeral token, your browser opens a peer-to-peer WebRTC connection directly with <code>api.openai.com</code> for the duration of the session.</li>
 </ul>
 <p>Each provider processes your audio per its own privacy terms. Echoly is not a party to those terms — your Kyma account and your direct relationship with each provider are.</p>
