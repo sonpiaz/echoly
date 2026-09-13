@@ -357,7 +357,7 @@ Ghi nhận từng case anh báo cáo. Phase 1: **chỉ document — chưa fix**.
 **Quyết định pending sau research:**
 - Nếu là model limitation: update copy + show disclaimer
 - Nếu Echoly thiếu param khi mint: thêm vào `client_secrets` body
-- Nếu cần custom voice clone: cân nhắc tier mới dùng MiniMax voice clone API (đã có sẵn ở Standard tier)
+- Nếu cần custom voice clone: cân nhắc tier mới dùng voice clone API (đã có sẵn ở Standard tier)
 
 **Task:** #2 (Research GPT Realtime Auto voice-clone limitation)
 
@@ -401,7 +401,7 @@ Ghi nhận từng case anh báo cáo. Phase 1: **chỉ document — chưa fix**.
 2. `fetchYouTubeCaptions` — Layer 1 intercept timeout 1.8s (`M3`), Layer 2 DOM parse, Layer 3 plain URL (`content.js:1365`)
 3. `regroupToSentences` (`content.js:1467`) — fast
 4. `translateBatch` first wave (~5 sentences, 1 Gemini call ≈ 1-2s)
-5. `renderWaveTTS` first wave — 5 parallel MiniMax TTS calls, each ~1-2s
+5. `renderWaveTTS` first wave — 5 parallel TTS calls, each ~1-2s
 6. `video.play()` (`content.js:1739`)
 7. Schedule playback — first source plays at audioOffset + sentence.start
 
@@ -411,7 +411,7 @@ Ghi nhận từng case anh báo cáo. Phase 1: **chỉ document — chưa fix**.
 - Recorder cycle = 5s full chunk before emit
 - + WAV transcode ~30ms
 - + Gemini audio understand ~1-2s
-- + MiniMax TTS ~1-2s
+- + TTS ~1-2s
 - **Floor: 7-9s** — matches Son's report nếu video không có CC
 
 **Cần verify:**
@@ -449,7 +449,7 @@ Khi user tay click play sau đó, `audioOffset` đã được set tại line 169
 | Approach | Pros | Cons |
 |----------|------|------|
 | **A. Pre-play immediately**, mute video, render wave 1 in background, unmute khi dub bắt đầu | Gesture còn warm, không cần user click | User nghe ~5-10s muted original, mất sync visual lip |
-| **B. Shrink wave 1 to 1-2 sentences** thay vì 5 | Wave 1 xong trong ~3-4s, gesture còn → `play()` thành công | Vẫn risky nếu Gemini/MiniMax slow |
+| **B. Shrink wave 1 to 1-2 sentences** thay vì 5 | Wave 1 xong trong ~3-4s, gesture còn → `play()` thành công | Vẫn risky nếu Gemini/TTS slow |
 | **C. Overlay show "Click to start" button** sau wave 1 ready | Reliable 100%, fresh user gesture | Thêm 1 click friction |
 | **D. Không pause video at all**; render dub song song, schedule at sentence.start + audioOffset; bỏ qua các sentence đã trôi qua trong khi render | Zero pause friction, đúng spirit của "live translation" | User mất ~5-10s đầu của nội dung (intro thường filler) |
 
@@ -475,7 +475,7 @@ const isLive = !isFinite(videoEl.duration);  // live = Infinity / NaN
 1. Click Start → `videoEl.pause()` (đã có sẵn line 1619, giữ nguyên)
 2. `fetchYouTubeCaptions` (~1-2s)
 3. `translateBatch` first wave = **2 sentences thay vì 5** → 1 Gemini call ~1s
-4. `renderWaveTTS` first wave = 2 parallel MiniMax → max ~2s (chứ không phải 5 parallel x 2.5s)
+4. `renderWaveTTS` first wave = 2 parallel TTS → max ~2s (chứ không phải 5 parallel x 2.5s)
 5. **Tổng wave 1 ~3-4s** → vẫn trong gesture window
 6. `videoEl.play()` → thành công vì gesture chưa expired
 7. Background: wave 2+ render tiếp, không block playback
@@ -565,7 +565,7 @@ const ttsBody = {
   input: targetText,
   voice_id: voiceId,
   response_format: "mp3",
-  speed,  // ← pass to Kyma → MiniMax
+  speed,  // ← pass to Kyma
 };
 ```
 
@@ -575,8 +575,8 @@ Translate the spoken English in this audio into ${langName}. Output should be CO
 ```
 
 **Verified (2026-05-19):**
-- ✅ Kyma `/v1/audio/speech` route forward `speed` từ request body → MiniMax provider (`kyma-api/src/routes/multimodal.ts:1089`)
-- ✅ MiniMax speech-02-turbo accepts `speed: 0.5..2.0` (`kyma-api/src/providers/minimax.ts:42, 113`)
+- ✅ Kyma `/v1/audio/speech` forward `speed` từ request body tới model TTS
+- ✅ Model TTS `speech-02-turbo` nhận `speed: 0.5..2.0`
 - ✅ Echoly side chỉ cần thêm 1 field `speed: N` vào TTS body — 0 thay đổi Kyma cần thiết
 
 **Affected cases:** TC-2 (long sessions), TC-4 (long sessions), TC-6 (live + Std nếu support)
